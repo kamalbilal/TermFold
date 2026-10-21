@@ -27,6 +27,7 @@ object Notifier {
 
     const val EXTRA_FOLDER = "com.termfold.app.extra.FOLDER"
     const val EXTRA_SESSION = "com.termfold.app.extra.SESSION"
+    const val EXTRA_WORKSPACE = "com.termfold.app.extra.WORKSPACE"
 
     private const val CHANNEL_DONE = "agent_done"
     private const val CHANNEL_ATTENTION = "agent_attention"
@@ -201,7 +202,8 @@ object Notifier {
             Intent(context, BubbleActivity::class.java)
                 .setAction(Intent.ACTION_VIEW)
                 .putExtra(EXTRA_FOLDER, place.folderId)
-                .putExtra(EXTRA_SESSION, place.sessionId),
+                .putExtra(EXTRA_SESSION, place.sessionId)
+                .putExtra(EXTRA_WORKSPACE, place.workspaceId),
             // Android requires a bubble's intent to be mutable.
             PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0),
         )
@@ -307,7 +309,9 @@ object Notifier {
             .setAction(Intent.ACTION_VIEW)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         if (place != null) {
-            intent.putExtra(EXTRA_FOLDER, place.folderId).putExtra(EXTRA_SESSION, place.sessionId)
+            intent.putExtra(EXTRA_FOLDER, place.folderId)
+                .putExtra(EXTRA_SESSION, place.sessionId)
+                .putExtra(EXTRA_WORKSPACE, place.workspaceId)
         }
         return PendingIntent.getActivity(
             context,
@@ -319,13 +323,15 @@ object Notifier {
 
     fun placeFrom(intent: Intent?): AppPresence.Place? {
         val folder = intent?.getStringExtra(EXTRA_FOLDER) ?: return null
-        return AppPresence.Place(folder, intent.getStringExtra(EXTRA_SESSION))
+        val workspace = intent.getStringExtra(EXTRA_WORKSPACE)
+            ?: com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN
+        return AppPresence.Place(folder, intent.getStringExtra(EXTRA_SESSION), workspace)
     }
 
-    /** Session keys are "folderId/sessionId". */
     fun placeOf(sessionKey: String): AppPresence.Place? {
-        val slash = sessionKey.indexOf('/')
-        if (slash <= 0) return null
-        return AppPresence.Place(sessionKey.substring(0, slash), sessionKey.substring(slash + 1))
+        return runCatching {
+            val parts = com.termfold.app.gitworkspace.SessionKeys.parse(sessionKey)
+            AppPresence.Place(parts.folderId, parts.sessionId, parts.workspaceId)
+        }.getOrNull()
     }
 }

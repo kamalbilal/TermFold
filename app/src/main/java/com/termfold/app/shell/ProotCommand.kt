@@ -100,6 +100,13 @@ object ProotCommand {
             // the system. /dev/shm does not exist in the rootfs, so this bind also creates it.
             "-b", ShellPaths.shmDir(context).absolutePath + ":/dev/shm",
 
+            // Ephemeral files and Node/npm caches on host scratch, not on the rootfs disk image.
+            "-b", ShellPaths.guestScratchTmp(context).absolutePath + ":" + ShellPaths.GUEST_TMP,
+            "-b", ShellPaths.guestScratchNpmCache(context).absolutePath + ":" + ShellPaths.GUEST_NPM_CACHE,
+            "-b",
+            ShellPaths.guestScratchNodeCompileCache(context).absolutePath +
+                ":" + ShellPaths.GUEST_NODE_COMPILE_CACHE,
+
             // DNS and the hosts table have to come from the host: the guest has no resolver of its
             // own, and /etc/hosts is what makes `localhost` resolve for local servers.
             "-b", ShellPaths.resolvConf(context).absolutePath + ":/etc/resolv.conf",
@@ -124,25 +131,7 @@ object ProotCommand {
             // app's environment would leak Android paths into the guest.
             "/usr/bin/env", "-i",
         )
-        guestEnvironment(ShellPaths.rootfsDir(context)).forEach { (key, value) ->
-            // Some guests (Node-based npx agents) bring their own toolchain directory that has
-            // to sit ahead of the system one.
-            if (key == "PATH" && !pathPrefix.isNullOrBlank()) {
-                command += "PATH=$pathPrefix:$value"
-            } else {
-                command += "$key=$value"
-            }
-        }
-        // Agent-specific variables (uv's cache locations, registry-required settings) come
-        // after the base set so they win on duplicate keys; a PATH override still gets the
-        // toolchain prefix so `npx` etc. stay reachable.
-        extraEnv.forEach { (key, value) ->
-            command += if (key == "PATH" && !pathPrefix.isNullOrBlank()) {
-                "PATH=$pathPrefix:$value"
-            } else {
-                "$key=$value"
-            }
-        }
+        guestEnvArgv(ShellPaths.rootfsDir(context), pathPrefix, extraEnv).forEach { command += it }
         command += argv
         return command
     }
@@ -262,12 +251,39 @@ object ProotCommand {
         put("DEBIAN_FRONTEND", "noninteractive")
 
         // npm, pip and cargo install under $HOME, which is inside the persistent rootfs.
-        put("TMPDIR", "/tmp")
+        put("TMPDIR", ShellPaths.GUEST_TMP)
+        put("NODE_COMPILE_CACHE", ShellPaths.GUEST_NODE_COMPILE_CACHE)
+        put("npm_config_cache", ShellPaths.GUEST_NPM_CACHE)
         put("USER", "root")
         put("SHELL", ShellConfig.GUEST_SHELL)
 
         // PRoot needs its own scratch directory inside the guest too.
-        put("PROOT_TMP_DIR", "/tmp")
+        put("PROOT_TMP_DIR", ShellPaths.GUEST_TMP)
+    }
+
+    /**
+     * Guest `env -i` arguments in the order [build] emits them, so tests can assert overrides.
+     */
+    internal fun guestEnvArgv(
+        rootfs: File? = null,
+        pathPrefix: String? = null,
+        extraEnv: Map<String, String> = emptyMap(),
+    ): List<String> {
+        val base = guestEnvironment(rootfs).map { (key, value) ->
+            if (key == "PATH" && !pathPrefix.isNullOrBlank()) {
+                "PATH=$pathPrefix:$value"
+            } else {
+                "$key=$value"
+            }
+        }
+        val extra = extraEnv.map { (key, value) ->
+            if (key == "PATH" && !pathPrefix.isNullOrBlank()) {
+                "PATH=$pathPrefix:$value"
+            } else {
+                "$key=$value"
+            }
+        }
+        return base + extra
     }
 
     /**

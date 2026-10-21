@@ -148,7 +148,8 @@ object GuestCompat {
                             hidden.add(file)
                         } else if (attrs.isSymbolicLink) {
                             val target = runCatching { Files.readSymbolicLink(file).toString() }.getOrNull()
-                            if (target != null && target.substringAfterLast('/').startsWith(".l2s.")) names.add(file)
+                            val normalized = target?.replace('\\', '/')
+                            if (normalized != null && normalized.contains("/.l2s.")) names.add(file)
                         }
                         return FileVisitResult.CONTINUE
                     }
@@ -172,12 +173,11 @@ object GuestCompat {
                 continue
             }
             val ok = runCatching {
-                val tmp = link.resolveSibling(link.fileName.toString() + ".termfold-tmp")
-                Files.deleteIfExists(tmp)
-                Files.copy(data, tmp, StandardCopyOption.COPY_ATTRIBUTES)
-                runCatching { Files.setPosixFilePermissions(tmp, Files.getPosixFilePermissions(data)) }
-                // A rename replaces the symlink itself, never what it points to.
-                Files.move(tmp, link, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+                if (Files.exists(link, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(link)) {
+                    Files.delete(link)
+                }
+                Files.copy(data, link, StandardCopyOption.COPY_ATTRIBUTES)
+                runCatching { Files.setPosixFilePermissions(link, Files.getPosixFilePermissions(data)) }
             }.onFailure { log("Could not convert $link: $it") }.isSuccess
             if (ok) {
                 converted++
@@ -214,12 +214,20 @@ object GuestCompat {
      */
     private fun resolveTarget(root: Path, link: Path): Path? {
         val target = runCatching { Files.readSymbolicLink(link).toString() }.getOrNull() ?: return null
-        val rootText = root.toString().trimEnd('/')
-        return when {
-            target == rootText || target.startsWith("$rootText/") -> java.nio.file.Paths.get(target)
-            target.startsWith("/") -> root.resolve(target.trimStart('/'))
-            else -> link.resolveSibling(target)
-        }.normalize()
+        if (target.startsWith("/")) {
+            return root.resolve(target.trimStart('/')).normalize()
+        }
+        val rootPath = root.toAbsolutePath().normalize()
+        val rootText = rootPath.toString()
+        val hostPath = File(target.replace('/', File.separatorChar))
+        if (hostPath.isAbsolute) {
+            val resolved = hostPath.toPath().toAbsolutePath().normalize()
+            val resolvedText = resolved.toString()
+            if (resolvedText == rootText || resolvedText.startsWith(rootText + File.separator)) {
+                return resolved
+            }
+        }
+        return link.resolveSibling(target).normalize()
     }
 
     /** Follows a fake link to its data file, or null when the chain is broken. */

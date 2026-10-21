@@ -614,6 +614,7 @@ object AcpInstaller {
     fun runCapture(
         context: Context,
         shellCommand: String,
+        guestCwd: String? = null,
         pathPrefix: String? = null,
         timeoutSeconds: Long = 600,
         extraEnv: Map<String, String> = emptyMap(),
@@ -621,6 +622,7 @@ object AcpInstaller {
         val command = ProotCommand.buildCommand(
             context = context,
             shellCommand = shellCommand,
+            guestCwd = guestCwd,
             pathPrefix = pathPrefix,
             extraEnv = extraEnv,
         )

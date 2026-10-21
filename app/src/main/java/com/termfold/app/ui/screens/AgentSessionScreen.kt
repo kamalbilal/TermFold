@@ -12,6 +12,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,6 +35,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -49,10 +51,13 @@ import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import androidx.compose.ui.text.TextRange
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -68,6 +73,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -93,6 +99,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.termfold.app.R
 import com.termfold.app.ui.components.LaunchedWhileVisible
 import com.termfold.app.acp.AcpAgent
+import com.termfold.app.acp.AcpDrafts
 import com.termfold.app.acp.AcpBlock
 import com.termfold.app.acp.AcpClient
 import com.termfold.app.acp.AcpCommand
@@ -103,8 +110,10 @@ import com.termfold.app.acp.AcpPhase
 import com.termfold.app.acp.AcpRegistry
 import com.termfold.app.acp.AcpSessions
 import com.termfold.app.acp.AcpUiState
+import com.termfold.app.acp.checkpoints.CheckpointBusy
 import com.termfold.app.acp.PastedImages
 import com.termfold.app.core.Folder
+import com.termfold.app.preview.Preview
 import com.termfold.app.shell.ShellConfig
 import com.termfold.app.shell.TerminalHost
 import com.termfold.app.ui.components.AgentIconImage
@@ -138,6 +147,7 @@ private val UserBubble = Color(0xFF1A1A1F)
 fun AgentSessionScreen(
     folder: Folder,
     sessionId: String,
+    workspaceId: String = com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN,
     agentId: String,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
@@ -145,8 +155,28 @@ fun AgentSessionScreen(
     onToggleFiles: () -> Unit = {},
 ) {
     val context = LocalContext.current
-    val key = TerminalHost.sessionKey(folder.id, sessionId)
-    val guestDir = com.termfold.app.shell.Projects.guestPath(context, folder.path) ?: ShellConfig.GUEST_HOME
+    val key = com.termfold.app.gitworkspace.SessionKeys.compose(folder.id, workspaceId, sessionId)
+    val guestDir = com.termfold.app.gitworkspace.WorkspaceStore.guestPath(context, folder, workspaceId)
+    if (guestDir == null) {
+        Column(modifier = modifier.fillMaxSize()) {
+            SessionHeader(title = agentId, subtitle = folder.name, iconUrl = "", onBack = onBack)
+            CenterPanel {
+                PanelTitle(stringResource(R.string.workspace_unavailable_title))
+                PanelBody(stringResource(R.string.workspace_unavailable_body))
+                Spacer(Modifier.height(16.dp))
+                PillButton(stringResource(R.string.cd_back), TermFoldIcons.Back, onClick = onBack)
+            }
+        }
+        return
+    }
+    var branchLabel by remember(workspaceId, guestDir) { mutableStateOf<String?>(null) }
+    var isGitWorkspace by remember(guestDir) { mutableStateOf(false) }
+    var showBranchPicker by remember { mutableStateOf(false) }
+    LaunchedEffect(guestDir) {
+        branchLabel = com.termfold.app.gitworkspace.GitWorkspace.readBranchFromHost(context, guestDir)
+            ?: com.termfold.app.gitworkspace.GitWorkspace.currentBranch(context, guestDir)
+        isGitWorkspace = com.termfold.app.gitworkspace.GitWorkspace.isGitRepository(context, guestDir)
+    }
 
     // The registry supplies the launch details and icon; its on-disk cache makes this instant
     // after the first load. Offline with no cache there is nothing to launch, so say so.
@@ -180,7 +210,7 @@ fun AgentSessionScreen(
         return
     }
 
-    val client = remember(agentId) {
+    val client = remember(key) {
         AcpSessions.client(key) ?: AcpSessions.put(
             key,
             AcpClient(
@@ -192,14 +222,54 @@ fun AgentSessionScreen(
         )
     }
 
-    LaunchedEffect(agentId) { client.start() }
+    LaunchedEffect(key) {
+        client.start()
+        com.termfold.app.notify.SessionWatcher.onSessionStarted(context.applicationContext)
+    }
 
     val state by client.state.collectAsStateWithLifecycle()
+    var agentWasBusy by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
+    var showMcp by remember { mutableStateOf(false) }
+    var showAuxTerminals by remember { mutableStateOf(false) }
+    var auxTerminalInitialTabId by remember { mutableStateOf<String?>(null) }
+    var pendingAuxTabCloseId by remember { mutableStateOf<String?>(null) }
+    val auxTerminalParentKey = remember(folder.id, workspaceId, sessionId) {
+        AuxTerminalTabsStore.parentKey(folder.id, workspaceId, sessionId)
+    }
+    val auxTerminalTabs = rememberAuxTerminalTabs(auxTerminalParentKey)
+    var showQuickOpen by remember { mutableStateOf(false) }
+    var editingMessage by remember { mutableStateOf<AcpItem.UserMessage?>(null) }
+    var editFileChoice by remember { mutableStateOf(false) }
+    var pendingEdit by remember {
+        mutableStateOf<Triple<Long, String, Pair<List<AcpBlock.Image>, List<AcpBlock.TextFile>>>?>(null)
+    }
+    val openWorkspaceFile = LocalWorkspaceFileOpener.current
+    val isCursor = resolved.id == "cursor"
+
+    LaunchedEffect(state.agentBusy, guestDir, isCursor) {
+        if (!isCursor) return@LaunchedEffect
+        if (agentWasBusy && !state.agentBusy) {
+            val hostBranch = com.termfold.app.gitworkspace.GitWorkspace.readBranchFromHost(context, guestDir)
+            if (hostBranch != null) branchLabel = hostBranch
+        }
+        agentWasBusy = state.agentBusy
+    }
+    LaunchedEffect(guestDir, isCursor) {
+        if (!isCursor) return@LaunchedEffect
+        while (true) {
+            delay(3_000)
+            val hostBranch = com.termfold.app.gitworkspace.GitWorkspace.readBranchFromHost(context, guestDir)
+            if (hostBranch != null && hostBranch != branchLabel) {
+                branchLabel = hostBranch
+            }
+        }
+    }
 
     Column(
         modifier = modifier
             .fillMaxSize()
+            .navigationBarsPadding()
             .imePadding(),
     ) {
         SessionHeader(
@@ -209,6 +279,11 @@ fun AgentSessionScreen(
             onBack = onBack,
             live = state.agentBusy,
             previewDir = guestDir,
+            onOpenGitChanges = if (isGitWorkspace) {
+                { com.termfold.app.gitworkspace.GitChanges.open(guestDir) }
+            } else {
+                null
+            },
             filesOpen = filesOpen,
             onToggleFiles = onToggleFiles,
             onHistory = if (state.canResumeSessions && state.phase == AcpPhase.READY) {
@@ -221,6 +296,26 @@ fun AgentSessionScreen(
             } else {
                 null
             },
+            onMcp = if (isCursor && state.phase == AcpPhase.READY) {
+                { showMcp = true }
+            } else {
+                null
+            },
+            auxTerminalTabs = if (isCursor) auxTerminalTabs.toList() else emptyList(),
+            onOpenTerminal = if (isCursor) {
+                { tabId ->
+                    auxTerminalInitialTabId = tabId
+                    showAuxTerminals = true
+                }
+            } else {
+                null
+            },
+            onRequestCloseAuxTerminalTab = if (isCursor) {
+                { tabId -> pendingAuxTabCloseId = tabId }
+            } else {
+                null
+            },
+            onQuickOpen = { showQuickOpen = true },
         )
 
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
@@ -230,7 +325,13 @@ fun AgentSessionScreen(
                 // slim banner above it rather than replacing what the user was reading.
                 hasConversation -> Column(Modifier.widthIn(max = ContentMaxWidth).fillMaxSize()) {
                     PhaseBanner(state, onRetry = { client.start() })
-                    Timeline(state = state, workspaceDir = guestDir, modifier = Modifier.weight(1f))
+                    Timeline(
+                        state = state,
+                        workspaceDir = guestDir,
+                        client = client,
+                        onEditMessage = { editingMessage = it },
+                        modifier = Modifier.weight(1f),
+                    )
                 }
 
                 state.phase == AcpPhase.INSTALLING || state.phase == AcpPhase.CONNECTING ->
@@ -303,9 +404,11 @@ fun AgentSessionScreen(
 
         if (state.phase == AcpPhase.READY) {
             Composer(
+                draftKey = key,
+                guestWorkspace = guestDir,
                 agentId = resolved.id,
                 agentName = resolved.name,
-                agentBusy = state.agentBusy,
+                agentBusy = state.agentBusy || state.checkpoints.wireResyncing || editFileChoice,
                 commands = state.commands,
                 canResume = state.canResumeSessions,
                 onResume = { showHistory = true },
@@ -318,12 +421,140 @@ fun AgentSessionScreen(
                 onSteer = { client.steer(it) },
                 onRemoveQueued = { client.removeQueued(it) },
                 onCancel = { client.cancel() },
+                branchName = if (isCursor) branchLabel else null,
+                onBranchClick = if (isCursor) { { showBranchPicker = true } } else null,
+                editMessage = editingMessage,
+                onCancelEdit = { editingMessage = null },
+                onSubmitEdit = { text, images, files ->
+                    val target = editingMessage ?: return@Composer
+                    pendingEdit = Triple(target.id, text, images to files)
+                    editFileChoice = true
+                },
             )
         }
     }
 
+    pendingEdit?.let { (targetId, _, _) ->
+        if (editFileChoice) {
+            AlertDialog(
+                onDismissRequest = {
+                    editFileChoice = false
+                    pendingEdit = null
+                },
+                containerColor = Palette.Card,
+                shape = RoundedCornerShape(20.dp),
+                title = {
+                    Text(
+                        stringResource(R.string.acp_checkpoint_edit_files_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Palette.Text,
+                    )
+                },
+                text = {
+                    Text(
+                        stringResource(R.string.acp_checkpoint_edit_files_body),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Palette.TextDim,
+                    )
+                },
+                confirmButton = {
+                    Text(
+                        stringResource(R.string.acp_checkpoint_revert_files),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Palette.Accent,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                val (id, text, attachments) = pendingEdit ?: return@clickable
+                                client.editAndResend(id, text, attachments.first, attachments.second, revertFiles = true)
+                                editingMessage = null
+                                editFileChoice = false
+                                pendingEdit = null
+                            }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                },
+                dismissButton = {
+                    Text(
+                        stringResource(R.string.acp_checkpoint_keep_files),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Palette.TextDim,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                val (id, text, attachments) = pendingEdit ?: return@clickable
+                                client.editAndResend(id, text, attachments.first, attachments.second, revertFiles = false)
+                                editingMessage = null
+                                editFileChoice = false
+                                pendingEdit = null
+                            }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                },
+            )
+        }
+    }
+
+    if (showBranchPicker) {
+        BranchPickerDialog(
+            guestPath = guestDir,
+            goldenProjectId = folder.id,
+            workspaceId = workspaceId,
+            branchCatalogGuestPath = if (workspaceId == com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN) {
+                null
+            } else {
+                com.termfold.app.gitworkspace.WorkspaceStore.goldenGuestPath(context, folder)
+            },
+            onDismiss = { showBranchPicker = false },
+            onSwitched = { branchLabel = it },
+        )
+    }
+
     if (showHistory) {
         PastSessionsDialog(client = client, currentId = client.currentSessionId, onDismiss = { showHistory = false })
+    }
+
+    if (showMcp) {
+        McpServersDialog(
+            workspaceGuestDir = guestDir,
+            cursorAgent = isCursor,
+            onReloadSession = { client.reloadMcpServers() },
+            onNewSession = { client.startNewSession() },
+            onDismiss = { showMcp = false },
+        )
+    }
+
+    if (showQuickOpen) {
+        WorkspaceQuickOpenDialog(
+            guestWorkspace = guestDir,
+            onDismiss = { showQuickOpen = false },
+            onOpenFile = openWorkspaceFile,
+        )
+    }
+
+    pendingAuxTabCloseId?.let { tabId ->
+        AuxTerminalCloseConfirmDialog(
+            onDismiss = { pendingAuxTabCloseId = null },
+            onConfirm = {
+                AuxTerminalTabsStore.closeTab(folder.id, workspaceId, sessionId, tabId)
+                pendingAuxTabCloseId = null
+            },
+        )
+    }
+
+    if (showAuxTerminals) {
+        AgentAuxTerminalDialog(
+            folderId = folder.id,
+            workspaceId = workspaceId,
+            acpSessionId = sessionId,
+            guestWorkspace = guestDir,
+            folderLabel = folder.name,
+            initialTabId = auxTerminalInitialTabId,
+            onDismiss = {
+                showAuxTerminals = false
+                auxTerminalInitialTabId = null
+            },
+        )
     }
 
     state.pendingPermission?.let { pending ->
@@ -359,7 +590,13 @@ private fun SessionHeader(
     onToggleFiles: (() -> Unit)? = null,
     onHistory: (() -> Unit)? = null,
     onRestart: (() -> Unit)? = null,
+    onMcp: (() -> Unit)? = null,
+    onOpenTerminal: ((tabId: String?) -> Unit)? = null,
+    auxTerminalTabs: List<AuxTerminalTab> = emptyList(),
+    onRequestCloseAuxTerminalTab: ((tabId: String) -> Unit)? = null,
+    onQuickOpen: (() -> Unit)? = null,
     previewDir: String? = null,
+    onOpenGitChanges: (() -> Unit)? = null,
 ) {
     Column {
         Row(
@@ -406,28 +643,28 @@ private fun SessionHeader(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            if (onQuickOpen != null) {
+                BareIconButton(
+                    icon = TermFoldIcons.Search,
+                    contentDescription = stringResource(R.string.cd_go_to_file),
+                    onClick = onQuickOpen,
+                    tint = Palette.TextDim,
+                    size = 40,
+                )
+            }
             if (onToggleFiles != null) {
-                PreviewButton(previewDir)
                 FilesButton(open = filesOpen, onClick = onToggleFiles)
             }
-            if (onHistory != null) {
-                BareIconButton(
-                    icon = TermFoldIcons.History,
-                    contentDescription = stringResource(R.string.acp_history),
-                    onClick = onHistory,
-                    tint = Palette.TextDim,
-                    size = 40,
-                )
-            }
-            if (onRestart != null) {
-                BareIconButton(
-                    icon = TermFoldIcons.Refresh,
-                    contentDescription = stringResource(R.string.acp_restart),
-                    onClick = onRestart,
-                    tint = Palette.TextDim,
-                    size = 40,
-                )
-            }
+            SessionHeaderOverflowMenu(
+                previewDir = previewDir,
+                onOpenGitChanges = onOpenGitChanges,
+                onOpenTerminal = onOpenTerminal,
+                auxTerminalTabs = auxTerminalTabs,
+                onRequestCloseAuxTerminalTab = onRequestCloseAuxTerminalTab,
+                onHistory = onHistory,
+                onMcp = onMcp,
+                onRestart = onRestart,
+            )
         }
         Box(
             Modifier
@@ -435,6 +672,192 @@ private fun SessionHeader(
                 .height(1.dp)
                 .background(Palette.BorderSoft),
         )
+    }
+}
+
+@Composable
+private fun SessionHeaderOverflowMenu(
+    previewDir: String?,
+    onOpenGitChanges: (() -> Unit)?,
+    onOpenTerminal: ((tabId: String?) -> Unit)?,
+    auxTerminalTabs: List<AuxTerminalTab>,
+    onRequestCloseAuxTerminalTab: ((tabId: String) -> Unit)?,
+    onHistory: (() -> Unit)?,
+    onMcp: (() -> Unit)?,
+    onRestart: (() -> Unit)?,
+) {
+    if (previewDir == null && onOpenGitChanges == null && onOpenTerminal == null && onHistory == null &&
+        onMcp == null && onRestart == null
+    ) {
+        return
+    }
+    var expanded by remember { mutableStateOf(false) }
+    val previewState by Preview.state.collectAsStateWithLifecycle()
+    Box {
+        BareIconButton(
+            icon = TermFoldIcons.More,
+            contentDescription = stringResource(R.string.cd_more),
+            onClick = { expanded = true },
+            tint = Palette.TextDim,
+            size = 40,
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            containerColor = Palette.Card,
+            shape = RoundedCornerShape(16.dp),
+        ) {
+            if (onOpenTerminal != null) {
+                val canCloseTabs = auxTerminalTabs.size > 1
+                if (auxTerminalTabs.isEmpty()) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.agent_aux_terminal), color = Palette.Text) },
+                        leadingIcon = {
+                            Icon(
+                                TermFoldIcons.Terminal,
+                                contentDescription = null,
+                                tint = Palette.TextDim,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        },
+                        onClick = {
+                            expanded = false
+                            onOpenTerminal(null)
+                        },
+                    )
+                } else {
+                    auxTerminalTabs.forEach { tab ->
+                        DropdownMenuItem(
+                            text = {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        stringResource(R.string.agent_aux_terminal_tab, tab.title),
+                                        color = Palette.Text,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    if (canCloseTabs && onRequestCloseAuxTerminalTab != null) {
+                                        BareIconButton(
+                                            icon = TermFoldIcons.Close,
+                                            contentDescription = stringResource(R.string.agent_aux_terminal_close_tab),
+                                            onClick = {
+                                                expanded = false
+                                                onRequestCloseAuxTerminalTab(tab.id)
+                                            },
+                                            tint = Palette.TextFaint,
+                                            size = 32,
+                                        )
+                                    }
+                                }
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    TermFoldIcons.Terminal,
+                                    contentDescription = null,
+                                    tint = Palette.TextDim,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            },
+                            onClick = {
+                                expanded = false
+                                onOpenTerminal(tab.id)
+                            },
+                        )
+                    }
+                }
+            }
+            if (previewDir != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.preview_title), color = Palette.Text) },
+                    leadingIcon = {
+                        Icon(
+                            TermFoldIcons.Globe,
+                            contentDescription = null,
+                            tint = Palette.TextDim,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        when {
+                            previewState.open && !previewState.minimized -> Preview.close()
+                            previewState.open -> Preview.restore()
+                            else -> Preview.open(projectDir = previewDir)
+                        }
+                    },
+                )
+            }
+            if (onOpenGitChanges != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.git_changes_title), color = Palette.Text) },
+                    leadingIcon = {
+                        Icon(
+                            TermFoldIcons.GitBranch,
+                            contentDescription = null,
+                            tint = Palette.TextDim,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onOpenGitChanges()
+                    },
+                )
+            }
+            if (onHistory != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.acp_history), color = Palette.Text) },
+                    leadingIcon = {
+                        Icon(
+                            TermFoldIcons.History,
+                            contentDescription = null,
+                            tint = Palette.TextDim,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onHistory()
+                    },
+                )
+            }
+            if (onMcp != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.mcp_servers), color = Palette.Text) },
+                    leadingIcon = {
+                        Icon(
+                            TermFoldIcons.Gear,
+                            contentDescription = null,
+                            tint = Palette.TextDim,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onMcp()
+                    },
+                )
+            }
+            if (onRestart != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.acp_restart), color = Palette.Text) },
+                    leadingIcon = {
+                        Icon(
+                            TermFoldIcons.Refresh,
+                            contentDescription = null,
+                            tint = Palette.TextDim,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onRestart()
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -544,10 +967,24 @@ private fun PillButton(label: String, icon: ImageVector, onClick: () -> Unit) {
 // --- Timeline ---------------------------------------------------------------------------------
 
 @Composable
-private fun Timeline(state: AcpUiState, workspaceDir: String, modifier: Modifier = Modifier) {
+private fun Timeline(
+    state: AcpUiState,
+    workspaceDir: String,
+    client: AcpClient,
+    onEditMessage: (AcpItem.UserMessage) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val items = state.items
+    val ghostFrom = state.checkpoints.ghostFromItemId
+    val checkpointBusy = state.checkpoints.busy
+    var undoConfirmId by remember { mutableStateOf<Long?>(null) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val openWorkspaceFile = LocalWorkspaceFileOpener.current
+    val onOpenPath: (String) -> Unit = { path ->
+        WorkspacePathResolver.resolve(context, path, workspaceDir)?.let { openWorkspaceFile(it) }
+    }
 
     // Follow the conversation while the user is at the bottom; someone who scrolled up to read
     // is left alone until they come back down (or tap the button). Following reacts to the
@@ -590,15 +1027,57 @@ private fun Timeline(state: AcpUiState, workspaceDir: String, modifier: Modifier
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 18.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        if (state.checkpoints.wireResyncing && !state.agentBusy) {
+            item(key = "wire-resync") {
+                Text(
+                    stringResource(R.string.acp_checkpoint_resync),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Palette.TextFaint,
+                    modifier = Modifier.padding(bottom = 4.dp),
+                )
+            }
+        }
         items(items, key = { it.id }) { item ->
             val isLast = item === items.last()
-            when (item) {
-                is AcpItem.UserMessage -> UserMessageRow(item)
-                is AcpItem.AgentText -> SelectionContainer { Markdown(item.text, Modifier.fillMaxWidth()) }
-                is AcpItem.Thought -> ThoughtRow(item, live = isLast && state.agentBusy)
-                is AcpItem.ToolCall -> ToolCallRow(item, workspaceDir)
-                is AcpItem.Plan -> PlanCard(item)
-                is AcpItem.Notice -> NoticeRow(item.text)
+            val dimmed = ghostFrom != null && item.id >= ghostFrom
+            val rowModifier = if (dimmed) Modifier.alpha(0.7f) else Modifier
+            Box(rowModifier) {
+                when (item) {
+                    is AcpItem.UserMessage -> {
+                        val lastUserId = items.filterIsInstance<AcpItem.UserMessage>().lastOrNull()?.id
+                        val showRedo = ghostFrom != null &&
+                            item.id == ghostFrom &&
+                            state.checkpoints.canRedo &&
+                            !state.checkpoints.wireResyncing
+                        val canUndo = state.checkpoints.undoableMessageIds.contains(item.id) &&
+                            !(state.agentBusy && item.id == lastUserId) &&
+                            (ghostFrom == null || item.id < ghostFrom) &&
+                            !showRedo
+                        val undoBusy = checkpointBusy is CheckpointBusy.Undo && checkpointBusy.messageId == item.id
+                        val redoBusy = checkpointBusy is CheckpointBusy.Redo && checkpointBusy.messageId == item.id
+                        val actionsLocked = checkpointBusy != null && !undoBusy && !redoBusy
+                        val actionsEnabled = !actionsLocked || undoBusy || redoBusy
+                        val showEdit = !(state.agentBusy && item.id == lastUserId) &&
+                            (ghostFrom == null || item.id <= ghostFrom)
+                        UserMessageRow(
+                            item = item,
+                            showEdit = showEdit,
+                            onEdit = { if (!actionsLocked) onEditMessage(item) },
+                            showUndo = canUndo || undoBusy,
+                            undoLoading = undoBusy,
+                            onUndo = { if (actionsEnabled && !undoBusy) undoConfirmId = item.id },
+                            showRedo = showRedo || redoBusy,
+                            redoLoading = redoBusy,
+                            onRedo = { if (actionsEnabled && !redoBusy) client.redoCheckpoint(item.id) },
+                            actionsEnabled = !actionsLocked || undoBusy || redoBusy,
+                        )
+                    }
+                    is AcpItem.AgentText -> Markdown(item.text, Modifier.fillMaxWidth(), onOpenPath = onOpenPath)
+                    is AcpItem.Thought -> ThoughtRow(item, live = isLast && state.agentBusy, onOpenPath = onOpenPath)
+                    is AcpItem.ToolCall -> ToolCallRow(item, workspaceDir)
+                    is AcpItem.Plan -> PlanCard(item)
+                    is AcpItem.Notice -> NoticeRow(item.text)
+                }
             }
         }
 
@@ -644,10 +1123,69 @@ private fun Timeline(state: AcpUiState, workspaceDir: String, modifier: Modifier
             }
         }
     }
+
+    undoConfirmId?.let { messageId ->
+        AlertDialog(
+            onDismissRequest = { undoConfirmId = null },
+            containerColor = Palette.Card,
+            shape = RoundedCornerShape(20.dp),
+            title = {
+                Text(
+                    stringResource(R.string.acp_checkpoint_undo_title),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Palette.Text,
+                )
+            },
+            text = {
+                Text(
+                    stringResource(R.string.acp_checkpoint_undo_body),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.TextDim,
+                )
+            },
+            confirmButton = {
+                Text(
+                    stringResource(R.string.acp_checkpoint_restore),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Palette.Accent,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable {
+                            undoConfirmId = null
+                            client.restoreCheckpoint(messageId)
+                        }
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            },
+            dismissButton = {
+                Text(
+                    stringResource(R.string.action_cancel),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Palette.TextDim,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { undoConfirmId = null }
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            },
+        )
+    }
+
 }
 
 @Composable
-private fun UserMessageRow(item: AcpItem.UserMessage) {
+private fun UserMessageRow(
+    item: AcpItem.UserMessage,
+    showEdit: Boolean,
+    onEdit: () -> Unit,
+    showUndo: Boolean,
+    undoLoading: Boolean,
+    onUndo: () -> Unit,
+    showRedo: Boolean,
+    redoLoading: Boolean,
+    onRedo: () -> Unit,
+    actionsEnabled: Boolean,
+) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.End,
@@ -682,6 +1220,75 @@ private fun UserMessageRow(item: AcpItem.UserMessage) {
                 )
             }
         }
+        if (showEdit || showUndo || showRedo) {
+            Spacer(Modifier.height(4.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (showEdit) {
+                    MessageActionChip(
+                        label = stringResource(R.string.acp_checkpoint_edit),
+                        icon = TermFoldIcons.Pencil,
+                        contentDescription = stringResource(R.string.acp_checkpoint_edit),
+                        enabled = actionsEnabled,
+                        loading = false,
+                        onClick = onEdit,
+                    )
+                }
+                if (showUndo) {
+                    MessageActionChip(
+                        label = stringResource(R.string.acp_checkpoint_restore),
+                        icon = TermFoldIcons.Undo,
+                        contentDescription = stringResource(R.string.acp_checkpoint_restore),
+                        enabled = actionsEnabled && !undoLoading,
+                        loading = undoLoading,
+                        onClick = onUndo,
+                    )
+                }
+                if (showRedo) {
+                    MessageActionChip(
+                        label = stringResource(R.string.acp_checkpoint_redo),
+                        icon = TermFoldIcons.Redo,
+                        contentDescription = stringResource(R.string.acp_checkpoint_redo),
+                        enabled = actionsEnabled && !redoLoading,
+                        loading = redoLoading,
+                        onClick = onRedo,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessageActionChip(
+    label: String,
+    icon: ImageVector,
+    contentDescription: String,
+    enabled: Boolean,
+    loading: Boolean,
+    onClick: () -> Unit,
+) {
+    val tint = if (enabled) Palette.TextDim else Palette.TextFaint
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(enabled = enabled && !loading, onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        if (loading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(14.dp),
+                strokeWidth = 1.5.dp,
+                color = Palette.TextDim,
+            )
+        } else {
+            Icon(icon, contentDescription = contentDescription, tint = tint, modifier = Modifier.size(16.dp))
+        }
+        Text(label, style = MaterialTheme.typography.labelSmall, color = tint)
     }
 }
 
@@ -810,7 +1417,7 @@ private data class TickerLine(val index: Int, val text: String)
  */
 @OptIn(androidx.compose.animation.ExperimentalAnimationApi::class)
 @Composable
-private fun ThoughtRow(item: AcpItem.Thought, live: Boolean) {
+private fun ThoughtRow(item: AcpItem.Thought, live: Boolean, onOpenPath: (String) -> Unit) {
     var expanded by remember(item.id) { mutableStateOf(false) }
     val text = item.text.trim()
     val lines = text.lines().filter { it.isNotBlank() }
@@ -889,6 +1496,7 @@ private fun ThoughtRow(item: AcpItem.Thought, live: Boolean) {
                     secondary = Palette.TextFaint,
                     bodyStyle = MaterialTheme.typography.bodySmall.copy(lineHeight = 19.sp),
                     modifier = Modifier.heightIn(max = 360.dp).verticalScroll(scroll),
+                    onOpenPath = onOpenPath,
                 )
             }
         }
@@ -1177,6 +1785,8 @@ private fun PermissionDialog(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Composer(
+    draftKey: String,
+    guestWorkspace: String,
     agentId: String,
     agentName: String,
     agentBusy: Boolean,
@@ -1192,25 +1802,69 @@ private fun Composer(
     onSteer: (Long) -> Unit,
     onRemoveQueued: (Long) -> Unit,
     onCancel: () -> Unit,
+    branchName: String? = null,
+    onBranchClick: (() -> Unit)? = null,
+    editMessage: AcpItem.UserMessage? = null,
+    onCancelEdit: () -> Unit = {},
+    onSubmitEdit: (String, List<AcpBlock.Image>, List<AcpBlock.TextFile>) -> Unit = { _, _, _ -> },
 ) {
     val context = LocalContext.current
+    val editing = editMessage != null
+    val composerKey = if (editing) "$draftKey-edit-${editMessage?.id}" else draftKey
+    key(composerKey) {
     val scope = rememberCoroutineScope()
-    val input = rememberTextFieldState()
-    val images = remember { mutableStateListOf<AcpBlock.Image>() }
-    val files = remember { mutableStateListOf<AcpBlock.TextFile>() }
+    val input = rememberTextFieldState(
+        initialText = if (editing) editMessage?.text ?: "" else AcpDrafts.load(context, draftKey),
+    )
+
+    LaunchedEffect(composerKey) {
+        if (editing) return@LaunchedEffect
+        snapshotFlow { input.text.toString() }.collect { text ->
+            AcpDrafts.save(context, draftKey, text)
+        }
+    }
+    val images = remember(composerKey) {
+        mutableStateListOf<AcpBlock.Image>().apply {
+            if (editing && editMessage != null) addAll(editMessage.images) else addAll(AcpDrafts.loadImages(context, draftKey))
+        }
+    }
+    val files = remember(composerKey) {
+        mutableStateListOf<AcpBlock.TextFile>().apply {
+            if (editing && editMessage != null) addAll(editMessage.files) else addAll(AcpDrafts.loadFiles(context, draftKey))
+        }
+    }
+    LaunchedEffect(composerKey, editMessage?.id) {
+        if (editing && editMessage != null) {
+            input.edit {
+                replace(0, length, editMessage.text)
+                selection = TextRange(editMessage.text.length)
+            }
+            images.clear()
+            images.addAll(editMessage.images)
+            files.clear()
+            files.addAll(editMessage.files)
+        }
+    }
+    fun persistAttachments() {
+        AcpDrafts.saveAttachments(context, draftKey, images.toList(), files.toList())
+    }
     var pasteCounter by remember { mutableIntStateOf(0) }
     var preview by remember { mutableStateOf<AcpBlock.TextFile?>(null) }
 
     fun addImage(uri: android.net.Uri) {
         scope.launch {
             val encoded = withContext(Dispatchers.IO) { PastedImages.load(context, uri) }
-            if (encoded != null) images.add(encoded.toBlock())
+            if (encoded != null) {
+                images.add(encoded.toBlock())
+                persistAttachments()
+            }
         }
     }
 
     fun addTextFile(text: String) {
         pasteCounter++
         files.add(AcpBlock.TextFile("pasted-$pasteCounter.txt", text))
+        persistAttachments()
     }
 
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
@@ -1219,43 +1873,138 @@ private fun Composer(
 
     val canSend = input.text.isNotBlank() || images.isNotEmpty() || files.isNotEmpty()
 
-    // The slash menu: open while the text is "/" plus a partial command name, and nothing else.
+    // Slash and @ menus follow the token at the caret (start of field or mid-sentence).
     // The app's own commands come first (resuming is the app's job, not every agent's), then
     // whatever the agent published.
     val builtIns = buildList {
         if (canResume) add(AcpCommand(BUILTIN_RESUME, stringResource(R.string.acp_cmd_resume), ""))
         add(AcpCommand(BUILTIN_NEW, stringResource(R.string.acp_cmd_new), ""))
+        if (agentId == "cursor") {
+            add(AcpCommand(BUILTIN_SUMMARIZE, stringResource(R.string.acp_cmd_summarize), ""))
+        }
     }
     val allCommands = builtIns + commands.filter { c -> builtIns.none { it.name == c.name } }
     val typed = input.text.toString()
-    // Esc closes the menu until the text changes again.
+    val textSelection = input.selection
+    val activeToken = remember(typed, textSelection.start, textSelection.end) {
+        com.termfold.app.acp.ComposerTriggers.activeToken(typed, textSelection.start, textSelection.end)
+    }
+    // Esc closes the menu until the token changes again.
     var dismissedFor by remember { mutableStateOf<String?>(null) }
-    val slashMatches = if (typed.startsWith("/") && typed.none { it.isWhitespace() } && dismissedFor != typed) {
-        val query = typed.drop(1).lowercase()
-        allCommands.filter { it.name.lowercase().startsWith(query) } +
-            allCommands.filter { !it.name.lowercase().startsWith(query) && it.name.lowercase().contains(query) }
+    var dismissedAtFor by remember { mutableStateOf<String?>(null) }
+    val slashMatches = if (
+        activeToken?.trigger == '/' &&
+        dismissedFor != activeToken.dismissKey
+    ) {
+        com.termfold.app.acp.ComposerFuzzyMatch.rank(
+            items = allCommands.asSequence(),
+            query = activeToken.query,
+            limit = 40,
+            searchable = { cmd -> cmd.name },
+        )
     } else {
         emptyList()
     }
-    // The highlighted row, moved with the arrow keys; back to the top whenever the text changes.
-    var highlighted by remember(typed) { mutableIntStateOf(0) }
-    if (highlighted >= slashMatches.size) highlighted = 0
+    val atQuery = if (
+        activeToken?.trigger == '@' &&
+        slashMatches.isEmpty() &&
+        dismissedAtFor != activeToken.dismissKey
+    ) {
+        activeToken.query
+    } else {
+        null
+    }
+    var atMatches by remember { mutableStateOf<List<com.termfold.app.acp.WorkspaceMentionIndex.Entry>>(emptyList()) }
+    var atLoading by remember { mutableStateOf(false) }
+    LaunchedEffect(guestWorkspace, atQuery) {
+        if (atQuery == null) {
+            atMatches = emptyList()
+            atLoading = false
+            return@LaunchedEffect
+        }
+        val query = atQuery
+        atLoading = true
+        kotlinx.coroutines.delay(150)
+        val results = withContext(Dispatchers.IO) {
+            com.termfold.app.acp.WorkspaceMentionIndex.search(context, guestWorkspace, query)
+        }
+        if (query == atQuery) {
+            atMatches = results
+            atLoading = false
+        }
+    }
+    // The highlighted row, moved with the arrow keys; back to the top when the text or token changes.
+    var highlighted by remember(typed, activeToken?.dismissKey) { mutableIntStateOf(0) }
+    val menuCount = when {
+        slashMatches.isNotEmpty() -> slashMatches.size
+        atQuery != null -> when {
+            atLoading || atMatches.isEmpty() -> 1
+            else -> atMatches.size
+        }
+        else -> 0
+    }
+    if (highlighted >= menuCount) highlighted = 0
+
+    fun replaceActiveToken(replacement: String) {
+        val token = com.termfold.app.acp.ComposerTriggers.activeToken(
+            input.text.toString(),
+            input.selection.start,
+            input.selection.end,
+        ) ?: return
+        input.edit {
+            replace(token.start, token.end, replacement)
+            selection = TextRange(token.start + replacement.length)
+        }
+    }
 
     fun pickCommand(command: AcpCommand) {
         when (command.name) {
-            BUILTIN_RESUME -> { input.clearText(); onResume() }
-            BUILTIN_NEW -> { input.clearText(); onNewSession() }
-            else -> input.setTextAndPlaceCursorAtEnd("/${command.name} ")
+            BUILTIN_RESUME -> {
+                input.clearText()
+                images.clear()
+                files.clear()
+                AcpDrafts.clearAttachments(context, draftKey)
+                onResume()
+            }
+            BUILTIN_NEW -> {
+                input.clearText()
+                images.clear()
+                files.clear()
+                AcpDrafts.clearAttachments(context, draftKey)
+                onNewSession()
+            }
+            BUILTIN_SUMMARIZE -> {
+                input.clearText()
+                images.clear()
+                files.clear()
+                AcpDrafts.clearAttachments(context, draftKey)
+                val text = "/$BUILTIN_SUMMARIZE"
+                if (agentBusy || queued.isNotEmpty()) onQueue(text, emptyList(), emptyList())
+                else onSend(text, emptyList(), emptyList())
+            }
+            else -> replaceActiveToken("/${command.name} ")
         }
     }
+
+    fun pickMention(entry: com.termfold.app.acp.WorkspaceMentionIndex.Entry) {
+        replaceActiveToken("@${entry.relativePath} ")
+    }
+
     // While the agent works, a message waits in the queue above the text area.
     fun send() {
         if (!canSend) return
         val text = input.text.toString().trim()
-        if (agentBusy || queued.isNotEmpty()) onQueue(text, images.toList(), files.toList()) else onSend(text, images.toList(), files.toList())
+        val imageList = images.toList()
+        val fileList = files.toList()
+        if (editing) {
+            onSubmitEdit(text, imageList, fileList)
+            return
+        }
+        if (agentBusy || queued.isNotEmpty()) onQueue(text, imageList, fileList) else onSend(text, imageList, fileList)
         input.clearText()
         images.clear()
         files.clear()
+        AcpDrafts.clearAttachments(context, draftKey)
     }
 
     Column(
@@ -1272,8 +2021,46 @@ private fun Composer(
                 .background(Palette.Card)
                 .border(1.dp, Palette.Border, RoundedCornerShape(20.dp)),
         ) {
+            if (editing) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        stringResource(R.string.acp_composer_editing),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Palette.Accent,
+                    )
+                    Text(
+                        stringResource(R.string.acp_composer_cancel_edit),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Palette.TextDim,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(onClick = onCancelEdit)
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
+                }
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(Palette.BorderSoft),
+                )
+            }
             if (slashMatches.isNotEmpty()) {
                 SlashMenu(slashMatches, highlighted = highlighted, onPick = ::pickCommand)
+            }
+            if (atQuery != null) {
+                AtMentionMenu(
+                    matches = atMatches,
+                    loading = atLoading,
+                    highlighted = highlighted,
+                    onPick = ::pickMention,
+                )
             }
 
             QueuedList(queued, agentBusy = agentBusy, onSteer = onSteer, onRemove = onRemoveQueued)
@@ -1288,10 +2075,10 @@ private fun Composer(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     files.forEach { file ->
-                        FileChip(file, onClick = { preview = file }, onRemove = { files.remove(file) })
+                        FileChip(file, onClick = { preview = file }, onRemove = { files.remove(file); persistAttachments() })
                     }
                     images.forEach { image ->
-                        ImageThumb(image, size = 56, onRemove = { images.remove(image) })
+                        ImageThumb(image, size = 56, onRemove = { images.remove(image); persistAttachments() })
                     }
                 }
             }
@@ -1334,19 +2121,33 @@ private fun Composer(
                     // highlighted command, and Esc closes it.
                     .onPreviewKeyEvent { event ->
                         if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                        val menuOpen = slashMatches.isNotEmpty()
+                        val slashOpen = slashMatches.isNotEmpty()
+                        val atOpen = atQuery != null && (atLoading || atMatches.isNotEmpty())
+                        val menuOpen = slashOpen || atOpen
+                        val size = when {
+                            slashOpen -> slashMatches.size
+                            atLoading || atMatches.isEmpty() -> 1
+                            else -> atMatches.size
+                        }
                         when {
                             menuOpen && event.key == Key.DirectionDown -> {
-                                highlighted = (highlighted + 1) % slashMatches.size; true
+                                highlighted = (highlighted + 1) % size; true
                             }
                             menuOpen && event.key == Key.DirectionUp -> {
-                                highlighted = (highlighted - 1 + slashMatches.size) % slashMatches.size; true
+                                highlighted = (highlighted - 1 + size) % size; true
                             }
-                            menuOpen && (event.key == Key.Tab || (event.key == Key.Enter && !event.isShiftPressed)) -> {
+                            slashOpen && (event.key == Key.Tab || (event.key == Key.Enter && !event.isShiftPressed)) -> {
                                 pickCommand(slashMatches[highlighted]); true
                             }
-                            menuOpen && event.key == Key.Escape -> {
-                                dismissedFor = typed; true
+                            atOpen && !atLoading && atMatches.isNotEmpty() &&
+                                (event.key == Key.Tab || (event.key == Key.Enter && !event.isShiftPressed)) -> {
+                                pickMention(atMatches[highlighted]); true
+                            }
+                            slashOpen && event.key == Key.Escape -> {
+                                dismissedFor = activeToken?.dismissKey; true
+                            }
+                            atOpen && event.key == Key.Escape -> {
+                                dismissedAtFor = activeToken?.dismissKey; true
                             }
                             event.key == Key.Enter && !event.isShiftPressed -> {
                                 send(); true
@@ -1386,7 +2187,16 @@ private fun Composer(
                     tint = Palette.TextDim,
                     size = 38,
                 )
-                Spacer(Modifier.weight(1f))
+                if (branchName != null && onBranchClick != null) {
+                    BranchChip(
+                        label = branchName.ifBlank { stringResource(R.string.workspace_branch_unknown) },
+                        onClick = onBranchClick,
+                        modifier = Modifier.weight(1f, fill = false),
+                        truncate = true,
+                    )
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
                 if (settings.isNotEmpty()) {
                     SettingsButton(agentId, settings, onChangeSetting)
                     Spacer(Modifier.width(4.dp))
@@ -1457,6 +2267,7 @@ private fun Composer(
                 )
             },
         )
+    }
     }
 }
 
@@ -1931,6 +2742,7 @@ private fun SettingRow(label: String, description: String, selected: Boolean, on
 /** Commands the app handles itself rather than sending to the agent. */
 private const val BUILTIN_RESUME = "resume"
 private const val BUILTIN_NEW = "new"
+private const val BUILTIN_SUMMARIZE = "summarize"
 
 /**
  * The slash commands matching what is typed. Tapping one picks it; with a keyboard the arrows
@@ -1986,6 +2798,118 @@ private fun SlashMenu(matches: List<AcpCommand>, highlighted: Int, onPick: (AcpC
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .height(1.dp)
+            .background(Palette.BorderSoft),
+    )
+}
+
+@Composable
+private fun AtMentionMenu(
+    matches: List<com.termfold.app.acp.WorkspaceMentionIndex.Entry>,
+    loading: Boolean,
+    highlighted: Int,
+    onPick: (com.termfold.app.acp.WorkspaceMentionIndex.Entry) -> Unit,
+) {
+    val listState = rememberLazyListState()
+    LaunchedEffect(highlighted, matches.size, loading) {
+        if (loading || matches.isEmpty()) return@LaunchedEffect
+        val visible = listState.layoutInfo.visibleItemsInfo
+        val viewportEnd = listState.layoutInfo.viewportEndOffset
+        val fully = visible.filter { it.offset >= 0 && it.offset + it.size <= viewportEnd }
+        val first = fully.firstOrNull()?.index ?: 0
+        val last = fully.lastOrNull()?.index ?: 0
+        when {
+            highlighted < first -> listState.animateScrollToItem(highlighted)
+            highlighted > last -> listState.animateScrollToItem((highlighted - (fully.size - 1)).coerceAtLeast(0))
+        }
+    }
+    if (loading || matches.isEmpty()) {
+        val active = highlighted == 0
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(if (active) Palette.CardPressed else Color.Transparent)
+                .padding(horizontal = 10.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (loading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                    color = Palette.Accent,
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = stringResource(
+                    if (loading) R.string.acp_mention_loading else R.string.acp_mention_empty,
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = Palette.TextFaint,
+            )
+        }
+    } else {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 260.dp)
+                .padding(top = 6.dp, start = 6.dp, end = 6.dp),
+        ) {
+            items(matches.size) { index ->
+                val entry = matches[index]
+                val active = index == highlighted
+                val lines = com.termfold.app.acp.WorkspaceMentionIndex.displayLines(entry.relativePath)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (active) Palette.CardPressed else Color.Transparent)
+                        .clickable { onPick(entry) }
+                        .padding(horizontal = 10.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = if (entry.isDirectory) TermFoldIcons.Folder else TermFoldIcons.Files,
+                        contentDescription = null,
+                        tint = if (active) Palette.Accent else Palette.TextFaint,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = "@${lines.mentionName}",
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = Mono, fontSize = 13.sp),
+                            color = Palette.Accent,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = lines.fullPathFromRoot,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Palette.TextFaint,
+                            maxLines = 1,
+                            overflow = TextOverflow.StartEllipsis,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = stringResource(
+                            if (entry.isDirectory) R.string.acp_mention_folder else R.string.acp_mention_file,
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (active) Palette.TextDim else Palette.TextFaint,
                     )
                 }
             }

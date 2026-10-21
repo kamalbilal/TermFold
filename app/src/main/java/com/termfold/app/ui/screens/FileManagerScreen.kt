@@ -99,6 +99,8 @@ import coil.request.ImageRequest
 import com.termfold.app.R
 import com.termfold.app.ui.components.LaunchedWhileVisible
 import com.termfold.app.files.FileActions
+import com.termfold.app.files.FileManagerPrefs
+import com.termfold.app.files.FileSortBy
 import com.termfold.app.shell.Projects
 import com.termfold.app.shell.ShellPaths
 import com.termfold.app.ui.components.AgentIconLoader
@@ -121,8 +123,6 @@ import com.termfold.app.ui.theme.Motion
 /** Files copied or cut in the file manager, waiting to be pasted. */
 private data class Clip(val files: List<File>, val cut: Boolean)
 
-private enum class SortBy { NAME, MODIFIED, SIZE }
-
 /** A listed file with its size and date read once, off the main thread. */
 private data class Item(val file: File, val isDir: Boolean, val size: Long, val modified: Long) {
     val key: String get() = file.absolutePath
@@ -143,14 +143,14 @@ private const val SEARCH_LIMIT = 300
 @Composable
 fun FileManagerScreen(wide: Boolean, modifier: Modifier = Modifier, startGuestPath: String = HOME) {
     val context = LocalContext.current
+    val app = context.applicationContext
     val scope = rememberCoroutineScope()
     val focus = LocalFocusManager.current
     val rootfs = remember { ShellPaths.rootfsDir(context) }
     var cwd by rememberSaveable { mutableStateOf(startGuestPath) }
-    var showHidden by rememberSaveable { mutableStateOf(false) }
-    var sortName by rememberSaveable { mutableStateOf(SortBy.NAME.name) }
-    val sort = SortBy.valueOf(sortName)
-    var grid by rememberSaveable { mutableStateOf(false) }
+    var showHidden by remember { mutableStateOf(FileManagerPrefs.showHidden(app)) }
+    var sort by remember { mutableStateOf(FileManagerPrefs.sort(app)) }
+    var grid by remember { mutableStateOf(FileManagerPrefs.gridView(app)) }
     var query by rememberSaveable { mutableStateOf("") }
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var refresh by remember { mutableIntStateOf(0) }
@@ -396,11 +396,20 @@ fun FileManagerScreen(wide: Boolean, modifier: Modifier = Modifier, startGuestPa
                         onNewFile = { opError = null; naming = Naming.NewFile(dir) },
                         onNewFolder = { opError = null; naming = Naming.NewFolder(dir) },
                         sort = sort,
-                        onSort = { sortName = it.name },
+                        onSort = { choice ->
+                            sort = choice
+                            FileManagerPrefs.setSort(app, choice)
+                        },
                         grid = grid,
-                        onGrid = { grid = it },
+                        onGrid = { list ->
+                            grid = list
+                            FileManagerPrefs.setGridView(app, list)
+                        },
                         showHidden = showHidden,
-                        onShowHidden = { showHidden = it },
+                        onShowHidden = { hidden ->
+                            showHidden = hidden
+                            FileManagerPrefs.setShowHidden(app, hidden)
+                        },
                     )
                     androidx.compose.animation.AnimatedVisibility(
                         visible = selected.isNotEmpty(),
@@ -627,8 +636,8 @@ private fun Header(
     onUploadFolder: () -> Unit,
     onNewFile: () -> Unit,
     onNewFolder: () -> Unit,
-    sort: SortBy,
-    onSort: (SortBy) -> Unit,
+    sort: FileSortBy,
+    onSort: (FileSortBy) -> Unit,
     grid: Boolean,
     onGrid: (Boolean) -> Unit,
     showHidden: Boolean,
@@ -748,9 +757,9 @@ private fun Header(
                     shape = RoundedCornerShape(14.dp),
                 ) {
                     MenuLabel(stringResource(R.string.fm_sort))
-                    CheckEntry(stringResource(R.string.fm_sort_name), sort == SortBy.NAME) { onSort(SortBy.NAME) }
-                    CheckEntry(stringResource(R.string.fm_sort_modified), sort == SortBy.MODIFIED) { onSort(SortBy.MODIFIED) }
-                    CheckEntry(stringResource(R.string.fm_sort_size), sort == SortBy.SIZE) { onSort(SortBy.SIZE) }
+                    CheckEntry(stringResource(R.string.fm_sort_name), sort == FileSortBy.NAME) { onSort(FileSortBy.NAME) }
+                    CheckEntry(stringResource(R.string.fm_sort_modified), sort == FileSortBy.MODIFIED) { onSort(FileSortBy.MODIFIED) }
+                    CheckEntry(stringResource(R.string.fm_sort_size), sort == FileSortBy.SIZE) { onSort(FileSortBy.SIZE) }
                     HorizontalDivider(color = Palette.Border, modifier = Modifier.padding(vertical = 4.dp))
                     MenuLabel(stringResource(R.string.fm_view))
                     CheckEntry(stringResource(R.string.fm_view_list), !grid, TermFoldIcons.ListView) { onGrid(false) }
@@ -1083,7 +1092,7 @@ private fun PlaceRow(icon: ImageVector, label: String, active: Boolean, onClick:
 private fun FolderListing(
     dir: File,
     showHidden: Boolean,
-    sort: SortBy,
+    sort: FileSortBy,
     grid: Boolean,
     wide: Boolean,
     readOnly: Boolean,
@@ -1398,14 +1407,14 @@ private fun highlighted(name: String, query: String?): androidx.compose.ui.text.
 
 private fun itemOf(f: File, isDir: Boolean) = Item(f, isDir, if (isDir) 0L else f.length(), f.lastModified())
 
-private fun list(dir: File, showHidden: Boolean, sort: SortBy): List<Item> {
+private fun list(dir: File, showHidden: Boolean, sort: FileSortBy): List<Item> {
     val all = runCatching { listChildren(dir) }.getOrDefault(emptyList())
         .filter { showHidden || !it.file.name.startsWith(".") }
         .map { itemOf(it.file, it.isDir) }
     val order = when (sort) {
-        SortBy.NAME -> compareBy<Item>({ !it.isDir }, { it.file.name.lowercase() })
-        SortBy.MODIFIED -> compareBy<Item>({ !it.isDir }, { -it.modified })
-        SortBy.SIZE -> compareBy<Item>({ !it.isDir }, { -it.size }, { it.file.name.lowercase() })
+        FileSortBy.NAME -> compareBy<Item>({ !it.isDir }, { it.file.name.lowercase() })
+        FileSortBy.MODIFIED -> compareBy<Item>({ !it.isDir }, { -it.modified })
+        FileSortBy.SIZE -> compareBy<Item>({ !it.isDir }, { -it.size }, { it.file.name.lowercase() })
     }
     return all.sortedWith(order)
 }

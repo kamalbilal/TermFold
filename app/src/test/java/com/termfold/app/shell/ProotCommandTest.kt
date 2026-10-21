@@ -25,6 +25,23 @@ class ProotCommandTest {
     }
 
     @Test
+    fun `guest environment sets tmp and node caches`() {
+        val env = ProotCommand.guestEnvironment(null)
+        assertEquals(ShellPaths.GUEST_TMP, env["TMPDIR"])
+        assertEquals(ShellPaths.GUEST_NODE_COMPILE_CACHE, env["NODE_COMPILE_CACHE"])
+        assertEquals(ShellPaths.GUEST_NPM_CACHE, env["npm_config_cache"])
+    }
+
+    @Test
+    fun `extra env overrides guest defaults`() {
+        val argv = ProotCommand.guestEnvArgv(
+            extraEnv = mapOf("npm_config_cache" to "/custom/npm"),
+        )
+        val lastNpm = argv.last { it.startsWith("npm_config_cache=") }
+        assertEquals("npm_config_cache=/custom/npm", lastNpm)
+    }
+
+    @Test
     fun `zone name is used once the guest has tzdata`() {
         val rootfs = Files.createTempDirectory("rootfs").toFile()
         try {

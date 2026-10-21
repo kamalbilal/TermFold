@@ -9,6 +9,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.termfold.app.core.AppData
 import com.termfold.app.core.Folder
 import com.termfold.app.core.Session
+import com.termfold.app.gitworkspace.WorkspaceIds
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
@@ -65,6 +66,7 @@ class FolderStore(private val context: Context) {
                     command = session.optString("command"),
                     tint = session.optInt("tint"),
                     acpAgentId = session.optString("acpAgentId"),
+                    workspaceId = session.optString("workspaceId", WorkspaceIds.GOLDEN),
                 )
             },
         )
@@ -80,6 +82,7 @@ class FolderStore(private val context: Context) {
                     .put("command", session.command)
                     .put("tint", session.tint)
                     .put("acpAgentId", session.acpAgentId)
+                    .put("workspaceId", session.workspaceId)
             )
         }
         return JSONObject()

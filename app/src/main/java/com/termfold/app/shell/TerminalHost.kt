@@ -93,6 +93,8 @@ object TerminalHost : TerminalHostCallbacks {
 
     private var currentKey: String? = null
     private var bridge: TerminalBridge? = null
+    /** Last displayed session before an overlay (e.g. aux terminal) took over. */
+    private var previousDisplayKey: String? = null
 
     /**
      * The `TerminalView` currently displaying the session, if any.
@@ -159,6 +161,37 @@ object TerminalHost : TerminalHostCallbacks {
         _generation.value += 1
     }
 
+    /**
+     * Stops routing keyboard and redraw hooks to a session without ending its process.
+     * Used when an overlay terminal panel closes while the shell keeps running in the background.
+     */
+    /**
+     * Drops the on-screen attachment for [forKey] when it matches the active session, and reattaches
+     * to [previousDisplayKey] when that session is still running (e.g. folder terminal under agent aux).
+     */
+    fun detachDisplay(forKey: String? = null) {
+        if (forKey != null && currentKey != forKey) return
+        val restore = previousDisplayKey?.takeIf { key ->
+            entries[key]?.session?.isRunning == true
+        }
+        previousDisplayKey = null
+        if (restore != null) {
+            val entry = entries[restore] ?: return
+            currentKey = restore
+            bridge = entry.bridge
+            _exited.value = !entry.session.isRunning
+            _title.value = entry.spec.title
+            currentView = null
+            _generation.value += 1
+            return
+        }
+        if (currentKey == null && bridge == null && currentView == null) return
+        currentKey = null
+        bridge = null
+        currentView = null
+        _generation.value += 1
+    }
+
     /** Whether the stored session for [key] is running something right now (see TerminalBridge). */
     fun isWorking(key: String): Boolean {
         val entry = entries[key] ?: return false
@@ -166,7 +199,11 @@ object TerminalHost : TerminalHostCallbacks {
     }
 
     /** The host key under which a folder's session entry is stored. */
-    fun sessionKey(folderId: String, sessionId: String): String = "$folderId/$sessionId"
+    fun sessionKey(folderId: String, workspaceId: String, sessionId: String): String =
+        com.termfold.app.gitworkspace.SessionKeys.compose(folderId, workspaceId, sessionId)
+
+    fun sessionKey(folderId: String, sessionId: String): String =
+        sessionKey(folderId, com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN, sessionId)
 
     /**
      * Ends the session stored for [key] and forgets it, releasing its PRoot process tree so an
@@ -195,6 +232,9 @@ object TerminalHost : TerminalHostCallbacks {
     /** Points the UI at an already-stored live session without touching any process. */
     private fun switchTo(key: String) {
         val entry = entries[key] ?: return
+        if (currentKey != null && currentKey != key) {
+            previousDisplayKey = currentKey
+        }
         currentKey = key
         bridge = entry.bridge
         _exited.value = !entry.session.isRunning
@@ -204,6 +244,9 @@ object TerminalHost : TerminalHostCallbacks {
     }
 
     private fun open(context: Context, key: String, spec: Spec) {
+        if (currentKey != null && currentKey != key) {
+            previousDisplayKey = currentKey
+        }
         val client = TerminalBridge(context, this)
         val started = ShellSessions.start(
             context = context,
@@ -220,6 +263,7 @@ object TerminalHost : TerminalHostCallbacks {
         _title.value = spec.title
         _generation.value += 1
         Log.i(TAG, "Started '${spec.title}' workspace=${spec.workspace}")
+        com.termfold.app.notify.SessionWatcher.onSessionStarted(context.applicationContext)
     }
 
     /** Ends one stored session and forgets it, which also ends its PRoot process tree. */

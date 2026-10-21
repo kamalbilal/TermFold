@@ -6,10 +6,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -47,6 +49,7 @@ fun ListRow(
     title: String,
     leading: @Composable () -> Unit,
     modifier: Modifier = Modifier,
+    subtitle: (@Composable () -> Unit)? = null,
     trailing: @Composable (() -> Unit)? = null,
     onClick: (() -> Unit)? = null,
     highlighted: Boolean = false,
@@ -57,7 +60,7 @@ fun ListRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .height(RowSpec.Height)
+            .heightIn(min = RowSpec.Height)
             .clip(shape)
             .background(if (highlighted) Palette.CardPressed else Palette.Card)
             .then(
@@ -78,14 +81,24 @@ fun ListRow(
 
         Spacer(Modifier.width(15.dp))
 
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleMedium,
-            color = Palette.Text,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(vertical = if (subtitle != null) 8.dp else 0.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                color = Palette.Text,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (subtitle != null) {
+                Spacer(Modifier.height(4.dp))
+                subtitle()
+            }
+        }
 
         if (trailing != null) {
             Spacer(Modifier.width(10.dp))

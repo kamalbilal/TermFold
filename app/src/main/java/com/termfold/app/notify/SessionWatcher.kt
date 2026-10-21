@@ -17,8 +17,8 @@ import kotlinx.coroutines.launch
 /**
  * Watches every live session, agent chats and shells alike, and tells the user when one that
  * was working finishes or starts waiting on them, unless they are already looking at it.
- * It also keeps [KeepAliveService] running while there is work to protect and the app is not on
- * screen, so Android does not reclaim the process mid-task.
+ * It also keeps [KeepAliveService] running while any session is open. A partial wake lock is held
+ * only while an agent or shell is actively working, not while a session sits idle at its prompt.
  *
  * Polling once a second is deliberate: it needs no hooks into every state change, costs next to
  * nothing, and the same signals already drive the working spinners in the session list.
@@ -37,12 +37,6 @@ object SessionWatcher {
     private val shells = HashMap<String, ShellTrack>()
     private var keepingAlive = false
 
-    /** When something last needed the process kept alive; the notification lingers a while after. */
-    private var lastActive = 0L
-
-    /** Idle sessions are kept protected this long after the last real work, then released. */
-    private const val IDLE_GRACE_MS = 5 * 60_000L
-
     /** Ends every agent chat and shell and removes the notification: what its Stop button does. */
     fun stopAll(context: Context) {
         runCatching { AcpSessions.all().keys.forEach { AcpSessions.close(it) } }
@@ -58,6 +52,16 @@ object SessionWatcher {
                 delay(1_000)
             }
         }
+    }
+
+    /** Called when the display turns on or off so keep-alive can react without waiting for the poll. */
+    fun onDisplayChanged(context: Context) {
+        runCatching { syncKeepAlive(context) }
+    }
+
+    /** Call when a new shell or agent session starts so protection begins immediately. */
+    fun onSessionStarted(context: Context) {
+        runCatching { syncKeepAlive(context) }
     }
 
     /** The terminal bell: a CLI agent asking for attention. */
@@ -146,16 +150,40 @@ object SessionWatcher {
             }
         }
 
-        // ---- Keep the process alive while the user is elsewhere and sessions exist.
-        if (active > 0 || AppPresence.inForeground) lastActive = now
-        val wantAlive = live > 0 && !AppPresence.inForeground && (active > 0 || now - lastActive < IDLE_GRACE_MS)
-        if (wantAlive) {
-            KeepAliveService.update(context, active, working)
-            keepingAlive = true
-        } else if (keepingAlive) {
-            KeepAliveService.stop(context)
-            keepingAlive = false
+        val holdWake = needsBackgroundLocks(working)
+        syncKeepAlive(context, live = live, active = active, working = working, holdWakeLock = holdWake)
+    }
+
+    private fun needsBackgroundLocks(shellWorkingCount: Int): Boolean {
+        if (shellWorkingCount > 0) return true
+        return AcpSessions.all().values.any { it.keepsCpuAwake() }
+    }
+
+    private fun syncKeepAlive(
+        context: Context,
+        live: Int = countLive(),
+        active: Int = -1,
+        working: Int = -1,
+        holdWakeLock: Boolean = needsBackgroundLocks(if (working >= 0) working else 0),
+    ) {
+        val sessions = if (live < 0) countLive() else live
+        if (sessions == 0) {
+            if (keepingAlive) {
+                KeepAliveService.stop(context)
+                keepingAlive = false
+            }
+            return
         }
+        val a = if (active >= 0) active else 0
+        val w = if (working >= 0) working else 0
+        KeepAliveService.update(context, active = a, working = w, holdWakeLock = holdWakeLock)
+        keepingAlive = true
+    }
+
+    private fun countLive(): Int {
+        var n = AcpSessions.all().size
+        for (t in TerminalHost.liveSessions()) if (t.running) n++
+        return n
     }
 
     private fun preview(text: String): String {
@@ -171,26 +199,94 @@ object SessionWatcher {
  */
 class KeepAliveService : android.app.Service() {
 
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
+    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+
     override fun onBind(intent: Intent?) = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val live = intent?.getIntExtra(EXTRA_LIVE, 0) ?: 0
+        val active = intent?.getIntExtra(EXTRA_ACTIVE, 0) ?: 0
         val working = intent?.getIntExtra(EXTRA_WORKING, 0) ?: 0
-        startForeground(Notifier.RUNNING_ID, notification(this, live, working))
+        val holdWake = intent?.getBooleanExtra(EXTRA_WAKE_LOCK, false) ?: false
+        setBackgroundLocksHeld(holdWake)
+        startForeground(Notifier.RUNNING_ID, notification(this, active, working))
         return START_NOT_STICKY
     }
 
-    companion object {
-        private const val EXTRA_LIVE = "live"
-        private const val EXTRA_WORKING = "working"
-        private var shown: Pair<Int, Int>? = null
+    override fun onDestroy() {
+        setBackgroundLocksHeld(false)
+        super.onDestroy()
+    }
 
-        fun update(context: Context, live: Int, working: Int) {
-            if (shown == live to working) return
-            shown = live to working
+    private fun setBackgroundLocksHeld(hold: Boolean) {
+        if (!hold) {
+            wakeLock?.let { lock -> if (lock.isHeld) lock.release() }
+            wakeLock = null
+            wifiLock?.let { lock -> if (lock.isHeld) lock.release() }
+            wifiLock = null
+            networkCallback?.let { callback ->
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                runCatching { cm.unregisterNetworkCallback(callback) }
+            }
+            networkCallback = null
+            return
+        }
+        if (wakeLock?.isHeld != true) {
+            val power = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            wakeLock = power.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "TermFold::AgentWork").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+        if (onWifi() && wifiLock?.isHeld != true) {
+            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+            @Suppress("DEPRECATION")
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = wifi.createWifiLock(mode, "TermFold::AgentNet").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } else if (!onWifi()) {
+            wifiLock?.let { lock -> if (lock.isHeld) lock.release() }
+            wifiLock = null
+        }
+        if (networkCallback == null) {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val request = android.net.NetworkRequest.Builder()
+                .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            val callback = object : android.net.ConnectivityManager.NetworkCallback() {}
+            networkCallback = callback
+            runCatching { cm.requestNetwork(request, callback) }
+        }
+    }
+
+    private fun onWifi(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val network = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+    }
+
+    companion object {
+        private const val EXTRA_ACTIVE = "active"
+        private const val EXTRA_WORKING = "working"
+        private const val EXTRA_WAKE_LOCK = "wake_lock"
+        private var shown: Triple<Int, Int, Boolean>? = null
+
+        fun update(context: Context, active: Int, working: Int, holdWakeLock: Boolean) {
+            val snapshot = Triple(active, working, holdWakeLock)
+            if (shown == snapshot) return
+            shown = snapshot
             val intent = Intent(context, KeepAliveService::class.java)
-                .putExtra(EXTRA_LIVE, live)
+                .putExtra(EXTRA_ACTIVE, active)
                 .putExtra(EXTRA_WORKING, working)
+                .putExtra(EXTRA_WAKE_LOCK, holdWakeLock)
             runCatching {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent) else context.startService(intent)
             }

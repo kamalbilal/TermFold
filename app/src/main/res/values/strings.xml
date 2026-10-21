@@ -48,8 +48,57 @@
     <string name="acp_message_hint">Message %1$s</string>
     <string name="acp_pasted_file_meta">%1$d lines · %2$s chars</string>
     <string name="action_close">Close</string>
+    <string name="action_continue">Continue</string>
     <string name="acp_cmd_resume">Reopen an earlier session</string>
     <string name="acp_cmd_new">New session</string>
+    <string name="acp_cmd_summarize">Summarize the conversation to reduce context</string>
+    <string name="acp_checkpoint_restore">Undo changes</string>
+    <string name="acp_checkpoint_redo">Redo changes</string>
+    <string name="acp_checkpoint_undo_title">Undo changes?</string>
+    <string name="acp_checkpoint_edit">Edit</string>
+    <string name="acp_composer_editing">Editing message</string>
+    <string name="acp_composer_cancel_edit">Cancel edit</string>
+    <string name="acp_checkpoint_undo_body">Project files go back to before this message. Later messages stay visible but dimmed until you send again or edit a message. The agent gets a fresh session with a short summary of what you kept.</string>
+    <string name="acp_checkpoint_resync">Updating agent context…</string>
+    <string name="acp_checkpoint_edit_title">Edit message</string>
+    <string name="acp_checkpoint_edit_files_title">Continue from this message?</string>
+    <string name="acp_checkpoint_edit_files_body">Messages after this one will be removed from the thread.</string>
+    <string name="acp_checkpoint_revert_files">Revert files</string>
+    <string name="acp_checkpoint_keep_files">Keep files</string>
+    <string name="acp_quick_open_title">Go to file</string>
+    <string name="acp_quick_open_hint">Search files by name or path</string>
+    <string name="acp_quick_open_empty">No files in this workspace yet</string>
+    <string name="acp_quick_open_no_match">No files match \"%1$s\"</string>
+    <string name="cd_go_to_file">Go to file</string>
+    <string name="mcp_title">MCP servers</string>
+    <string name="mcp_subtitle">Loaded from ~/.cursor/mcp.json and this project\'s .cursor/mcp.json. Use Apply to session to reconnect MCP without losing chat.</string>
+    <string name="mcp_empty">No MCP servers in mcp.json yet. Add ~/.cursor/mcp.json or a project .cursor/mcp.json. The built-in browser tool appears here when Node is installed.</string>
+    <string name="mcp_rescan">Rescan</string>
+    <string name="mcp_reload_session">Apply to session</string>
+    <string name="mcp_apply_session">New session</string>
+    <string name="mcp_reload_status">Reconnecting MCP…</string>
+    <string name="mcp_reload_ok">MCP servers reconnected for this session.</string>
+    <string name="mcp_reload_busy">Wait until the agent finishes its current turn, then apply MCP again.</string>
+    <string name="mcp_reload_failed">Could not reconnect MCP: %1$s</string>
+    <string name="mcp_reload_failed_generic">Could not reconnect MCP for this session. Try New session.</string>
+    <string name="mcp_reload_unsupported">This agent cannot reload MCP on the current session. Use New session.</string>
+    <string name="mcp_source_user">User</string>
+    <string name="mcp_source_project">Project</string>
+    <string name="mcp_source_builtin">Built-in</string>
+    <string name="mcp_no_auth">No credentials required.</string>
+    <string name="mcp_servers">MCP</string>
+    <string name="agent_aux_terminal">Terminal</string>
+    <string name="agent_aux_terminal_title">Terminal</string>
+    <string name="agent_aux_terminal_new">New terminal tab</string>
+    <string name="agent_aux_terminal_tab">Terminal %1$s</string>
+    <string name="agent_aux_terminal_close_tab">Close terminal tab</string>
+    <string name="agent_aux_terminal_close_confirm_title">Close terminal?</string>
+    <string name="agent_aux_terminal_close_confirm_body">This stops the shell and any programs running in this tab.</string>
+    <string name="agent_aux_terminal_close_confirm_action">Close tab</string>
+    <string name="acp_mention_folder">folder</string>
+    <string name="acp_mention_file">file</string>
+    <string name="acp_mention_loading">Searching workspace…</string>
+    <string name="acp_mention_empty">No matching paths</string>
     <string name="acp_history">Earlier sessions</string>
     <string name="acp_history_title">Sessions in this folder</string>
     <string name="acp_history_empty">No earlier sessions yet.</string>
@@ -57,6 +106,7 @@
     <string name="acp_history_current">open now</string>
     <string name="acp_restoring">Reopening session…</string>
     <string name="files_title">Files</string>
+    <string name="files_session_workspace_subtitle">Session workspace · %1$s</string>
     <string name="files_toggle">Show files</string>
     <string name="files_refresh">Refresh</string>
     <string name="files_no_path">This folder has no path on the device, so its files cannot be listed.</string>
@@ -155,6 +205,9 @@
     <string name="share_nothing">Nothing to save: the other app did not send a file.</string>
     <string name="share_not_ready">Open TermFold once to finish setting up Linux, then share again.</string>
     <string name="terminal_find">Search the terminal</string>
+    <string name="settings_cursor">Cursor agent</string>
+    <string name="settings_cursor_allow_everything">Allow everything</string>
+    <string name="settings_cursor_allow_everything_desc">Auto-approve tool and command prompts in Cursor sessions. Reopen the session after changing this.</string>
     <string name="settings_terminal">Terminal colours</string>
     <string name="terminal_find_hint">Find in terminal</string>
     <string name="terminal_find_none">No matches</string>
@@ -192,6 +245,8 @@
     <string name="settings_battery_desc">Stops Android from pausing or closing TermFold while agents work in the background. Recommended on Lenovo, Xiaomi, Samsung and similar.</string>
     <string name="settings_battery_off">Android may still pause TermFold when the screen is off.</string>
     <string name="settings_battery_allow">Allow</string>
+    <string name="settings_phantom_title">Android child-process limits</string>
+    <string name="settings_phantom_desc">On Android 12 and newer the system can pause or kill extra processes TermFold starts (same as Termux). Wi‑Fi and mobile data both use a CPU wake lock and a network hold while an agent is working; only Wi‑Fi also uses a Wi‑Fi radio lock. If agents still stall with the screen off, allow unrestricted battery, then try Developer options → disable child process restrictions.</string>
     <string name="files_delete">Delete</string>
     <string name="files_new_file">New file</string>
     <string name="files_new_folder">New folder</string>
@@ -272,10 +327,17 @@
 
     <!-- Extra keys for the on-screen terminal keyboard. -->
     <string name="key_ctrl" translatable="false">Ctrl</string>
+    <string name="key_shift" translatable="false">Shift</string>
     <string name="key_alt" translatable="false">Alt</string>
+    <string name="key_ctrl_s" translatable="false">^S</string>
+    <string name="key_ctrl_z" translatable="false">^Z</string>
+    <string name="key_ctrl_y" translatable="false">^Y</string>
+    <string name="key_ctrl_f" translatable="false">^F</string>
+    <string name="key_ctrl_a" translatable="false">^A</string>
     <string name="key_esc" translatable="false">Esc</string>
     <string name="key_tab" translatable="false">Tab</string>
     <string name="key_ctrl_c" translatable="false">^C</string>
+    <string name="key_ctrl_v" translatable="false">^V</string>
     <string name="key_ctrl_d" translatable="false">^D</string>
     <string name="key_enter" translatable="false">Enter</string>
     <string name="key_paste">Paste</string>
@@ -289,6 +351,17 @@
     <string name="key_dash" translatable="false">-</string>
 
     <!-- Bundled Linux environment, shown in settings. -->
+    <string name="backup_title">Backup &amp; restore</string>
+    <string name="backup_body">Save everything in one file: Debian, your projects, installed packages, agent sign-ins, folders, and chat metadata. Close running terminals first for the safest copy. Restore only on the same CPU type (arm64 or x86_64).</string>
+    <string name="backup_create">Back up to file…</string>
+    <string name="backup_restore">Restore from file…</string>
+    <string name="backup_restore_confirm_title">Replace this install?</string>
+    <string name="backup_restore_confirm_body">Restore will replace your Linux environment and app data with the backup. Current size on disk is about %1$s. This cannot be undone.</string>
+    <string name="backup_restore_action">Restore</string>
+    <string name="backup_failed_title">Backup failed</string>
+    <string name="backup_done_title">Finished</string>
+    <string name="backup_done_body">Backup saved. Keep the file somewhere safe (cloud storage or another device).</string>
+    <string name="backup_restore_done_body">Restore complete. Open a project or shell to continue.</string>
     <string name="shell_title">Linux environment</string>
     <string name="shell_ready">Ready</string>
     <string name="shell_not_ready">Not set up yet</string>
@@ -310,6 +383,16 @@
     <string name="about_body">TermFold runs a real Linux environment inside the app and opens it in the folders you pick, so agents and shell tools start in the right project.</string>
     <string name="version_label">Version</string>
     <string name="preview_title">Preview</string>
+    <string name="git_changes_title">Source Control</string>
+    <string name="git_changes_staged">Staged Changes</string>
+    <string name="git_changes_unstaged">Changes</string>
+    <string name="git_changes_refresh">Refresh</string>
+    <string name="git_changes_clean">No local changes to commit.</string>
+    <string name="git_changes_no_diff">No diff to show.</string>
+    <string name="git_changes_outgoing">↑ %1$d commits to push</string>
+    <string name="git_changes_incoming">↓ %1$d commits to pull</string>
+    <string name="git_changes_toggle_files">Show changed files</string>
+    <string name="git_changes_expand_context">Expand %1$d unchanged lines</string>
     <string name="preview_forward">Forward</string>
     <string name="preview_reload">Reload</string>
     <string name="preview_address_hint">Port, address or file</string>
@@ -347,4 +430,27 @@
     <string name="acp_history_delete_confirm">Delete this session?</string>
     <string name="acp_agent_unsupported_title">Not available as a chat on Android</string>
     <string name="acp_antigravity_unsupported">Google Antigravity\'s chat server cannot run on Android. Use the agy command in a Shell session instead. You can delete this chat session.</string>
+
+    <string name="workspace_new_title">New workspace</string>
+    <string name="workspace_provision_title">Preparing workspace</string>
+    <string name="workspace_provision_percent">Copying… %1$d%%</string>
+    <string name="workspace_recent_instances">Recent instances</string>
+    <string name="workspace_pick_branch">Start a new copy from branch</string>
+    <string name="workspace_search_branch">Search branches</string>
+    <string name="workspace_branch_refresh">Refresh branch list</string>
+    <string name="workspace_branch_title">Switch branch</string>
+    <string name="workspace_dirty_title">Uncommitted changes</string>
+    <string name="workspace_dirty_body">Stash your changes and switch, or discard local changes and switch.</string>
+    <string name="workspace_stash_switch">Stash and switch</string>
+    <string name="workspace_force_switch">Discard and switch</string>
+    <string name="workspace_menu">Workspaces</string>
+    <string name="workspace_branch_unknown">branch</string>
+    <string name="workspace_unavailable_title">Workspace unavailable</string>
+    <string name="workspace_unavailable_body">This workspace was removed or never finished copying. Remove this session or add a new Cursor copy from the project list.</string>
+
+    <string name="cursor_add_mode_title">Open Cursor how?</string>
+    <string name="cursor_add_mode_body">Use the shared project tree, or start a separate copy checked out to a branch.</string>
+    <string name="cursor_add_mode_shared">Use normally</string>
+    <string name="cursor_add_mode_branch_copy">Separate branch copy</string>
+    <string name="workspace_session_branch_copy">%1$s · copy</string>
 </resources>

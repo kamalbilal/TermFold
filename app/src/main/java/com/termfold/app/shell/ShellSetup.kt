@@ -56,6 +56,9 @@ object ShellSetup {
                 File(rootfs, "usr/local/bin/termfold-setup"),
                 "#!/bin/sh\n# Re-runs TermFold's environment setup.\nexec /bin/bash $SCRIPT --force \"\$@\"\n",
             )
+            val bench = context.assets.open("termfold-bench.sh").use { it.readBytes().decodeToString() }
+                .replace("\r\n", "\n")
+            writeExecutable(File(rootfs, "usr/local/bin/termfold-bench"), bench)
             CLIS.forEach { (bin, pkg) ->
                 writeExecutable(File(rootfs, "usr/local/bin/$bin"), standIn(bin, pkg))
             }

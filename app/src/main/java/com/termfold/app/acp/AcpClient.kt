@@ -2,13 +2,22 @@ package com.termfold.app.acp
 
 import android.content.Context
 import android.util.Log
+import com.termfold.app.R
+import com.termfold.app.acp.checkpoints.AcpCheckpointUiState
+import com.termfold.app.acp.checkpoints.AcpRedoFrame
+import com.termfold.app.acp.checkpoints.CheckpointBusy
+import com.termfold.app.acp.checkpoints.ConversationSummary
+import com.termfold.app.acp.checkpoints.ShadowCheckpointStore
 import com.termfold.app.shell.ProotCommand
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -26,6 +35,21 @@ import java.util.concurrent.atomic.AtomicLong
  */
 internal fun JSONObject.text(key: String): String =
     if (isNull(key)) "" else optString(key)
+
+/**
+ * Params for ACP `initialize`. Cursor reads `clientCapabilities._meta.parameterizedModelPicker`;
+ * without it the agent returns one exploded variant per model and hides separate fast, effort,
+ * and context controls.
+ */
+internal fun acpInitializeParams(): JSONObject = JSONObject()
+    .put("protocolVersion", 1)
+    .put(
+        "clientCapabilities",
+        JSONObject()
+            .put("fs", JSONObject().put("readTextFile", false).put("writeTextFile", false))
+            .put("terminal", false)
+            .put("_meta", JSONObject().put("parameterizedModelPicker", true)),
+    )
 
 /** One content block inside a prompt or an agent update. */
 sealed interface AcpBlock {
@@ -157,6 +181,7 @@ data class AcpUiState(
     val restoring: Boolean = false,
     /** Messages written while the agent was working, sent in order as each turn ends. */
     val queued: List<AcpQueuedPrompt> = emptyList(),
+    val checkpoints: AcpCheckpointUiState = AcpCheckpointUiState(),
 )
 
 /** A message waiting for the current turn to end (or to be sent now, stopping it). */
@@ -189,6 +214,12 @@ class AcpClient(
     /** For notifications: who is talking, and in which folder. */
     val agentName: String get() = agent.name
     val folderLabel: String get() = workspaceGuestDir.trim('/').ifBlank { workspaceGuestDir }
+
+    private val checkpointStore = ShadowCheckpointStore(sessionKey, workspaceGuestDir)
+
+    /** Prepended to the next user prompt after a wire-session resync. */
+    @Volatile
+    private var pendingWireContext: String? = null
 
     private val nextId = AtomicLong(1)
     private val pending = ConcurrentHashMap<Long, CompletableDeferred<JSONObject>>()
@@ -280,7 +311,7 @@ class AcpClient(
         }
 
         _state.update { it.copy(statusText = "Starting ${agent.name}") }
-        val guestArgv = listOf(launch.command) + launch.args
+        val guestArgv = listOf(launch.command) + guestLaunchArgs(launch.args)
         val command = ProotCommand.build(
             context = context,
             argv = guestArgv,
@@ -350,14 +381,7 @@ class AcpClient(
         // finishing an install the installer's prewarm could not complete in time).
         val initResponse = request(
             "initialize",
-            JSONObject()
-                .put("protocolVersion", 1)
-                .put(
-                    "clientCapabilities",
-                    JSONObject()
-                        .put("fs", JSONObject().put("readTextFile", false).put("writeTextFile", false))
-                        .put("terminal", false),
-                ),
+            acpInitializeParams(),
             timeoutMs = 300_000,
         )
         val result = initResponse.optJSONObject("result")
@@ -380,16 +404,38 @@ class AcpClient(
             )
         }
 
-        // Pick up where the user left off: reopening this chat, even after the app restarted,
-        // continues the same agent session rather than starting an empty one.
+        // Stay on this TermFold chat. A wire resync may have rotated the ACP session id;
+        // restore the local timeline and attach the latest wire session without replaying
+        // the agent's summary-first clone into a second listed conversation.
+        val local = withContext(Dispatchers.IO) { AcpTimelineStore.load(context, sessionKey) }
+        if (local != null) adoptTimeline(local)
         val remembered = rememberedSessionId()
-        if (remembered != null && (canLoad || canResume) && reopen(remembered, replay = true)) return
+        val resume = AcpSessionResume.plan(
+            hasLocalTimeline = local != null,
+            rememberedWireId = remembered,
+            canReopen = canLoad || canResume,
+        )
+        if (resume.useRememberedWireSession && remembered != null) {
+            suppressReplayForMcpReload = resume.suppressAgentReplayUpdates
+            val opened = try {
+                reopen(remembered, replay = resume.replayAgentHistory)
+            } finally {
+                suppressReplayForMcpReload = false
+            }
+            if (opened) {
+                persistTimeline()
+                return
+            }
+        }
         openSession()
     }
 
     @Volatile private var canLoad = false
     @Volatile private var canResume = false
     @Volatile private var canList = false
+
+    /** Drops replayed chat chunks while `session/load` reconnects MCP on the same session. */
+    @Volatile private var suppressReplayForMcpReload = false
 
     private val prefs get() = context.getSharedPreferences("acp_sessions", Context.MODE_PRIVATE)
 
@@ -427,7 +473,7 @@ class AcpClient(
             cursor = result.text("nextCursor").ifBlank { null } ?: break
         }
         val deleted = deletedIds()
-        found.distinctBy { it.sessionId }.filter { it.sessionId !in deleted }
+        AcpPastSessions.visible(found.distinctBy { it.sessionId }, deleted)
     }
 
     // ---- Deleting earlier sessions ----------------------------------------------------------
@@ -482,6 +528,8 @@ class AcpClient(
         scope.launch {
             if (!reopen(sessionId, replay = true)) {
                 appendSystemError("That session could not be reopened.")
+            } else {
+                persistTimeline()
             }
         }
     }
@@ -490,9 +538,81 @@ class AcpClient(
     fun startNewSession() {
         scope.launch {
             agentSessionId = null
-            _state.update { it.copy(items = emptyList(), agentBusy = false, pendingPermission = null, queued = emptyList()) }
+            _state.update {
+                it.copy(
+                    items = emptyList(),
+                    agentBusy = false,
+                    pendingPermission = null,
+                    queued = emptyList(),
+                    checkpoints = AcpCheckpointUiState(),
+                )
+            }
+            pendingWireContext = null
+            AcpTimelineStore.clear(context, sessionKey)
             openSession()
         }
+    }
+
+    /**
+     * Reconnects MCP on the active session with a fresh `mcpServers` list.
+     * Cursor uses `session/load`; agents with only `session/resume` use that instead.
+     */
+    fun reloadMcpServers() {
+        scope.launch { reloadMcpServersNow() }
+    }
+
+    private suspend fun reloadMcpServersNow(): Boolean {
+        val sessionId = agentSessionId
+        if (sessionId.isNullOrBlank()) return false
+        val ui = _state.value
+        if (ui.phase != AcpPhase.READY) return false
+        if (turnInFlight || ui.agentBusy || ui.pendingPermission != null) {
+            appendSystemError(context.getString(R.string.mcp_reload_busy))
+            return false
+        }
+        val method = when {
+            canLoad -> "session/load"
+            canResume -> "session/resume"
+            else -> {
+                appendSystemError(context.getString(R.string.mcp_reload_unsupported))
+                return false
+            }
+        }
+        _state.update { it.copy(statusText = context.getString(R.string.mcp_reload_status)) }
+        suppressReplayForMcpReload = method == "session/load"
+        val response = try {
+            runCatching {
+                request(
+                    method,
+                    JSONObject()
+                        .put("sessionId", sessionId)
+                        .put("cwd", workspaceGuestDir)
+                        .put("mcpServers", mcpServers()),
+                    timeoutMs = 120_000,
+                )
+            }.getOrNull()
+        } finally {
+            suppressReplayForMcpReload = false
+        }
+        if (response == null || response.has("error")) {
+            val detail = response?.optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
+            appendSystemError(
+                detail?.let { context.getString(R.string.mcp_reload_failed, it) }
+                    ?: context.getString(R.string.mcp_reload_failed_generic),
+            )
+            _state.update { it.copy(statusText = "") }
+            Log.w(TAG, "$method (MCP reload) failed: ${response?.optJSONObject("error")}")
+            return false
+        }
+        val settings = parseSettings(response.optJSONObject("result"))
+        _state.update { state ->
+            state.copy(
+                statusText = "",
+                settings = settings.ifEmpty { state.settings },
+                items = state.items + AcpItem.Notice(nextItemId(), context.getString(R.string.mcp_reload_ok)),
+            )
+        }
+        return true
     }
 
     /**
@@ -548,20 +668,8 @@ class AcpClient(
      * Tools TermFold gives every agent: its browser (open, read, click, type, screenshot...), as
      * an MCP server the agent starts inside the guest. Only offered once Node is installed.
      */
-    private fun mcpServers(): JSONArray {
-        val rootfs = com.termfold.app.shell.ShellPaths.rootfsDir(context)
-        val node = "/opt/node/bin/node"
-        val tool = com.termfold.app.shell.ShellSetup.BROWSER_TOOL
-        if (!java.io.File(rootfs, node.trimStart('/')).exists() || !java.io.File(rootfs, tool.trimStart('/')).isFile) return JSONArray()
-        com.termfold.app.preview.BrowserBridge.start(context)
-        return JSONArray().put(
-            JSONObject()
-                .put("name", "termfold-browser")
-                .put("command", node)
-                .put("args", JSONArray().put(tool).put("mcp"))
-                .put("env", JSONArray()),
-        )
-    }
+    private fun mcpServers(): JSONArray =
+        com.termfold.app.acp.mcp.McpCatalog.acpServers(context, agent.id, workspaceGuestDir)
 
     private suspend fun openSession() {
         val cwd = workspaceGuestDir
@@ -626,14 +734,133 @@ class AcpClient(
         images: List<AcpBlock.Image>,
         files: List<AcpBlock.TextFile>,
     ) {
-        val sessionId = agentSessionId ?: return
-        val caps = _state.value
-        val content = JSONArray()
-        if (text.isNotBlank()) content.put(JSONObject().put("type", "text").put("text", text))
+        scope.launch { sendNowSuspend(text, images, files) }
+    }
 
-        // Pasted text goes as a file. Every paste is also written into the guest, so an agent
-        // that only gets a link (no embeddedContext) can read it with its own tools, and one that
-        // gets it embedded can still refer back to the file.
+    private suspend fun sendNowSuspend(
+        text: String,
+        images: List<AcpBlock.Image>,
+        files: List<AcpBlock.TextFile>,
+    ) {
+        if (agentSessionId == null) return
+        val messageId = beginUserTurn(text, images, files) ?: return
+        completeUserTurn(messageId, text, images, files)
+    }
+
+    /**
+     * Appends the user row and marks the turn in flight. Call [completeUserTurn] after any wire
+     * prep (for example edit-resend resync) to send the prompt.
+     */
+    private suspend fun beginUserTurn(
+        text: String,
+        images: List<AcpBlock.Image>,
+        files: List<AcpBlock.TextFile>,
+    ): Long? {
+        if (_state.value.checkpoints.ghostFromItemId != null) {
+            commitGhostBranch(clearRedo = true)
+        }
+        if (!hasPromptPayload(pendingWireContext, text, images.size, files.size)) return null
+        val messageId = nextItemId()
+        val preTurnDeferred = scope.async { checkpointStore.commit(context) }
+        pendingPreTurnCommits[messageId] = preTurnDeferred
+        scope.launch {
+            val preHash = runCatching { preTurnDeferred.await() }.getOrNull()
+            pendingPreTurnCommits.remove(messageId)
+            if (preHash != null) {
+                _state.update { state ->
+                    state.copy(
+                        checkpoints = state.checkpoints.copy(
+                            preTurnByMessageId = state.checkpoints.preTurnByMessageId + (messageId to preHash),
+                        ),
+                    )
+                }
+            } else {
+                _state.update { state ->
+                    if (state.items.none { it.id == messageId }) return@update state
+                    state.copy(
+                        items = state.items + AcpItem.Notice(
+                            nextItemId(),
+                            "Workspace checkpoint could not be saved (git in Linux guest). Open Terminal and run termfold-setup if you have not, then try again. Undo is unavailable for this message.",
+                        ),
+                    )
+                }
+            }
+        }
+        val newItems = _state.value.items + AcpItem.UserMessage(messageId, text, images, files)
+        _state.update { state ->
+            state.copy(
+                agentBusy = true,
+                items = newItems,
+            )
+        }
+        turnInFlight = true
+        stoppedByUser = false
+        persistTimeline()
+        return messageId
+    }
+
+    private suspend fun completeUserTurn(
+        messageId: Long,
+        text: String,
+        images: List<AcpBlock.Image>,
+        files: List<AcpBlock.TextFile>,
+    ) {
+        val sessionId = agentSessionId
+        if (sessionId == null) {
+            abortInFlightUserTurn()
+            return
+        }
+        val content = buildPromptContent(text, images, files)
+        if (content == null || content.length() == 0) {
+            abortInFlightUserTurn()
+            return
+        }
+        try {
+            val response = request(
+                "session/prompt",
+                JSONObject().put("sessionId", sessionId).put("prompt", content),
+                timeoutMs = PROMPT_TIMEOUT_MS,
+            )
+            response.optJSONObject("error")?.let { error ->
+                appendSystemError(
+                    error.optJSONObject("data")?.optString("message")?.ifBlank { null }
+                        ?: error.optString("message").ifBlank { "The agent could not answer." },
+                )
+            }
+            when (response.optJSONObject("result")?.optString("stopReason")) {
+                "max_tokens" -> appendSystemError("The reply was cut off at the model's length limit.")
+                "max_turn_requests" -> appendSystemError("The agent stopped after too many steps.")
+                "refusal" -> appendSystemError("The agent declined to continue.")
+            }
+        } catch (failure: Throwable) {
+            Log.w(TAG, "prompt failed", failure)
+            appendSystemError(failure.message ?: "prompt failed")
+        } finally {
+            finalizeUndoableForTurn(messageId)
+            _state.update { it.copy(agentBusy = false) }
+            turnInFlight = false
+            sendNextQueued()
+            persistTimeline()
+        }
+    }
+
+    private fun buildPromptContent(
+        text: String,
+        images: List<AcpBlock.Image>,
+        files: List<AcpBlock.TextFile>,
+    ): JSONArray? {
+        val caps = _state.value
+        val wireText = buildString {
+            pendingWireContext?.let { ctx ->
+                append(ctx)
+                append("\n\n---\n\n")
+                pendingWireContext = null
+            }
+            append(text)
+        }
+        val content = JSONArray()
+        if (wireText.isNotBlank()) content.put(JSONObject().put("type", "text").put("text", wireText))
+
         files.forEach { file ->
             val guestPath = saveToGuest(file.name, file.text.toByteArray())
             if (caps.acceptsEmbeddedContext) {
@@ -660,55 +887,66 @@ class AcpClient(
                         .put("mimeType", image.mimeType),
                 )
             } else {
-                // Agents without image input still get the picture as a file they can open.
                 val bytes = android.util.Base64.decode(image.base64, android.util.Base64.DEFAULT)
                 val name = "image-${System.currentTimeMillis()}-${index + 1}.${extensionFor(image.mimeType)}"
                 content.put(resourceLink(name, saveToGuest(name, bytes), image.mimeType, bytes.size.toLong()))
             }
         }
-        if (content.length() == 0) return
+        return if (content.length() == 0) null else content
+    }
 
-        _state.update {
-            it.copy(
-                agentBusy = true,
-                items = it.items + AcpItem.UserMessage(nextItemId(), text, images, files),
-            )
-        }
-        turnInFlight = true
-        stoppedByUser = false
-        scope.launch {
-            try {
-                // A coding turn routinely runs for many minutes; the reply to session/prompt
-                // arrives only when the whole turn ends, so it must not be on a short timeout.
-                val response = request(
-                    "session/prompt",
-                    JSONObject().put("sessionId", sessionId).put("prompt", content),
-                    timeoutMs = PROMPT_TIMEOUT_MS,
+    private fun abortInFlightUserTurn() {
+        _state.update { it.copy(agentBusy = false) }
+        turnInFlight = false
+    }
+
+    private suspend fun awaitPreTurnHash(messageId: Long): String? {
+        pendingPreTurnCommits[messageId]?.await()?.let { return it }
+        return _state.value.checkpoints.preTurnByMessageId[messageId]
+    }
+
+    private suspend fun finalizeUndoableForTurn(messageId: Long) {
+        val preHash = awaitPreTurnHash(messageId) ?: return
+        _state.update { state ->
+            if (state.checkpoints.preTurnByMessageId[messageId] == null) {
+                state.copy(
+                    checkpoints = state.checkpoints.copy(
+                        preTurnByMessageId = state.checkpoints.preTurnByMessageId + (messageId to preHash),
+                    ),
                 )
-                response.optJSONObject("error")?.let { error ->
-                    appendSystemError(
-                        error.optJSONObject("data")?.optString("message")?.ifBlank { null }
-                            ?: error.optString("message").ifBlank { "The agent could not answer." },
-                    )
-                }
-                when (response.optJSONObject("result")?.optString("stopReason")) {
-                    "max_tokens" -> appendSystemError("The reply was cut off at the model's length limit.")
-                    "max_turn_requests" -> appendSystemError("The agent stopped after too many steps.")
-                    "refusal" -> appendSystemError("The agent declined to continue.")
-                }
-            } catch (failure: Throwable) {
-                Log.w(TAG, "prompt failed", failure)
-                appendSystemError(failure.message ?: "prompt failed")
-            } finally {
-                _state.update { it.copy(agentBusy = false) }
-                turnInFlight = false
-                sendNextQueued()
+            } else {
+                state
             }
+        }
+        val changed = withContext(Dispatchers.IO) {
+            checkpointStore.workspaceDiffersFrom(context, preHash)
+        }
+        if (!changed) return
+        _state.update { state ->
+            state.copy(
+                checkpoints = state.checkpoints.copy(
+                    undoableMessageIds = state.checkpoints.undoableMessageIds + messageId,
+                ),
+            )
         }
     }
 
     /** A prompt from session/prompt is still waiting for its answer (the turn has not ended). */
     @Volatile private var turnInFlight = false
+
+    private val pendingPreTurnCommits = ConcurrentHashMap<Long, Deferred<String?>>()
+
+    /**
+     * True while the agent needs CPU and network to stay up in the background (a turn, a tool, or
+     * a permission prompt). Used by [com.termfold.app.notify.SessionWatcher] for wake locks.
+     */
+    fun keepsCpuAwake(): Boolean {
+        val ui = _state.value
+        if (turnInFlight || ui.agentBusy || ui.pendingPermission != null) return true
+        return ui.items.any { item ->
+            item is AcpItem.ToolCall && item.status == "in_progress"
+        }
+    }
 
     /** The user pressed Stop: what is queued waits instead of going out on its own. */
     @Volatile private var stoppedByUser = false
@@ -887,7 +1125,7 @@ class AcpClient(
     private fun parseConfigOptions(array: JSONArray?): List<AcpSetting> {
         array ?: return emptyList()
         return List(array.length()) { array.optJSONObject(it) }.filterNotNull().mapNotNull { option ->
-            val id = option.text("id").ifBlank { return@mapNotNull null }
+            val id = option.text("id").ifBlank { option.text("configId") }.ifBlank { return@mapNotNull null }
             val toggle = option.optString("type") == "boolean"
             // Select values may be flat or grouped ({group, name, options:[...]}); groups are
             // flattened, which is all a phone-sized picker needs.
@@ -926,6 +1164,231 @@ class AcpClient(
         steerId = null
         scope.launch { notify("session/cancel", JSONObject().put("sessionId", sessionId)) }
         _state.update { it.copy(agentBusy = false) }
+    }
+
+    /** Restores files to before [userMessageId] was sent; dims later chat; rotates wire session. */
+    fun restoreCheckpoint(userMessageId: Long) {
+        scope.launch {
+            _state.update {
+                it.copy(checkpoints = it.checkpoints.copy(busy = CheckpointBusy.Undo(userMessageId)))
+            }
+            try {
+                awaitTurnIdle()
+                val snapshot = _state.value
+                val hash = awaitPreTurnHash(userMessageId)
+                    ?: snapshot.checkpoints.preTurnByMessageId[userMessageId]
+                if (hash == null) {
+                    appendSystemError("No checkpoint for this message.")
+                    return@launch
+                }
+                val tip = withContext(Dispatchers.IO) { checkpointStore.commit(context) }
+                val frame = AcpRedoFrame(
+                    items = snapshot.items,
+                    ghostFromItemId = snapshot.checkpoints.ghostFromItemId,
+                    preTurnByMessageId = snapshot.checkpoints.preTurnByMessageId,
+                    undoableMessageIds = snapshot.checkpoints.undoableMessageIds,
+                    worktreeTipCommit = tip,
+                    wireSessionId = agentSessionId,
+                )
+                val ok = withContext(Dispatchers.IO) { checkpointStore.restore(context, hash) }
+                if (!ok) {
+                    appendSystemError("Could not restore workspace files.")
+                    return@launch
+                }
+                val stack = (snapshot.checkpoints.redoStack + frame).takeLast(MAX_REDO_FRAMES)
+                _state.update {
+                    it.copy(
+                        checkpoints = it.checkpoints.copy(
+                            ghostFromItemId = userMessageId,
+                            redoStack = stack,
+                        ),
+                    )
+                }
+                wireResync(ghostFromItemId = userMessageId)
+            } finally {
+                _state.update {
+                    it.copy(checkpoints = it.checkpoints.copy(busy = null))
+                }
+                persistTimeline()
+            }
+        }
+    }
+
+    fun redoCheckpoint(userMessageId: Long) {
+        scope.launch {
+            _state.update {
+                it.copy(checkpoints = it.checkpoints.copy(busy = CheckpointBusy.Redo(userMessageId)))
+            }
+            try {
+                val snapshot = _state.value
+                val frame = snapshot.checkpoints.redoStack.lastOrNull() ?: return@launch
+                val tip = frame.worktreeTipCommit
+                if (tip != null) {
+                    val ok = withContext(Dispatchers.IO) { checkpointStore.restore(context, tip) }
+                    if (!ok) {
+                        appendSystemError("Could not redo file changes.")
+                        return@launch
+                    }
+                }
+                _state.update {
+                    it.copy(
+                        items = frame.items,
+                        checkpoints = it.checkpoints.copy(
+                            ghostFromItemId = frame.ghostFromItemId,
+                            preTurnByMessageId = frame.preTurnByMessageId,
+                            undoableMessageIds = frame.undoableMessageIds,
+                            redoStack = it.checkpoints.redoStack.dropLast(1),
+                        ),
+                    )
+                }
+                persistTimeline()
+            } finally {
+                _state.update {
+                    it.copy(checkpoints = it.checkpoints.copy(busy = null))
+                }
+            }
+        }
+    }
+
+    /**
+     * Truncates from [fromUserMessageId], optionally restores files, then resubmits [text].
+     * [revertFiles] triggers shadow restore and wire resync; keep-files only truncates chat.
+     */
+    fun editAndResend(
+        fromUserMessageId: Long,
+        text: String,
+        images: List<AcpBlock.Image>,
+        files: List<AcpBlock.TextFile>,
+        revertFiles: Boolean,
+    ) {
+        scope.launch {
+            awaitTurnIdle()
+            var optimisticMessageId: Long? = null
+            for (step in editResendSteps(revertFiles)) {
+                when (step) {
+                    EditResendStep.Restore -> {
+                        val hash = awaitPreTurnHash(fromUserMessageId)
+                            ?: _state.value.checkpoints.preTurnByMessageId[fromUserMessageId]
+                        if (hash != null) {
+                            val ok = withContext(Dispatchers.IO) { checkpointStore.restore(context, hash) }
+                            if (!ok) {
+                                appendSystemError("Could not restore workspace files.")
+                                return@launch
+                            }
+                        }
+                    }
+                    EditResendStep.Truncate -> truncateFromUserMessage(fromUserMessageId, clearRedo = true)
+                    EditResendStep.BeginTurn -> {
+                        optimisticMessageId = beginUserTurn(text, images, files) ?: return@launch
+                    }
+                    EditResendStep.WireResync -> {
+                        wireResync(ghostFromItemId = null)
+                        if (agentSessionId == null) {
+                            abortInFlightUserTurn()
+                            return@launch
+                        }
+                    }
+                    EditResendStep.CompleteTurn -> {
+                        val messageId = optimisticMessageId ?: return@launch
+                        completeUserTurn(messageId, text, images, files)
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun awaitTurnIdle() {
+        if (turnInFlight) {
+            agentSessionId?.let { notify("session/cancel", JSONObject().put("sessionId", it)) }
+            var spins = 0
+            while (turnInFlight && spins < 600) {
+                kotlinx.coroutines.delay(100)
+                spins++
+            }
+        }
+    }
+
+    private fun commitGhostBranch(clearRedo: Boolean) {
+        val ghostFrom = _state.value.checkpoints.ghostFromItemId ?: return
+        _state.update { state ->
+            val kept = state.items.filter { it.id < ghostFrom }
+            state.copy(
+                items = kept,
+                checkpoints = state.checkpoints.copy(
+                    ghostFromItemId = null,
+                    preTurnByMessageId = prunePreTurnMap(kept, state.checkpoints.preTurnByMessageId),
+                    undoableMessageIds = pruneUndoableIds(kept, state.checkpoints.undoableMessageIds),
+                    redoStack = if (clearRedo) emptyList() else state.checkpoints.redoStack,
+                ),
+            )
+        }
+        persistTimeline()
+    }
+
+    private fun truncateFromUserMessage(userMessageId: Long, clearRedo: Boolean = false) {
+        _state.update { state ->
+            val kept = state.items.filter { it.id < userMessageId }
+            state.copy(
+                items = kept,
+                checkpoints = state.checkpoints.copy(
+                    ghostFromItemId = null,
+                    preTurnByMessageId = prunePreTurnMap(kept, state.checkpoints.preTurnByMessageId),
+                    undoableMessageIds = pruneUndoableIds(kept, state.checkpoints.undoableMessageIds),
+                    redoStack = if (clearRedo) emptyList() else state.checkpoints.redoStack,
+                ),
+            )
+        }
+        persistTimeline()
+    }
+
+    private fun prunePreTurnMap(items: List<AcpItem>, map: Map<Long, String>): Map<Long, String> {
+        val userIds = items.filterIsInstance<AcpItem.UserMessage>().mapTo(HashSet()) { it.id }
+        return map.filterKeys { it in userIds }
+    }
+
+    private fun pruneUndoableIds(items: List<AcpItem>, ids: Set<Long>): Set<Long> {
+        val userIds = items.filterIsInstance<AcpItem.UserMessage>().mapTo(HashSet()) { it.id }
+        return ids.filterTo(HashSet()) { it in userIds }
+    }
+
+    private suspend fun retireWireSession(sessionId: String?) {
+        if (sessionId.isNullOrBlank()) return
+        hideFromPastList(sessionId)
+        runCatching { notify("session/cancel", JSONObject().put("sessionId", sessionId)) }
+        runCatching {
+            request("session/delete", JSONObject().put("sessionId", sessionId), timeoutMs = 5_000)
+        }
+    }
+
+    private fun hideFromPastList(sessionId: String) {
+        deletedPrefs.edit().putStringSet(deletedKey(), deletedIds() + sessionId).apply()
+    }
+
+    private suspend fun wireResync(ghostFromItemId: Long?) {
+        _state.update { it.copy(checkpoints = it.checkpoints.copy(wireResyncing = true)) }
+        try {
+            val items = _state.value.items
+            val summary = ConversationSummary.fromItems(items, ghostFromItemId)
+            val oldSession = agentSessionId
+            retireWireSession(oldSession)
+            agentSessionId = null
+            openSession()
+            val newSession = agentSessionId
+            if (newSession == null) {
+                pendingWireContext = null
+                appendSystemError("Agent session could not be refreshed after restore.")
+                return
+            }
+            hideFromPastList(newSession)
+            pendingWireContext = summary
+            persistTimeline()
+        } catch (failure: Throwable) {
+            Log.w(TAG, "wire resync failed", failure)
+            pendingWireContext = null
+            appendSystemError("Agent session could not be refreshed after restore.")
+        } finally {
+            _state.update { it.copy(checkpoints = it.checkpoints.copy(wireResyncing = false)) }
+        }
     }
 
     /**
@@ -1059,6 +1522,12 @@ class AcpClient(
                 kind = option.optString("kind"),
             )
         }
+        if (agent.id == "cursor" && CursorAcpPrefs.allowEverything(context)) {
+            CursorAcpPrefs.preferredAllowOptionId(parsed)?.let { optionId ->
+                respondPermission(id, optionId)
+                return
+            }
+        }
         val toolCallId = params?.optJSONObject("toolCall")?.optString("toolCallId")
         _state.update {
             it.copy(
@@ -1071,8 +1540,31 @@ class AcpClient(
         }
     }
 
+    private fun guestLaunchArgs(base: List<String>): List<String> {
+        if (agent.id != "cursor") return base
+        val extras = CursorAcpPrefs.extraLaunchArgs(CursorAcpPrefs.allowEverything(context))
+        if (extras.isEmpty()) return base
+        if (base.any { it == "--force" || it == "--yolo" }) return base
+        return base + extras
+    }
+
     private fun handleUpdate(params: JSONObject?) {
+        val wireSession = params?.optString("sessionId")?.takeIf { it.isNotBlank() }
+        if (wireSession != null && wireSession != agentSessionId) {
+            Log.d(TAG, "Ignoring session/update for inactive session $wireSession")
+            return
+        }
         val update = params?.optJSONObject("update") ?: return
+        if (suppressReplayForMcpReload) {
+            when (update.optString("sessionUpdate")) {
+                "agent_message_chunk",
+                "user_message_chunk",
+                "agent_thought_chunk",
+                "tool_call",
+                "tool_call_update",
+                -> return
+            }
+        }
         when (update.optString("sessionUpdate")) {
             "agent_message_chunk" -> blocks(update.opt("content")).forEach { block ->
                 when (block) {
@@ -1223,7 +1715,10 @@ class AcpClient(
         _state.update { state ->
             val items = state.items.toMutableList()
             val last = items.lastOrNull()
-            if (!state.restoring && last is AcpItem.UserMessage && last.text.trim() == text.trim()) return@update state
+            if (!state.restoring && last is AcpItem.UserMessage) {
+                if (state.checkpoints.preTurnByMessageId.containsKey(last.id)) return@update state
+                if (last.text.trim() == text.trim()) return@update state
+            }
             if (last is AcpItem.UserMessage && state.restoring && last.images.isEmpty() && last.files.isEmpty()) {
                 items[items.lastIndex] = last.copy(text = last.text + text)
             } else {
@@ -1351,8 +1846,34 @@ class AcpClient(
 
     private fun nextItemId(): Long = nextId.getAndIncrement() + 1_000_000
 
+    private fun adoptTimeline(snapshot: AcpPersistedTimeline) {
+        val maxId = snapshot.items.maxOfOrNull { it.id } ?: return
+        nextId.set(AcpTimelineCodec.nextCounter(maxId))
+        _state.update {
+            it.copy(
+                items = snapshot.items,
+                checkpoints = AcpTimelineCodec.durableCheckpoints(snapshot.checkpoints),
+            )
+        }
+    }
+
+    private fun persistTimeline() {
+        val state = _state.value
+        runCatching {
+            AcpTimelineStore.save(
+                context,
+                sessionKey,
+                AcpPersistedTimeline(
+                    items = state.items,
+                    checkpoints = AcpTimelineCodec.durableCheckpoints(state.checkpoints),
+                ),
+            )
+        }
+    }
+
     private companion object {
         const val TAG = "AcpClient"
+        const val MAX_REDO_FRAMES = 20
 
         /** session/prompt answers only when the turn ends, which can take a long while. */
         const val PROMPT_TIMEOUT_MS = 6L * 60 * 60 * 1000

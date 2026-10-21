@@ -6,6 +6,8 @@
          which need no storage permission. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <!-- Lets the Settings update card hand a downloaded TermFold APK to the system installer. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
@@ -17,6 +19,8 @@
          system asks them to confirm), so long agent runs are not cut off by the OEM's
          background killer. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Keeps the CPU scheduling PRoot and agent children while the screen is off. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:name=".TermFoldApp"
@@ -97,7 +101,8 @@
 
         <service
             android:name=".notify.KeepAliveService"
-            android:exported="false" />
+            android:exported="false"
+            android:stopWithTask="false" />
 
         <receiver
             android:name=".notify.StopSessionsReceiver"

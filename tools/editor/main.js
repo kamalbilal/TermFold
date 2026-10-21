@@ -8,13 +8,22 @@ import {
   EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter,
   drawSelection, highlightSpecialChars, rectangularSelection, crosshairCursor, dropCursor,
 } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap, indentWithTab, undo, redo } from "@codemirror/commands";
+import {
+  defaultKeymap, history, historyKeymap, indentWithTab, indentMore, indentLess, undo, redo, selectAll,
+  cursorCharLeft, cursorCharRight, cursorLineUp, cursorLineDown,
+  cursorLineBoundaryBackward, cursorLineBoundaryForward,
+  cursorDocStart, cursorDocEnd, cursorPageUp, cursorPageDown,
+  insertNewlineAndIndent, selectCharLeft, selectCharRight, selectLineUp, selectLineDown,
+} from "@codemirror/commands";
 import {
   indentOnInput, bracketMatching, foldGutter, foldKeymap, syntaxHighlighting,
   HighlightStyle, StreamLanguage, indentUnit,
 } from "@codemirror/language";
 import { searchKeymap, highlightSelectionMatches, openSearchPanel } from "@codemirror/search";
-import { closeBrackets, closeBracketsKeymap, autocompletion, completionKeymap } from "@codemirror/autocomplete";
+import {
+  closeBrackets, closeBracketsKeymap, autocompletion, completionKeymap, startCompletion,
+  completeAnyWord, completionStatus, moveCompletionSelection, acceptCompletion, closeCompletion,
+} from "@codemirror/autocomplete";
 import { tags as t } from "@lezer/highlight";
 
 import { javascript } from "@codemirror/lang-javascript";
@@ -180,11 +189,46 @@ function save() {
 
 const sizeTheme = (px) => EditorView.theme({ ".cm-scroller": { fontSize: px + "px" } });
 
+/** Cross-file `obj.member` hints from Kotlin ([setProjectIndex]); not a language server. */
+let projectMembers = {};
+
+function memberCompletions(obj, partial) {
+  const fromDoc = new Set();
+  const doc = view.state.doc.toString();
+  const re = new RegExp(`\\b${obj.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\.(\\w+)`, "g");
+  for (let m; (m = re.exec(doc)); ) fromDoc.add(m[1]);
+  const fromProject = projectMembers[obj] || [];
+  for (const name of fromProject) fromDoc.add(name);
+  return [...fromDoc]
+    .filter((name) => !partial || name.startsWith(partial))
+    .sort()
+    .map((label) => ({ label, type: "property" }));
+}
+
+function dotMemberCompletion(context) {
+  const line = context.state.doc.lineAt(context.pos);
+  const before = line.text.slice(0, context.pos - line.from);
+  const match = before.match(/(\w+)\.(\w*)$/);
+  if (!match) return null;
+  const [, obj, partial] = match;
+  const options = memberCompletions(obj, partial);
+  if (!options.length) return null;
+  return {
+    from: context.pos - partial.length,
+    to: context.pos,
+    options,
+    validFor: /^\w*$/,
+  };
+}
+
 function extensionsFor(name, isReadOnly) {
   return [
     lineNumbers(), highlightActiveLineGutter(), highlightSpecialChars(), history(), foldGutter(),
     drawSelection(), dropCursor(), EditorState.allowMultipleSelections.of(true), indentOnInput(),
-    syntaxHighlighting(highlight), bracketMatching(), closeBrackets(), autocompletion(),
+    syntaxHighlighting(highlight), bracketMatching(), closeBrackets(), autocompletion({
+      activateOnTyping: true,
+      override: [dotMemberCompletion, completeAnyWord],
+    }),
     rectangularSelection(), crosshairCursor(), highlightActiveLine(), highlightSelectionMatches(),
     indentUnit.of("    "),
     keymap.of([
@@ -203,6 +247,12 @@ function extensionsFor(name, isReadOnly) {
         const line = u.state.doc.lineAt(head);
         host.cursor(line.number, head - line.from + 1);
       }
+    }),
+    EditorView.domEventHandlers({
+      input(event) {
+        if (event.data === ".") queueMicrotask(() => startCompletion(view));
+        return false;
+      },
     }),
   ];
 }
@@ -255,6 +305,140 @@ window.tf = {
   undo() { undo(view); },
   redo() { redo(view); },
   focus() { view.focus(); },
+  setProjectIndex(payload) {
+    if (!payload || typeof payload !== "object") {
+      projectMembers = {};
+      return;
+    }
+    const members = payload.members || {};
+    projectMembers = {};
+    for (const key of Object.keys(members)) {
+      const list = members[key];
+      projectMembers[key] = Array.isArray(list) ? list : [];
+    }
+  },
+  insertText(text) {
+    const { from, to } = view.state.selection.main;
+    view.dispatch({
+      changes: { from, to, insert: text },
+      selection: { anchor: from + text.length },
+    });
+    view.focus();
+  },
+  /** Touch accessory keys: key name plus { ctrl, shift, alt } (object or JSON string). */
+  sendKey(key, mods = {}) {
+    if (typeof mods === "string") {
+      try { mods = JSON.parse(mods); } catch { mods = {}; }
+    }
+    const ctrl = !!mods.ctrl;
+    const shift = !!mods.shift;
+    const alt = !!mods.alt;
+    view.focus();
+    const run = (fn) => { fn(view); return true; };
+    const lower = key.length === 1 ? key.toLowerCase() : key;
+    if (ctrl && lower === "s") return save();
+    if (ctrl && lower === "z" && shift) return run(redo);
+    if (ctrl && lower === "z") return run(undo);
+    if (ctrl && lower === "y") return run(redo);
+    if (ctrl && lower === "f") { openSearchPanel(view); return true; }
+    if (ctrl && lower === "a") return run(selectAll);
+    if (ctrl && (lower === "c" || lower === "x" || lower === "v")) {
+      const cmd = lower === "c" ? "copy" : lower === "x" ? "cut" : "paste";
+      document.execCommand(cmd);
+      return true;
+    }
+    if (completionStatus(view.state) === "active") {
+      switch (key) {
+        case "ArrowUp":
+          return run(moveCompletionSelection(false));
+        case "ArrowDown":
+          return run(moveCompletionSelection(true));
+        case "PageUp":
+          return run(moveCompletionSelection(false, "page"));
+        case "PageDown":
+          return run(moveCompletionSelection(true, "page"));
+        case "Enter":
+          return run(acceptCompletion);
+        case "Escape":
+          return run(closeCompletion);
+        default:
+          break;
+      }
+    }
+    if (dispatchSyntheticKey(key, { ctrl, shift, alt })) return true;
+    switch (key) {
+      case "Tab":
+        return shift ? run(indentLess) : run(indentMore);
+      case "Escape":
+        view.focus();
+        return true;
+      case "Enter":
+        return run(insertNewlineAndIndent);
+      case "ArrowLeft":
+        return shift ? run(selectCharLeft) : run(cursorCharLeft);
+      case "ArrowRight":
+        return shift ? run(selectCharRight) : run(cursorCharRight);
+      case "ArrowUp":
+        return shift ? run(selectLineUp) : run(cursorLineUp);
+      case "ArrowDown":
+        return shift ? run(selectLineDown) : run(cursorLineDown);
+      case "Home":
+        return ctrl ? run(cursorDocStart) : run(cursorLineBoundaryBackward);
+      case "End":
+        return ctrl ? run(cursorDocEnd) : run(cursorLineBoundaryForward);
+      case "PageUp":
+        return run(cursorPageUp);
+      case "PageDown":
+        return run(cursorPageDown);
+      default:
+        if (key.length === 1 && !ctrl && !alt) {
+          const ch = shift ? key.toUpperCase() : key;
+          const { from, to } = view.state.selection.main;
+          view.dispatch({ changes: { from, to, insert: ch }, selection: { anchor: from + ch.length } });
+          return true;
+        }
+        return false;
+    }
+  },
 };
+
+function keyboardCode(key) {
+  if (key === " ") return "Space";
+  if (key === "Enter") return "Enter";
+  if (key === "Escape") return "Escape";
+  if (key === "Tab") return "Tab";
+  if (key === "Home") return "Home";
+  if (key === "End") return "End";
+  if (key === "PageUp") return "PageUp";
+  if (key === "PageDown") return "PageDown";
+  if (key.startsWith("Arrow")) return key;
+  if (key.length === 1 && /[a-zA-Z]/.test(key)) return "Key" + key.toUpperCase();
+  return key;
+}
+
+/** Lets CodeMirror keymaps see Ctrl/Shift/Alt chords from the Android accessory row and IME intercept. */
+function dispatchSyntheticKey(key, { ctrl, shift, alt }) {
+  const letter = key.length === 1 && /[a-zA-Z]/.test(key);
+  const eventKey = letter && shift ? key.toUpperCase() : key;
+  const opts = {
+    key: eventKey,
+    code: keyboardCode(letter && shift ? key.toUpperCase() : key),
+    ctrlKey: ctrl,
+    shiftKey: shift,
+    altKey: alt,
+    bubbles: true,
+    cancelable: true,
+  };
+  const target = view.contentDOM;
+  const down = new KeyboardEvent("keydown", opts);
+  target.dispatchEvent(down);
+  target.dispatchEvent(new KeyboardEvent("keyup", opts));
+  if (down.defaultPrevented) return true;
+  if (ctrl && key === " ") {
+    startCompletion(view);
+    return true;
+  }
+  return false;
+}
 
 host.ready();

@@ -89,6 +89,7 @@ import com.termfold.app.ui.screens.AgentSessionScreen
 import com.termfold.app.ui.screens.ConfirmDialog
 import com.termfold.app.ui.screens.FileManagerScreen
 import com.termfold.app.ui.screens.FilesWorkspace
+import com.termfold.app.ui.screens.LocalWorkspaceEditorOpen
 import com.termfold.app.ui.screens.FolderDetailScreen
 import com.termfold.app.ui.screens.FoldersScreen
 import com.termfold.app.ui.screens.OptionsSheet
@@ -176,7 +177,11 @@ open class TermFoldActivity : ComponentActivity() {
 /** Destinations. Plain state is enough for a graph this shallow. */
 private sealed interface Destination {    data object Tabs : Destination
     data class Folder(val folderId: String) : Destination
-    data class Terminal(val folderId: String, val sessionId: String) : Destination
+    data class Terminal(
+        val folderId: String,
+        val sessionId: String,
+        val workspaceId: String = com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN,
+    ) : Destination
 }
 
 /** How deep a destination sits, used to give the transitions a consistent direction. */
@@ -225,7 +230,7 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
         val place = request ?: return@LaunchedEffect
         val folder = data.folder(place.folderId) ?: return@LaunchedEffect
         destination = if (place.sessionId != null && folder.sessions.any { it.id == place.sessionId }) {
-            Destination.Terminal(folder.id, place.sessionId)
+            Destination.Terminal(folder.id, place.sessionId, place.workspaceId)
         } else {
             Destination.Folder(folder.id)
         }
@@ -240,17 +245,23 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                 presence.label = data.folder(d.folderId)?.name.orEmpty()
             }
             is Destination.Terminal -> {
-                presence.place = com.termfold.app.notify.AppPresence.Place(d.folderId, d.sessionId)
+                presence.place = com.termfold.app.notify.AppPresence.Place(
+                    d.folderId,
+                    d.sessionId,
+                    d.workspaceId,
+                )
                 val folder = data.folder(d.folderId)
                 val session = folder?.sessions?.firstOrNull { it.id == d.sessionId }
                 presence.label = listOfNotNull(session?.name, folder?.name).joinToString(" \u00B7 ")
-                com.termfold.app.notify.Notifier.cancelFor(context, "${d.folderId}/${d.sessionId}")
+                val key = com.termfold.app.gitworkspace.SessionKeys.compose(d.folderId, d.workspaceId, d.sessionId)
+                com.termfold.app.notify.Notifier.cancelFor(context, key)
             }
             else -> presence.place = null
         }
     }
     var filesOpen by rememberSaveable { mutableStateOf(false) }
     val preview by com.termfold.app.preview.Preview.state.collectAsStateWithLifecycle()
+    val gitChanges by com.termfold.app.gitworkspace.GitChanges.state.collectAsStateWithLifecycle()
     // On a tablet the preview sits beside the work; this is its share of the width.
     var previewFraction by rememberSaveable { mutableFloatStateOf(0.5f) }
     var previewMax by rememberSaveable { mutableStateOf(false) }
@@ -264,6 +275,9 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
     var renameFolderId by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf<OptionsTarget?>(null) }
     var addSessionFor by remember { mutableStateOf<String?>(null) }
+    var pendingCursorAdd by remember { mutableStateOf<PendingCursorAdd?>(null) }
+    var cursorBranchPick by remember { mutableStateOf(false) }
+    var pendingCursorProvision by remember { mutableStateOf<PendingCursorProvision?>(null) }
 
     val pickFolder = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree(),
@@ -394,6 +408,26 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                 is Destination.Terminal -> data.folder(d.folderId)
                 else -> null
             }
+            val filesRootHostPath = when (val d = destination) {
+                is Destination.Terminal -> {
+                    if (d.workspaceId == com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN) {
+                        null
+                    } else {
+                        workspaceFolder?.let { folder ->
+                            com.termfold.app.gitworkspace.WorkspaceStore.guestPath(context, folder, d.workspaceId)
+                                ?.let { guest ->
+                                    com.termfold.app.shell.Projects.hostPath(context, guest).absolutePath
+                                }
+                        }
+                    }
+                }
+                else -> null
+            }
+            val sessionWorkspaceFilesScope = when (val d = destination) {
+                is Destination.Terminal ->
+                    d.workspaceId != com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN
+                else -> false
+            }
             // A phone's drawer closes when the screen changes; a tablet keeps the tree docked.
             LaunchedEffect(destination, windowWidth.isWide) {
                 if (!windowWidth.isWide) filesOpen = false
@@ -405,6 +439,8 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                 filesOpen = filesOpen,
                 onCloseFiles = { filesOpen = false },
                 wide = windowWidth.isWide,
+                filesRootHostPath = filesRootHostPath,
+                sessionWorkspaceScope = sessionWorkspaceFilesScope,
               ) {
                 AnimatedContent(
                     targetState = destination,
@@ -451,6 +487,7 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                                     sessionCount = data.folders.sumOf { it.sessions.size },
                                     onRepairShell = { viewModel.retryShell() },
                                     onMigrateShell = { viewModel.offerMigration() },
+                                    viewModel = viewModel,
                                     wide = windowWidth.isWide,
                                 )
                             }
@@ -473,7 +510,8 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                     if (folder == null) {
                         LaunchedEffect(current.folderId) { destination = Destination.Tabs }
                     } else {
-                        BackHandler { destination = Destination.Tabs }
+                        val workspaceEditorOpen = LocalWorkspaceEditorOpen.current
+                        BackHandler(enabled = !workspaceEditorOpen) { destination = Destination.Tabs }
                         FolderDetailScreen(
                             folder = folder,
                             wide = windowWidth.isWide,
@@ -486,7 +524,9 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                             filesOpen = filesOpen,
                             onToggleFiles = { filesOpen = !filesOpen },
                             onOpenSession = { sessionId ->
-                                destination = Destination.Terminal(folder.id, sessionId)
+                                val ws = folder.sessions.firstOrNull { it.id == sessionId }?.workspaceId
+                                    ?: com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN
+                                destination = Destination.Terminal(folder.id, sessionId, ws)
                             },
                             onAddSession = { addSessionFor = folder.id },
                             onRenameFolder = { renameFolderId = folder.id },
@@ -509,10 +549,12 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                             destination = Destination.Tabs
                         }
                     } else if (session.acpAgentId.isNotBlank()) {
-                        BackHandler { destination = Destination.Folder(folder.id) }
+                        val workspaceEditorOpen = LocalWorkspaceEditorOpen.current
+                        BackHandler(enabled = !workspaceEditorOpen) { destination = Destination.Folder(folder.id) }
                         AgentSessionScreen(
                             folder = folder,
                             sessionId = session.id,
+                            workspaceId = current.workspaceId,
                             agentId = session.acpAgentId,
                             modifier = Modifier.windowInsetsPadding(
                                 WindowInsets.safeDrawing.only(
@@ -524,10 +566,12 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                             onToggleFiles = { filesOpen = !filesOpen },
                         )
                     } else {
-                        BackHandler { destination = Destination.Folder(folder.id) }
+                        val workspaceEditorOpen = LocalWorkspaceEditorOpen.current
+                        BackHandler(enabled = !workspaceEditorOpen) { destination = Destination.Folder(folder.id) }
                         TerminalScreen(
                             folder = folder,
                             sessionId = session.id,
+                            workspaceId = current.workspaceId,
                             sessionName = session.name,
                             initialCommand = session.command,
                             wide = windowWidth.isWide,
@@ -591,6 +635,23 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                     )
                 }
             }
+        }
+
+        androidx.compose.animation.AnimatedVisibility(
+            visible = gitChanges.open,
+            enter = androidx.compose.animation.fadeIn(Motion.standard()),
+            exit = androidx.compose.animation.fadeOut(Motion.quick()),
+            modifier = Modifier.zIndex(2f),
+        ) {
+            androidx.activity.compose.BackHandler { com.termfold.app.gitworkspace.GitChanges.close() }
+            com.termfold.app.ui.screens.GitChangesPane(
+                state = gitChanges,
+                onClose = { com.termfold.app.gitworkspace.GitChanges.close() },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(com.termfold.app.ui.theme.Palette.Bg)
+                    .windowInsetsPadding(WindowInsets.safeDrawing),
+            )
         }
 
         // ---- The preview over everything (phone, or full screen on a tablet).
@@ -695,10 +756,102 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
         onDismissDelete = { confirmDelete = null },
         addSessionFor = addSessionFor,
         onDismissAddSession = { addSessionFor = null },
+        onCreateSession = { folderId, name, command, acpAgentId ->
+            if (acpAgentId == CURSOR_AGENT_ID) {
+                pendingCursorAdd = PendingCursorAdd(folderId, name, acpAgentId)
+                addSessionFor = null
+            } else {
+                viewModel.addSession(folderId, name, command, acpAgentId)
+                addSessionFor = null
+            }
+        },
         folderNameFor = { id -> data.folder(id)?.name.orEmpty() },
         sessionIdsFor = { id -> data.folder(id)?.sessions?.map { it.id }.orEmpty() },
     )
+
+    pendingCursorAdd?.let { pending ->
+        val folder = data.folder(pending.folderId)
+        if (folder == null) {
+            pendingCursorAdd = null
+            cursorBranchPick = false
+        } else if (cursorBranchPick) {
+            com.termfold.app.ui.screens.WorkspaceBranchPickDialog(
+                folder = folder,
+                onDismiss = {
+                    cursorBranchPick = false
+                    pendingCursorAdd = null
+                },
+                onPickBranch = { branch ->
+                    val workspaceId = com.termfold.app.gitworkspace.ProjectWorkspaces.newSessionId()
+                    val sessionId = com.termfold.app.core.Ids.new()
+                    pendingCursorProvision = PendingCursorProvision(
+                        folderId = pending.folderId,
+                        name = pending.name,
+                        acpAgentId = pending.acpAgentId,
+                        branch = branch,
+                        workspaceId = workspaceId,
+                        sessionId = sessionId,
+                    )
+                    pendingCursorAdd = null
+                    cursorBranchPick = false
+                },
+            )
+        } else {
+            com.termfold.app.ui.screens.CursorAddModeDialog(
+                onDismiss = { pendingCursorAdd = null },
+                onSharedProject = {
+                    viewModel.addSession(pending.folderId, pending.name, "", pending.acpAgentId)
+                    pendingCursorAdd = null
+                },
+                onBranchCopy = { cursorBranchPick = true },
+            )
+        }
+    }
+
+    pendingCursorProvision?.let { pending ->
+        val folder = data.folder(pending.folderId)
+        if (folder == null) {
+            pendingCursorProvision = null
+        } else {
+            com.termfold.app.ui.screens.WorkspaceProvisionDialog(
+                folder = folder,
+                branch = pending.branch,
+                sessionWorkspaceId = pending.workspaceId,
+                onDismiss = { pendingCursorProvision = null },
+                onComplete = {
+                    viewModel.addSession(
+                        pending.folderId,
+                        pending.name,
+                        "",
+                        pending.acpAgentId,
+                        pending.workspaceId,
+                        pending.sessionId,
+                    )
+                    destination = Destination.Folder(pending.folderId)
+                    pendingCursorProvision = null
+                },
+                onCancelled = { pendingCursorProvision = null },
+            )
+        }
+    }
 }
+
+private const val CURSOR_AGENT_ID = "cursor"
+
+private data class PendingCursorAdd(
+    val folderId: String,
+    val name: String,
+    val acpAgentId: String,
+)
+
+private data class PendingCursorProvision(
+    val folderId: String,
+    val name: String,
+    val acpAgentId: String,
+    val branch: String,
+    val workspaceId: String,
+    val sessionId: String,
+)
 
 @Composable
 private fun OptionsLayer(
@@ -712,6 +865,7 @@ private fun OptionsLayer(
     onDismissDelete: () -> Unit,
     addSessionFor: String?,
     onDismissAddSession: () -> Unit,
+    onCreateSession: (folderId: String, name: String, command: String, acpAgentId: String) -> Unit,
     folderNameFor: (String) -> String,
     sessionIdsFor: (String) -> List<String>,
 ) {
@@ -752,19 +906,11 @@ private fun OptionsLayer(
                 if (isFolder) {
                     // End the folder's running sessions before the definitions disappear,
                     // otherwise their processes would idle on with no way to reach them.
-                    sessionIdsFor(target.folderId).forEach { sessionId ->
-                        val key = TerminalHost.sessionKey(target.folderId, sessionId)
-                        TerminalHost.closeSession(key)
-                        com.termfold.app.acp.AcpSessions.close(key)
-                    }
+                    com.termfold.app.shell.SessionRegistry.closeAll(target.folderId)
                     viewModel.removeFolder(target.folderId)
                 } else {
                     val sessionId = (target as OptionsTarget.Session).sessionId
-                    val key = TerminalHost.sessionKey(target.folderId, sessionId)
-                    // Removing a session ends it: the terminal closes, the agent process dies,
-                    // and the process tree is released.
-                    TerminalHost.closeSession(key)
-                    com.termfold.app.acp.AcpSessions.close(key)
+                    com.termfold.app.shell.SessionRegistry.closeAll(target.folderId, sessionId)
                     viewModel.removeSession(target.folderId, sessionId)
                 }
             },
@@ -776,8 +922,7 @@ private fun OptionsLayer(
         NewSessionDialog(
             onDismiss = onDismissAddSession,
             onCreate = { name, command, acpAgentId ->
-                viewModel.addSession(folderId, name, command, acpAgentId)
-                onDismissAddSession()
+                onCreateSession(folderId, name, command, acpAgentId)
             },
         )
     }

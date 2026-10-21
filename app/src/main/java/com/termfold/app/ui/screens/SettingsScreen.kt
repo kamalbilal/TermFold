@@ -32,6 +32,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.termfold.app.BuildConfig
 import com.termfold.app.R
+import com.termfold.app.acp.CursorAcpPrefs
+import com.termfold.app.core.AppViewModel
 import com.termfold.app.core.ShellState
 import com.termfold.app.ui.components.BottomNavSpacer
 import com.termfold.app.ui.components.GroupLabel
@@ -45,6 +47,7 @@ fun SettingsScreen(
     folderCount: Int,
     sessionCount: Int,
     onRepairShell: () -> Unit,
+    viewModel: AppViewModel,
     modifier: Modifier = Modifier,
     wide: Boolean = false,
     onMigrateShell: () -> Unit = {},
@@ -89,8 +92,16 @@ fun SettingsScreen(
             }
 
             item { Spacer(Modifier.height(20.dp)) }
+            item { GroupLabel(stringResource(R.string.backup_title)) }
+            item { BackupCard(viewModel) }
+
+            item { Spacer(Modifier.height(20.dp)) }
             item { GroupLabel(stringResource(R.string.update_title)) }
             item { UpdatesCard() }
+
+            item { Spacer(Modifier.height(20.dp)) }
+            item { GroupLabel(stringResource(R.string.settings_cursor)) }
+            item { CursorAcpCard() }
 
             item { Spacer(Modifier.height(20.dp)) }
             item { GroupLabel(stringResource(R.string.settings_terminal)) }
@@ -149,6 +160,32 @@ fun SettingsScreen(
 
             item { BottomNavSpacer() }
         }
+    }
+}
+
+@Composable
+private fun CursorAcpCard() {
+    val context = LocalContext.current
+    var allowEverything by remember { androidx.compose.runtime.mutableStateOf(CursorAcpPrefs.allowEverything(context)) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(Palette.Card)
+            .padding(horizontal = 18.dp, vertical = 8.dp),
+    ) {
+        SwitchRow(
+            title = stringResource(R.string.settings_cursor_allow_everything),
+            body = stringResource(R.string.settings_cursor_allow_everything_desc),
+            checked = allowEverything,
+            onChange = {
+                allowEverything = it
+                CursorAcpPrefs.setAllowEverything(context, it)
+            },
+            warning = null,
+            actionLabel = "",
+            onAction = {},
+        )
     }
 }
 
@@ -224,6 +261,18 @@ private fun BackgroundCard() {
             warning = if (!unrestricted) stringResource(R.string.settings_battery_off) else null,
             actionLabel = stringResource(R.string.settings_battery_allow),
             onAction = { runCatching { context.startActivity(batteryIntent(context, true)) } },
+        )
+        HairlineDivider()
+        Text(
+            text = stringResource(R.string.settings_phantom_title),
+            style = MaterialTheme.typography.titleSmall,
+            color = Palette.Text,
+        )
+        Text(
+            text = stringResource(R.string.settings_phantom_desc),
+            style = MaterialTheme.typography.bodyMedium,
+            color = Palette.TextDim,
+            modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
         )
     }
 }

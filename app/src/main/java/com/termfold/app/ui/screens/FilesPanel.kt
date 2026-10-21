@@ -46,9 +46,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,6 +72,8 @@ import com.termfold.app.R
 import com.termfold.app.ui.components.LaunchedWhileVisible
 import com.termfold.app.files.FileActions
 import com.termfold.app.core.Folder
+import com.termfold.app.shell.Projects
+import androidx.compose.ui.platform.LocalContext
 import com.termfold.app.ui.components.BareIconButton
 import com.termfold.app.ui.theme.Mono
 import com.termfold.app.ui.theme.Palette
@@ -79,6 +84,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import com.termfold.app.ui.theme.Motion
+
+/** Opens a project file in the workspace editor (provided by [FilesWorkspace]). */
+val LocalWorkspaceFileOpener = compositionLocalOf<(File) -> Unit> { {} }
+
+/** True while [FilesWorkspace] is showing the file editor over the session UI. */
+val LocalWorkspaceEditorOpen = compositionLocalOf { false }
 
 /**
  * The project's files beside whatever is on screen (a chat, a shell or the folder's session
@@ -94,9 +105,18 @@ fun FilesWorkspace(
     filesOpen: Boolean,
     onCloseFiles: () -> Unit,
     wide: Boolean,
+    filesRootHostPath: String? = null,
+    sessionWorkspaceScope: Boolean = false,
     content: @Composable () -> Unit,
 ) {
-    val root = folder?.path?.takeIf { it.isNotBlank() }?.let(::File)
+    val context = LocalContext.current
+    val root = remember(folder?.id, filesRootHostPath, folder?.path) {
+        when {
+            !filesRootHostPath.isNullOrBlank() -> File(filesRootHostPath)
+            folder != null -> Projects.resolveFolderHostPath(context, folder.path)
+            else -> null
+        }
+    }
     var editing by remember(folder?.id) { mutableStateOf<File?>(null) }
     var editorDirty by remember { mutableStateOf(false) }
     // The file to switch to once the user decides about unsaved changes (null: close).
@@ -125,6 +145,7 @@ fun FilesWorkspace(
         if (folder != null) {
             FileTree(
                 folderName = folder.name,
+                sessionWorkspaceScope = sessionWorkspaceScope,
                 root = root,
                 selected = editing,
                 onOpen = ::openFile,
@@ -149,6 +170,10 @@ fun FilesWorkspace(
         }
     }
 
+    CompositionLocalProvider(
+        LocalWorkspaceFileOpener provides { file -> openFile(file) },
+        LocalWorkspaceEditorOpen provides (editing != null),
+    ) {
     Row(Modifier.fillMaxSize()) {
         if (wide) {
             AnimatedVisibility(
@@ -172,6 +197,7 @@ fun FilesWorkspace(
             content()
 
             editing?.let { file ->
+                BackHandler(onBack = ::closeEditor)
                 CodeEditor(
                     file = file,
                     root = root,
@@ -194,6 +220,7 @@ fun FilesWorkspace(
 
             if (!wide) DrawerOverlay(visible = showPanel, onDismiss = onCloseFiles, panel = tree)
         }
+    }
     }
 
     // Back closes the drawer first, then the editor.
@@ -304,6 +331,7 @@ internal fun deleteTree(target: File): Boolean {
 @Composable
 private fun FileTree(
     folderName: String,
+    sessionWorkspaceScope: Boolean = false,
     root: File?,
     selected: File?,
     onOpen: (File) -> Unit,
@@ -473,7 +501,11 @@ private fun FileTree(
                     color = Palette.Text,
                 )
                 Text(
-                    folderName,
+                    if (sessionWorkspaceScope) {
+                        stringResource(R.string.files_session_workspace_subtitle, folderName)
+                    } else {
+                        folderName
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = Palette.TextFaint,
                     maxLines = 1,
@@ -1114,7 +1146,9 @@ private fun TextEditor(
     var cursor by remember(file) { mutableStateOf(1 to 1) }
     var wrap by rememberSaveable { mutableStateOf(false) }
     var pageReady by remember { mutableStateOf(false) }
-    var webView by remember { mutableStateOf<WebView?>(null) }
+    var webView by remember { mutableStateOf<EditorWebView?>(null) }
+    val editorModifiers = remember { EditorModifierState() }
+    var jsInFlight by remember { mutableIntStateOf(0) }
     // The file's modification time as last read or written, to notice outside edits.
     var knownModified by remember(file) { mutableStateOf(0L) }
 
@@ -1129,15 +1163,45 @@ private fun TextEditor(
         (loaded as? Loaded.Text)?.let { knownModified = it.modified }
     }
 
-    fun js(code: String) = webView?.evaluateJavascript(code, null)
+    fun js(code: String) {
+        val wv = webView ?: return
+        jsInFlight++
+        editorModifiers.imeRoutingSuspended = true
+        wv.post {
+            wv.requestFocus()
+            wv.evaluateJavascript(
+                "(function(){try{$code}catch(e){console.error('editor-js',e)}})();",
+            ) { _ ->
+                wv.post {
+                    jsInFlight--
+                    if (jsInFlight <= 0) {
+                        jsInFlight = 0
+                        editorModifiers.imeRoutingSuspended = false
+                    }
+                }
+            }
+        }
+    }
+
+    fun sendEditorKey(logicalKey: String, mods: EditorModifierState = editorModifiers) {
+        val key = if (logicalKey == "\n") "Enter" else logicalKey
+        val modsJson = org.json.JSONObject()
+            .put("ctrl", mods.controlDown)
+            .put("shift", mods.shiftDown)
+            .put("alt", mods.altDown)
+        js("tf.sendKey(${org.json.JSONObject.quote(key)}, $modsJson)")
+    }
 
     // Hand the text to the page once both are ready.
-    LaunchedEffect(loaded, pageReady) {
+    LaunchedEffect(loaded, pageReady, root) {
         val text = loaded as? Loaded.Text ?: return@LaunchedEffect
         if (!pageReady) return@LaunchedEffect
         val b64 = Base64.encodeToString(text.bytes, Base64.NO_WRAP)
         val name = org.json.JSONObject.quote(file.name)
-        js("tf.setWrap($wrap); tf.open('$b64', $name, ${!text.writable});")
+        val projectIndex = withContext(Dispatchers.IO) {
+            root?.let { EditorProjectCompletionIndex.jsonFor(it) } ?: "null"
+        }
+        js("tf.setProjectIndex($projectIndex); tf.setWrap($wrap); tf.open('$b64', $name, ${!text.writable});")
     }
 
     // Pick up edits made outside the editor (an agent or the shell) while there are no local
@@ -1253,7 +1317,7 @@ private fun TextEditor(
                     view.destroy()
                 },
                 factory = { context ->
-                    WebView(context).apply {
+                    EditorWebView(context, editorModifiers).apply {
                         setBackgroundColor(android.graphics.Color.parseColor("#08080A"))
                         settings.javaScriptEnabled = true
                         // The page is the app's own bundled asset; it needs nothing else. No
@@ -1283,6 +1347,9 @@ private fun TextEditor(
                             }
                         }
                         addJavascriptInterface(bridge, "Android")
+                        isFocusable = true
+                        isFocusableInTouchMode = true
+                        onImeKey = { key -> sendEditorKey(key) }
                         loadUrl(EDITOR_PAGE)
                         webView = this
                     }
@@ -1312,6 +1379,12 @@ private fun TextEditor(
                 FooterText(stringResource(R.string.files_cursor, cursor.first, cursor.second))
                 FooterText(languageLabel(file.name))
                 if (!text.writable) FooterText(stringResource(R.string.files_read_only), Palette.Yellow)
+            }
+            if (pageReady) {
+                EditorAccessoryKeys(
+                    modifierState = editorModifiers,
+                    onJs = { code -> js(code) },
+                )
             }
         }
     }

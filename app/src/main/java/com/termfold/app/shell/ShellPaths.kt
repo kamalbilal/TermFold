@@ -16,6 +16,46 @@ object ShellPaths {
     fun tempDir(context: Context): File =
         File(context.filesDir, ShellConfig.TEMP_DIR).apply { mkdirs() }
 
+    /** Host tree for guest `/tmp` and tool caches (bind-mounted into Debian). */
+    fun guestScratchDir(context: Context): File = guestScratchDir(tempDir(context))
+
+    fun guestScratchDir(tempRoot: File): File = File(tempRoot, "guest-scratch")
+
+    /** Guest `/tmp` after bind mount. */
+    fun guestScratchTmp(context: Context): File =
+        guestScratchTmp(tempDir(context)).apply { mkdirs() }
+
+    fun guestScratchTmp(tempRoot: File): File = File(guestScratchDir(tempRoot), "tmp")
+
+    /** Host side of guest `npm_config_cache`. */
+    fun guestScratchNpmCache(context: Context): File =
+        guestScratchNpmCache(tempDir(context)).apply { mkdirs() }
+
+    fun guestScratchNpmCache(tempRoot: File): File = File(guestScratchDir(tempRoot), "npm-cache")
+
+    /** Host side of guest `NODE_COMPILE_CACHE`. */
+    fun guestScratchNodeCompileCache(context: Context): File =
+        guestScratchNodeCompileCache(tempDir(context)).apply { mkdirs() }
+
+    fun guestScratchNodeCompileCache(tempRoot: File): File =
+        File(guestScratchDir(tempRoot), "node-compile-cache")
+
+    /** Guest paths that [ProotCommand] bind-mounts over. */
+    const val GUEST_TMP = "/tmp"
+    const val GUEST_NPM_CACHE = "/var/cache/termfold/npm"
+    const val GUEST_NODE_COMPILE_CACHE = "/var/cache/termfold/node-compile-cache"
+
+    /** Creates host scratch dirs used for guest `/tmp` and Node/npm caches. */
+    fun ensureGuestScratch(context: Context) {
+        ensureGuestScratch(tempDir(context))
+    }
+
+    fun ensureGuestScratch(tempRoot: File) {
+        guestScratchTmp(tempRoot).mkdirs()
+        guestScratchNpmCache(tempRoot).mkdirs()
+        guestScratchNodeCompileCache(tempRoot).mkdirs()
+    }
+
     /**
      * PRoot needs a writable `/dev/shm`, and Android's own is owned by the system. Debian's apt
      * refuses to run without one, so this directory is bind-mounted over `/dev/shm` in the guest.

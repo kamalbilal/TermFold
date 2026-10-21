@@ -41,6 +41,13 @@ import com.termfold.app.ui.components.RowSpacer
 import com.termfold.app.ui.theme.Palette
 import com.termfold.app.ui.theme.TermFoldIcons
 import com.termfold.app.ui.theme.folderTint
+import com.termfold.app.gitworkspace.GitWorkspace
+import com.termfold.app.gitworkspace.WorkspaceIds
+import com.termfold.app.gitworkspace.WorkspaceStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+private const val CURSOR_AGENT_ID = "cursor"
 
 /** Screen 2: sessions inside one folder. */
 @Composable
@@ -69,22 +76,33 @@ fun FolderDetailScreen(
     // Which sessions are working, refreshed twice a second: an ACP agent answering or setting
     // up, or a terminal whose program is producing output of its own.
     var working by remember { mutableStateOf(emptySet<String>()) }
+    var copyBranchChips by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+
     LaunchedWhileVisible(folder.id, folder.sessions) {
         while (true) {
             working = folder.sessions.mapNotNull { session ->
-                val key = com.termfold.app.shell.TerminalHost.sessionKey(folder.id, session.id)
-                val busy = if (session.acpAgentId.isNotBlank()) {
-                    com.termfold.app.acp.AcpSessions.client(key)?.state?.value?.let { state ->
-                        state.agentBusy ||
-                            state.phase == com.termfold.app.acp.AcpPhase.INSTALLING ||
-                            state.phase == com.termfold.app.acp.AcpPhase.CONNECTING
-                    } == true
-                } else {
-                    com.termfold.app.shell.TerminalHost.isWorking(key)
-                }
+                val busy = com.termfold.app.shell.SessionRegistry.isBusy(
+                    folder.id,
+                    session.id,
+                    session.acpAgentId,
+                )
                 session.id.takeIf { busy }
             }.toSet()
-            kotlinx.coroutines.delay(500)
+            copyBranchChips = withContext(Dispatchers.IO) {
+                buildMap {
+                    folder.sessions.forEach { session ->
+                        if (session.acpAgentId != CURSOR_AGENT_ID) return@forEach
+                        if (session.workspaceId == WorkspaceIds.GOLDEN) return@forEach
+                        val guest = WorkspaceStore.guestPath(context, folder, session.workspaceId) ?: return@forEach
+                        val branch = GitWorkspace.currentBranch(context, guest)
+                            ?: WorkspaceStore.get(context, folder.id, session.workspaceId)?.lastKnownBranch
+                        if (!branch.isNullOrBlank()) {
+                            put(session.id, branch)
+                        }
+                    }
+                }
+            }
+            kotlinx.coroutines.delay(2500)
         }
     }
 
@@ -162,8 +180,19 @@ fun FolderDetailScreen(
         ) {
             items(folder.sessions, key = { it.id }) { session ->
                 val agent = registryAgents.firstOrNull { it.id == session.acpAgentId }
+                val copyBranch = copyBranchChips[session.id]
                 ListRow(
                     title = session.name,
+                    subtitle = if (copyBranch != null) {
+                        {
+                            SessionBranchChip(
+                                stringResource(R.string.workspace_session_branch_copy, copyBranch),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    } else {
+                        null
+                    },
                     leading = {
                         if (session.acpAgentId.isNotBlank()) {
                             Box(
@@ -181,20 +210,22 @@ fun FolderDetailScreen(
                         }
                     },
                     trailing = {
-                        if (session.id in working) {
-                            androidx.compose.material3.CircularProgressIndicator(
-                                modifier = Modifier.padding(end = 4.dp).size(16.dp),
-                                strokeWidth = 2.dp,
-                                color = Palette.Accent,
-                            )
-                        }
-                        BareIconButton(
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (session.id in working) {
+                                androidx.compose.material3.CircularProgressIndicator(
+                                    modifier = Modifier.padding(end = 4.dp).size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = Palette.Accent,
+                                )
+                            }
+                            BareIconButton(
                             icon = TermFoldIcons.More,
                             contentDescription = stringResource(R.string.cd_more),
                             onClick = { onOpenOptions(session.id) },
                             size = 34,
                             tint = Palette.TextFaint,
                         )
+                        }
                     },
                     highlighted = session.tint == 0,
                     onClick = { onOpenSession(session.id) },

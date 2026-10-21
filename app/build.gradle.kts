@@ -157,6 +157,9 @@ dependencies {
     // bzip2 decoder is used — tar and zip parsing stay in the app's own pure-Kotlin reader.
     implementation("org.apache.commons:commons-compress:1.25.0")
 
+    // Fuzzy ranking for composer @ and / menus (partial + token-set ratios).
+    implementation("me.xdrop:fuzzywuzzy:1.4.0")
+
     // A real org.json for the JVM tests, whose classpath otherwise only has the Android
     // stubs that throw on every call.
     testImplementation("org.json:json:20240303")

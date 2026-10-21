@@ -40,16 +40,40 @@ internal object TarExtractor {
          * needs links that point anywhere, so it is extracted unconfined.
          */
         confined: Boolean = false,
+        /**
+         * When set, each tar path is written to the returned file (or skipped when null).
+         * Hard links resolve [linkName] through the same mapper. Used for restore so the
+         * archive is never fully unpacked to a scratch tree.
+         */
+        entryTarget: ((String) -> File?)? = null,
+        /** With [entryTarget], every written path must lie under one of these roots. */
+        confinedRoots: List<File> = emptyList(),
     ) {
         destination.mkdirs()
-        val home = if (confined) destination.canonicalPath + File.separator else null
+        val home = if (confined && entryTarget == null) destination.canonicalPath + File.separator else null
+        val roots = if (confined && entryTarget != null) {
+            confinedRoots.map { it.canonicalFile }
+        } else {
+            emptyList()
+        }
         fun inside(file: File): File {
             if (home != null) {
                 val real = (file.parentFile?.canonicalPath ?: "") + File.separator
                 require(real.startsWith(home)) { "Unsafe path in archive: ${file.path}" }
             }
+            if (roots.isNotEmpty()) {
+                val canonical = file.canonicalFile
+                val ok = roots.any { root ->
+                    val prefix = root.path + File.separator
+                    canonical.path == root.path || canonical.path.startsWith(prefix)
+                }
+                require(ok) { "Unsafe path in archive: ${file.path}" }
+            }
             return file
         }
+
+        fun resolve(name: String): File? =
+            entryTarget?.invoke(name) ?: target(destination, name)
 
         val buffer = ByteArray(BLOCK)
         var pendingLongName: String? = null
@@ -104,38 +128,46 @@ internal object TarExtractor {
 
                 // A regular file: its contents are this entry's payload.
                 '0', '\u0000', '7' -> {
-                    val file = target(destination, fullName)
-                    file.parentFile?.mkdirs()
-                    inside(file)
-                    file.parentFile?.mkdirs()
-                    writeFile(stream, file, size, mode)
-                    // The payload has been consumed, but its block padding has not.
+                    val file = resolve(fullName)
+                    if (file != null) {
+                        file.parentFile?.mkdirs()
+                        inside(file)
+                        file.parentFile?.mkdirs()
+                        writeFile(stream, file, size, mode)
+                    } else {
+                        skipFully(stream, size)
+                    }
                     skipPadding(stream, size)
                     payloadRead = true
                 }
 
-                '5' -> target(destination, fullName).mkdirs()
+                '5' -> resolve(fullName)?.mkdirs()
 
                 '2' -> {
-                    val link = target(destination, fullName)
-                    link.parentFile?.mkdirs()
-                    createSymlink(link, linkName, onWarning)
+                    val link = resolve(fullName)
+                    if (link != null) {
+                        link.parentFile?.mkdirs()
+                        inside(link)
+                        createSymlink(link, linkName, onWarning)
+                    }
                 }
 
                 // A hard link: both names have to end up referring to one file. If the
                 // filesystem refuses, a copy is a correct if slightly wasteful substitute.
                 '1' -> {
-                    val link = target(destination, fullName)
-                    val source = target(destination, linkName)
-                    link.parentFile?.mkdirs()
-                    inside(link)
-                    inside(source)
-                    link.parentFile?.mkdirs()
-                    runCatching {
-                        link.delete()
-                        Files.createLink(link.toPath(), source.toPath())
-                    }.onFailure {
-                        runCatching { source.copyTo(link, overwrite = true) }
+                    val link = resolve(fullName)
+                    val source = resolve(linkName)
+                    if (link != null && source != null) {
+                        link.parentFile?.mkdirs()
+                        inside(link)
+                        inside(source)
+                        link.parentFile?.mkdirs()
+                        runCatching {
+                            link.delete()
+                            Files.createLink(link.toPath(), source.toPath())
+                        }.onFailure {
+                            runCatching { source.copyTo(link, overwrite = true) }
+                        }
                     }
                 }
 

@@ -63,6 +63,7 @@ import com.termfold.app.ui.theme.TermFoldIcons
 fun TerminalScreen(
     folder: Folder,
     sessionId: String,
+    workspaceId: String = com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN,
     sessionName: String,
     initialCommand: String,
     onBack: () -> Unit,
@@ -93,10 +94,37 @@ fun TerminalScreen(
     // Start (or adopt) the session for this folder+session pair. The spec is stable for a given
     // entry, so returning to a live session reuses it rather than restarting PRoot. Keying by the
     // pair is what lets several sessions of one folder keep their shells side by side.
-    val sessionKey = TerminalHost.sessionKey(folder.id, sessionId)
-    val spec = remember(folder.id, folder.path, initialCommand, sessionName) {
+    val guestWorkspace = com.termfold.app.gitworkspace.WorkspaceStore.guestPath(context, folder, workspaceId)
+    if (guestWorkspace == null) {
+        Column(modifier = modifier.fillMaxSize()) {
+            TerminalHeader(
+                title = sessionName,
+                subtitle = folder.name,
+                exited = true,
+                previewDir = null,
+                filesOpen = false,
+                onToggleFiles = {},
+                findOpen = false,
+                onToggleFind = {},
+                onBack = onBack,
+                onRestart = onRestart,
+                onFontSize = {},
+            )
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    stringResource(R.string.workspace_unavailable_body),
+                    color = Palette.TextDim,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        }
+        return
+    }
+    val workspaceHost = com.termfold.app.shell.Projects.hostPath(context, guestWorkspace).absolutePath
+    val sessionKey = TerminalHost.sessionKey(folder.id, workspaceId, sessionId)
+    val spec = remember(folder.id, workspaceHost, initialCommand, sessionName) {
         TerminalHost.Spec(
-            workspace = folder.path.takeIf { it.isNotBlank() },
+            workspace = workspaceHost.takeIf { it.isNotBlank() },
             initialCommand = initialCommand,
             title = sessionName,
         )
@@ -363,7 +391,7 @@ private data class ExtraKey(
  * evenly spaced targets instead of a small strip in the middle of a wide screen.
  */
 @Composable
-private fun KeyRow(
+internal fun KeyRow(
     controlDown: Boolean,
     altDown: Boolean,
     onToggleControl: () -> Unit,
@@ -453,7 +481,7 @@ private fun KeyRow(
  * key: a share of the full width on wide screens, nothing (natural size, scrolling row) on phones.
  */
 @Composable
-private fun KeyLine(
+internal fun KeyLine(
     wide: Boolean,
     gap: androidx.compose.ui.unit.Dp,
     content: @Composable androidx.compose.foundation.layout.RowScope.(stretch: (Float) -> Modifier) -> Unit,
@@ -492,7 +520,7 @@ private fun KeyLine(
  * manager is asked directly as a fallback, because either alone can silently do nothing
  * depending on what currently holds focus.
  */
-private fun requestTerminalFocus(
+internal fun requestTerminalFocus(
     view: com.termux.view.TerminalView?,
     keyboard: androidx.compose.ui.platform.SoftwareKeyboardController?,
 ) {
@@ -510,7 +538,7 @@ private fun requestTerminalFocus(
 }
 
 /** Every key the on-screen row can send. */
-private enum class SpecialKey {    ESC,
+internal enum class SpecialKey {    ESC,
     TAB,
     ENTER,
     CTRL_C,
@@ -540,7 +568,7 @@ private const val REPEAT_INTERVAL_MS = 55L
  * [repeats] keys fire again and again while held.
  */
 @Composable
-private fun KeySurface(
+internal fun KeySurface(
     fill: androidx.compose.ui.graphics.Color,
     pressedFill: androidx.compose.ui.graphics.Color,
     height: androidx.compose.ui.unit.Dp,
@@ -597,7 +625,7 @@ private fun KeySurface(
 }
 
 @Composable
-private fun ModifierKey(
+internal fun ModifierKey(
     label: String,
     active: Boolean,
     height: androidx.compose.ui.unit.Dp,
@@ -618,7 +646,7 @@ private fun ModifierKey(
 }
 
 @Composable
-private fun KeyButton(
+internal fun KeyButton(
     label: String,
     onClick: () -> Unit,
     height: androidx.compose.ui.unit.Dp,
@@ -641,7 +669,7 @@ private fun KeyButton(
 }
 
 @Composable
-private fun KeyLabel(label: String, wide: Boolean, color: androidx.compose.ui.graphics.Color) {
+internal fun KeyLabel(label: String, wide: Boolean, color: androidx.compose.ui.graphics.Color) {
     Text(
         text = label,
         style = MaterialTheme.typography.labelSmall.copy(

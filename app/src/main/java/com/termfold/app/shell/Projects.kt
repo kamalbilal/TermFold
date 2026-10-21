@@ -43,6 +43,12 @@ object Projects {
     fun hostPath(context: Context, guestPath: String): File =
         File(ShellPaths.rootfsDir(context), guestPath.trimStart('/'))
 
+    /** Host [File] for a [Folder.path] value (host absolute) or a guest project path. */
+    fun resolveFolderHostPath(context: Context, folderPath: String): File? {
+        if (folderPath.isBlank()) return null
+        return if (isInGuest(context, folderPath)) File(folderPath) else hostPath(context, folderPath)
+    }
+
     /**
      * A directory name for a project called [display]: readable, safe in a shell (no spaces or
      * quotes to trip over), and not already taken.

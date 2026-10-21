@@ -63,6 +63,7 @@ object ShellRuntime {
             val rootfs = ShellPaths.rootfsDir(context)
             GuestCompat.install(context, rootfs, supported)
             ShellSetup.install(context, rootfs)
+            ensureGuestScratchDirs(context, rootfs)
             writeHostFiles(context)
             // Once per install: existing fake hard links become real files. Slow (it walks the
             // whole guest) but this runs in the background refresh.
@@ -106,6 +107,7 @@ object ShellRuntime {
      */
     internal fun finishImage(context: Context, rootfs: File, abi: String) {
         postInstall(context, rootfs)
+        ensureGuestScratchDirs(context, rootfs)
         fixGroupDatabase(rootfs)
         GuestCompat.install(context, rootfs, abi)
         ShellSetup.install(context, rootfs)
@@ -113,6 +115,21 @@ object ShellRuntime {
         GuestCompat.migrateFakeLinks(rootfs)
         // Last, so an image that is cut off half way is finished again rather than trusted.
         File(rootfs, ".termfold-rootfs").writeText(MARKER)
+    }
+
+    /** Host-side fixes after a full backup has replaced the rootfs tree. */
+    internal fun reconcileRestoredRootfs(context: Context, rootfs: File) {
+        postInstall(context, rootfs)
+        ensureGuestScratchDirs(context, rootfs)
+        fixGroupDatabase(rootfs)
+        writeHostFiles(context)
+    }
+
+    /** Host scratch for binds plus placeholder dirs in the rootfs image. */
+    internal fun ensureGuestScratchDirs(context: Context, rootfs: File) {
+        ShellPaths.ensureGuestScratch(context)
+        File(rootfs, "var/cache/termfold/npm").mkdirs()
+        File(rootfs, "var/cache/termfold/node-compile-cache").mkdirs()
     }
 
     /**
@@ -216,6 +233,7 @@ object ShellRuntime {
         ShellPaths.hostsFile(context).writeText(
             "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n"
         )
+        ShellPaths.ensureGuestScratch(context)
     }
 
     /**

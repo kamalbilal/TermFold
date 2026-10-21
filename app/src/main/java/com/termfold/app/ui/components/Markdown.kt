@@ -43,6 +43,7 @@ import kotlinx.coroutines.launch
 import com.termfold.app.ui.theme.Mono
 import com.termfold.app.ui.theme.Palette
 import com.termfold.app.ui.theme.TermFoldIcons
+import androidx.compose.ui.text.LinkInteractionListener
 
 /**
  * Renders the Markdown agents write: headings, paragraphs, lists, quotes, rules, fenced code,
@@ -60,22 +61,24 @@ fun Markdown(
     secondary: androidx.compose.ui.graphics.Color = Palette.TextDim,
     /** Base text style; headings and lists scale from its size. */
     bodyStyle: androidx.compose.ui.text.TextStyle? = null,
+    /** Guest or host file paths in the text open in the workspace editor when tapped. */
+    onOpenPath: ((String) -> Unit)? = null,
 ) {
     val blocks = remember(text) { parseMarkdown(text) }
     // Inline marks are parsed once per piece of text. A streaming reply recomposes the chat on
     // every chunk, and re-running the inline regex over every visible block each time is what
     // made long chats heavy on slower phones.
-    val cache = remember { HashMap<String, AnnotatedString>() }
+    val cache = remember(onOpenPath) { HashMap<String, AnnotatedString>() }
     val ann: (String) -> AnnotatedString = { s ->
         // A streaming paragraph is a new string on every chunk; keep the cache small.
         if (cache.size > 256) cache.clear()
-        cache.getOrPut(s) { inline(s) }
+        cache.getOrPut(s) { inline(s, onOpenPath) }
     }
     val body = bodyStyle ?: MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp)
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         blocks.forEach { block ->
             when (block) {
-                is MdBlock.Heading -> Text(
+                is MdBlock.Heading -> MarkdownText(
                     text = ann(block.text),
                     // Chat headings stay close to body size; the app's display sizes would shout.
                     // A custom body style (the reasoning view) keeps headings at its own size.
@@ -89,7 +92,7 @@ fun Markdown(
                     modifier = Modifier.padding(top = if (block.level <= 2) 6.dp else 2.dp),
                 )
 
-                is MdBlock.Paragraph -> Text(
+                is MdBlock.Paragraph -> MarkdownText(
                     text = ann(block.text),
                     style = body,
                     color = color,
@@ -105,7 +108,7 @@ fun Markdown(
                                 modifier = Modifier.widthIn(min = if (block.ordered) 22.dp else 14.dp),
                             )
                             Spacer(Modifier.width(6.dp))
-                            Text(
+                            MarkdownText(
                                 text = ann(item.text),
                                 style = body,
                                 color = color,
@@ -122,7 +125,7 @@ fun Markdown(
                             .background(Palette.Border),
                     )
                     Spacer(Modifier.width(10.dp))
-                    Text(
+                    MarkdownText(
                         text = ann(block.text),
                         style = body,
                         color = secondary,
@@ -149,6 +152,23 @@ fun Markdown(
  * A GitHub-style table. Every column is as wide as its widest cell (long cells wrap at a cap),
  * so the columns line up; a table wider than the chat scrolls sideways instead of squashing.
  */
+@Composable
+private fun MarkdownText(
+    text: AnnotatedString,
+    style: androidx.compose.ui.text.TextStyle,
+    color: androidx.compose.ui.graphics.Color,
+    modifier: Modifier = Modifier,
+    textAlign: androidx.compose.ui.text.style.TextAlign? = null,
+) {
+    Text(
+        text = text,
+        style = style,
+        color = color,
+        modifier = modifier,
+        textAlign = textAlign,
+    )
+}
+
 @Composable
 private fun MarkdownTable(
     table: MdBlock.Table,
@@ -190,7 +210,7 @@ private fun MarkdownTable(
                                 }
                                 .padding(horizontal = 10.dp, vertical = 7.dp),
                         ) {
-                            Text(
+                            MarkdownText(
                                 text = ann(row.getOrElse(c) { "" }),
                                 style = if (header) cellStyle.copy(fontWeight = FontWeight.SemiBold) else cellStyle,
                                 color = color,
@@ -482,10 +502,83 @@ private val INLINE = Regex(
 private val SAFE_LINK = Regex("^(https?://|mailto:)", RegexOption.IGNORE_CASE)
 private val BARE_URL = Regex("^https?://\\S+$", RegexOption.IGNORE_CASE)
 
-internal fun inline(text: String): AnnotatedString = buildAnnotatedString {
+/** Absolute guest paths and relative paths / basenames that look like real files. */
+internal val FILE_PATH = Regex(
+    """(/(?:[\w.+@-]+/)+[\w.+@-]+\.[\w]{1,12}""" +
+        """|(?:[\w.+@-]+/)+[\w.+@-]+\.[\w]{1,12}""" +
+        """|\b[\w.+@-]+\.(?:jpe?g|png|gif|webp|svg|kt|kts|java|js|mjs|cjs|jsx|ts|tsx|py|go|rs|md|json|yaml|yml|xml|html|htm|css|scss|gradle|sh|sql|txt|csv|pdf|zip|tar|gz|wasm|cpp|hpp|h|c|cs|rb|php|swift|dart|toml|ini|cfg|conf|env|lock)\b)""",
+    RegexOption.IGNORE_CASE,
+)
+
+private val pathLinkStyle = TextLinkStyles(
+    SpanStyle(color = Palette.Accent, textDecoration = TextDecoration.Underline, fontFamily = Mono, fontSize = 13.sp),
+)
+
+private fun looksLikeFilePath(text: String): Boolean {
+    val t = text.trim()
+    if (t.isEmpty()) return false
+    val match = FILE_PATH.find(t) ?: return false
+    return match.range.first == 0 && match.range.last + 1 == t.length
+}
+
+private fun AnnotatedString.Builder.appendPathLink(path: String, onOpenPath: (String) -> Unit) {
+    withLink(
+        LinkAnnotation.Clickable(
+            tag = path,
+            styles = pathLinkStyle,
+            linkInteractionListener = LinkInteractionListener { onOpenPath(path) },
+        ),
+    ) { append(path) }
+}
+
+private fun AnnotatedString.Builder.appendPlainWithPathLinks(segment: String, onOpenPath: ((String) -> Unit)?) {
+    if (onOpenPath == null) {
+        append(segment)
+        return
+    }
+    var cursor = 0
+    FILE_PATH.findAll(segment).forEach { match ->
+        val start = match.range.first
+        if ("://" in segment.substring(0, start)) return@forEach
+        append(segment.substring(cursor, start))
+        appendPathLink(match.value, onOpenPath)
+        cursor = match.range.last + 1
+    }
+    append(segment.substring(cursor))
+}
+
+private val inlineCodeStyle = SpanStyle(
+    fontFamily = Mono,
+    fontSize = 13.sp,
+    background = Palette.CardPressed,
+    color = Palette.TermOut,
+)
+
+private val inlineCodePathStyle = SpanStyle(
+    fontFamily = Mono,
+    fontSize = 13.sp,
+    background = Palette.CardPressed,
+    color = Palette.Accent,
+    textDecoration = TextDecoration.Underline,
+)
+
+private fun AnnotatedString.Builder.appendInlineCode(code: String, onOpenPath: ((String) -> Unit)?) {
+    val inner = code.trim()
+    if (onOpenPath != null && looksLikeFilePath(inner)) {
+        withStyle(inlineCodePathStyle) {
+            append('\u2009')
+            appendPathLink(inner, onOpenPath)
+            append('\u2009')
+        }
+        return
+    }
+    withStyle(inlineCodeStyle) { append("\u2009$inner\u2009") }
+}
+
+internal fun inline(text: String, onOpenPath: ((String) -> Unit)? = null): AnnotatedString = buildAnnotatedString {
     var cursor = 0
     INLINE.findAll(text).forEach { match ->
-        append(text.substring(cursor, match.range.first))
+        appendPlainWithPathLinks(text.substring(cursor, match.range.first), onOpenPath)
         val g = match.groupValues
         when {
             // A URL in backticks (agents write `http://localhost:3000`) is still a link.
@@ -503,9 +596,7 @@ internal fun inline(text: String): AnnotatedString = buildAnnotatedString {
                 ),
             ) { append(g[9]) }
 
-            g[1].isNotEmpty() -> withStyle(
-                SpanStyle(fontFamily = Mono, fontSize = 13.sp, background = Palette.CardPressed, color = Palette.TermOut),
-            ) { append(" ${g[1]} ") }
+            g[1].isNotEmpty() -> appendInlineCode(g[1], onOpenPath)
 
             g[2].isNotEmpty() || g[3].isNotEmpty() ->
                 withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append(g[2].ifEmpty { g[3] }) }
@@ -529,5 +620,5 @@ internal fun inline(text: String): AnnotatedString = buildAnnotatedString {
         }
         cursor = match.range.last + 1
     }
-    append(text.substring(cursor))
+    appendPlainWithPathLinks(text.substring(cursor), onOpenPath)
 }

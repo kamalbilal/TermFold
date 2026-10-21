@@ -17,7 +17,11 @@ import kotlinx.coroutines.flow.asStateFlow
 object AppPresence {
 
     /** A place in the app: a folder, or a session inside one. */
-    data class Place(val folderId: String, val sessionId: String? = null)
+    data class Place(
+        val folderId: String,
+        val sessionId: String? = null,
+        val workspaceId: String = com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN,
+    )
 
     /** The folder or session the main window (or the bubble) currently shows, if any. */
     @Volatile
@@ -45,10 +49,12 @@ object AppPresence {
         if (_requests.value == place) _requests.value = null
     }
 
-    /** True when [sessionKey] ("folderId/sessionId") is on screen right now. */
+    /** True when [sessionKey] matches the session on screen right now. */
     fun isWatching(sessionKey: String): Boolean {
         val p = place ?: return false
-        return inForeground && p.sessionId != null && "${p.folderId}/${p.sessionId}" == sessionKey
+        if (!inForeground || p.sessionId == null) return false
+        val key = com.termfold.app.gitworkspace.SessionKeys.compose(p.folderId, p.workspaceId, p.sessionId!!)
+        return key == sessionKey
     }
 
     fun register(app: Application) {

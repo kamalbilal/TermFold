@@ -48,6 +48,18 @@ termfold-browser eval "document.title"     # run JavaScript in the page
    check the result. Try `viewport phone` for layouts.
 5. Tell the user what you checked and what you saw.
 
+## Phone performance (lint and npm)
+
+TermFold runs Debian under PRoot on the device CPU — not the GPU. Repeated `npm run lint` is
+much faster when ESLint keeps a cache and when type-checking rules are not in the daily script.
+
+- Add `--cache` (and a stable `--cache-location` under `node_modules/.cache` if you like) to
+  `npm run lint`.
+- Keep a fast `lint` for day-to-day work; run type-aware ESLint or `tsc --noEmit` as `lint:ci`
+  before you push.
+- In monorepos on the phone, try lower concurrency (`turbo run lint --concurrency=1`).
+- Run `termfold-bench` in the shell to see node spawn time and GuestCompat migration status.
+
 ## Rules
 
 - For testing, use obvious test values, not real card numbers or personal data.

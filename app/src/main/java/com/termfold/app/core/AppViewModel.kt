@@ -5,6 +5,7 @@ import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.termfold.app.backup.TermFoldBackup
 import com.termfold.app.data.FolderStore
 import com.termfold.app.shell.DistroMigration
 import com.termfold.app.shell.Projects
@@ -18,6 +19,15 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** Progress of a full backup or restore to a single `.termfold` file. */
+data class BackupJob(
+    val title: String,
+    val step: String = "",
+    val fraction: Float = 0f,
+    val error: String? = null,
+    val done: Boolean = false,
+)
 
 /** A project being created in the background (a git clone or a device-folder import). */
 data class ProjectJob(
@@ -61,8 +71,100 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _job = MutableStateFlow<ProjectJob?>(null)
     val job: StateFlow<ProjectJob?> = _job.asStateFlow()
 
+    private val _backupJob = MutableStateFlow<BackupJob?>(null)
+    val backupJob: StateFlow<BackupJob?> = _backupJob.asStateFlow()
+
     fun dismissJob() {
         if (_job.value?.done == true || _job.value?.error != null) _job.value = null
+    }
+
+    fun dismissBackupJob() {
+        if (_backupJob.value?.done == true || _backupJob.value?.error != null) _backupJob.value = null
+    }
+
+    private fun backupInFlight(): Boolean =
+        _backupJob.value?.let { !it.done && it.error == null } == true
+
+    fun startBackup(uri: Uri) {
+        if (backupInFlight()) return
+        val app = getApplication<Application>()
+        _backupJob.value = BackupJob(
+            title = app.getString(com.termfold.app.R.string.backup_create),
+            step = "",
+            fraction = 0f,
+        )
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    app.contentResolver.openOutputStream(uri)?.use { output ->
+                        TermFoldBackup.export(app, output) { progress ->
+                            _backupJob.update {
+                                it?.copy(step = progress.step, fraction = progress.fraction)
+                            }
+                        }
+                    } ?: error("Could not open the destination file.")
+                }
+            }
+            _backupJob.value = result.fold(
+                onSuccess = {
+                    BackupJob(
+                        title = app.getString(com.termfold.app.R.string.backup_create),
+                        step = app.getString(com.termfold.app.R.string.backup_done_body),
+                        fraction = 1f,
+                        done = true,
+                    )
+                },
+                onFailure = { error ->
+                    BackupJob(
+                        title = app.getString(com.termfold.app.R.string.backup_create),
+                        error = error.message ?: error.javaClass.simpleName,
+                    )
+                },
+            )
+        }
+    }
+
+    fun startRestore(uri: Uri) {
+        if (backupInFlight()) return
+        val app = getApplication<Application>()
+        _backupJob.value = BackupJob(
+            title = app.getString(com.termfold.app.R.string.backup_restore),
+            step = "",
+            fraction = 0f,
+        )
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    app.contentResolver.openInputStream(uri)?.use { input ->
+                        TermFoldBackup.restore(app, input) { progress ->
+                            _backupJob.update {
+                                it?.copy(step = progress.step, fraction = progress.fraction)
+                            }
+                        }
+                    } ?: error("Could not read the backup file.")
+                }
+            }
+            result.onSuccess {
+                syncProjects()
+                _shell.value = ShellProgress(state = ShellState.READY, step = "", fraction = 1f)
+            }
+            _backupJob.value = result.fold(
+                onSuccess = {
+                    BackupJob(
+                        title = app.getString(com.termfold.app.R.string.backup_restore),
+                        step = app.getString(com.termfold.app.R.string.backup_restore_done_body),
+                        fraction = 1f,
+                        done = true,
+                    )
+                },
+                onFailure = { error ->
+                    BackupJob(
+                        title = app.getString(com.termfold.app.R.string.backup_restore),
+                        error = error.message ?: error.javaClass.simpleName,
+                    )
+                },
+            )
+        }
     }
 
     /** Set when the last attempt to move to Debian failed, so Retry tries that again. */
@@ -214,6 +316,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val added = dirs.filter { it.absolutePath !in known }.mapIndexed { i, dir ->
                     newFolder(dir, dir.name, (kept.size + i) % 6)
                 }
+                (kept + added).forEach { folder ->
+                    com.termfold.app.gitworkspace.TermfoldGitignore.ensureTermfoldIgnored(java.io.File(folder.path))
+                }
                 if (added.isEmpty() && kept.size == data.folders.size) data else data.copy(folders = kept + added)
             }
         }
@@ -320,18 +425,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun addSession(folderId: String, name: String, command: String, acpAgentId: String = "") {
+    fun addSession(
+        folderId: String,
+        name: String,
+        command: String,
+        acpAgentId: String = "",
+        workspaceId: String = com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN,
+        sessionId: String = Ids.new(),
+    ) {
         viewModelScope.launch {
             store.update { data ->
                 data.copy(
                     folders = data.folders.map { folder ->
                         if (folder.id != folderId) return@map folder
                         val session = Session(
-                            id = Ids.new(),
+                            id = sessionId,
                             name = name,
                             command = command,
                             tint = folder.sessions.size % 6,
                             acpAgentId = acpAgentId,
+                            workspaceId = workspaceId,
                         )
                         folder.copy(sessions = folder.sessions + session)
                     }

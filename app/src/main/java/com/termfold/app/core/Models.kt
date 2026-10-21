@@ -2,6 +2,7 @@ package com.termfold.app.core
 
 import androidx.annotation.StringRes
 import com.termfold.app.R
+import com.termfold.app.gitworkspace.WorkspaceIds
 
 /**
  * A session preset.
@@ -30,6 +31,8 @@ data class Session(
      * session opens as an ordinary shell in the terminal.
      */
     val acpAgentId: String = "",
+    /** Isolated git copy id, or [WorkspaceIds.GOLDEN] for the shared project tree. */
+    val workspaceId: String = WorkspaceIds.GOLDEN,
 )
 
 data class Folder(
