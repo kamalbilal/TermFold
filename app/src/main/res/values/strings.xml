@@ -438,6 +438,10 @@
     <string name="workspace_pick_branch">Start a new copy from branch</string>
     <string name="workspace_search_branch">Search branches</string>
     <string name="workspace_branch_refresh">Refresh branch list</string>
+    <string name="workspace_branch_loading">Loading branches…</string>
+    <string name="workspace_branch_load_timeout">Branch list timed out. Check the connection and try again.</string>
+    <string name="workspace_branch_load_error">Could not load branches: %1$s</string>
+    <string name="workspace_branch_empty">No branches found.</string>
     <string name="workspace_branch_title">Switch branch</string>
     <string name="workspace_dirty_title">Uncommitted changes</string>
     <string name="workspace_dirty_body">Stash your changes and switch, or discard local changes and switch.</string>

@@ -8,6 +8,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 
 import androidx.compose.foundation.layout.Arrangement
 
+import androidx.compose.foundation.layout.Box
+
 import androidx.compose.foundation.layout.Column
 
 import androidx.compose.foundation.layout.Row
@@ -17,6 +19,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 
 import androidx.compose.foundation.layout.height
+
+import androidx.compose.foundation.layout.heightIn
 
 import androidx.compose.foundation.layout.padding
 
@@ -74,7 +78,10 @@ import com.termfold.app.core.Folder
 
 import com.termfold.app.acp.ComposerFuzzyMatch
 
+import com.termfold.app.gitworkspace.BRANCH_LIST_ERROR_TIMEOUT
 import com.termfold.app.gitworkspace.BranchListCache
+import com.termfold.app.gitworkspace.BranchListLoadState
+import com.termfold.app.gitworkspace.rememberBranchListLoad
 
 import com.termfold.app.gitworkspace.BranchNames
 import com.termfold.app.gitworkspace.BranchRecentsStore
@@ -321,7 +328,10 @@ fun NewWorkspaceDialog(
 
     val goldenGuest = remember(folder.id) { WorkspaceStore.goldenGuestPath(context, folder) }
 
-    val branches = rememberLoadedGoldenBranches(goldenGuest, branchRefreshNonce)
+    val branchCacheKey = remember(goldenGuest) { BranchListCache.cacheKey(goldenGuest, null) }
+    val branchLoadState = rememberBranchListLoad(branchCacheKey, branchRefreshNonce) {
+        GitWorkspace.listBranches(context, goldenGuest)
+    }
 
     LaunchedEffect(folder.id) {
         instances = withContext(Dispatchers.IO) {
@@ -334,8 +344,9 @@ fun NewWorkspaceDialog(
 
     val recentBranches = remember(goldenGuest) { BranchRecentsStore.load(context, goldenGuest) }
 
-    val orderedBranches = remember(branches, recentBranches, query) {
-        orderBranchesForPicker(branches ?: emptyList(), recentBranches, query)
+    val branchList = (branchLoadState as? BranchListLoadState.Ready)?.branches ?: emptyList()
+    val orderedBranches = remember(branchList, recentBranches, query) {
+        orderBranchesForPicker(branchList, recentBranches, query)
     }
 
 
@@ -403,6 +414,7 @@ fun NewWorkspaceDialog(
                 }
 
                 BranchSearchList(
+                    loadState = branchLoadState,
                     query = query,
                     onQueryChange = { query = it },
                     orderedBranches = orderedBranches,
@@ -410,6 +422,7 @@ fun NewWorkspaceDialog(
                         onCreateFromBranch(branch, ProjectWorkspaces.newSessionId())
                         onDismiss()
                     },
+                    onRetry = { branchRefreshNonce++ },
                     sectionLabel = stringResource(R.string.workspace_pick_branch),
                     onRefresh = { branchRefreshNonce++ },
                 )
@@ -437,27 +450,6 @@ fun NewWorkspaceDialog(
 
 
 @Composable
-private fun rememberLoadedGoldenBranches(goldenGuest: String, refreshNonce: Int): List<String>? {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    var branches by remember(goldenGuest) { mutableStateOf<List<String>?>(null) }
-    val cacheKey = remember(goldenGuest) { BranchListCache.cacheKey(goldenGuest, null) }
-    LaunchedEffect(goldenGuest, refreshNonce) {
-        val force = refreshNonce > 0
-        if (!force) {
-            BranchListCache.get(cacheKey)?.let { cached -> branches = cached }
-        }
-        if (branches == null || force) {
-            val loaded = withContext(Dispatchers.IO) {
-                GitWorkspace.listBranches(context, goldenGuest)
-            }
-            BranchListCache.put(cacheKey, loaded)
-            branches = loaded
-        }
-    }
-    return branches
-}
-
-@Composable
 private fun BranchPickerRefreshTitle(
     title: String,
     onRefresh: () -> Unit,
@@ -479,13 +471,108 @@ private fun BranchPickerRefreshTitle(
 }
 
 @Composable
+private fun branchListErrorMessage(message: String): String =
+    if (message == BRANCH_LIST_ERROR_TIMEOUT) {
+        stringResource(R.string.workspace_branch_load_timeout)
+    } else {
+        stringResource(R.string.workspace_branch_load_error, message)
+    }
+
+@Composable
+private fun BranchPickerListBody(
+    loadState: BranchListLoadState,
+    orderedBranches: List<String>,
+    onPickBranch: (String) -> Unit,
+    onRetry: () -> Unit,
+    listEnabled: Boolean = true,
+    branchRow: @Composable (String) -> Unit = { branch ->
+        Text(
+            branch,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = listEnabled) { onPickBranch(branch) }
+                .padding(vertical = 10.dp),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    },
+) {
+    val listModifier = Modifier
+        .fillMaxWidth()
+        .heightIn(min = 120.dp, max = 320.dp)
+    when (loadState) {
+        BranchListLoadState.Loading -> {
+            Box(
+                modifier = listModifier,
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(28.dp),
+                        strokeWidth = 2.dp,
+                        color = Palette.Accent,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        stringResource(R.string.workspace_branch_loading),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Palette.TextDim,
+                    )
+                }
+            }
+        }
+        is BranchListLoadState.Error -> {
+            Column(
+                modifier = listModifier.padding(vertical = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    branchListErrorMessage(loadState.message),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.Pink,
+                )
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = onRetry) {
+                    Text(stringResource(R.string.workspace_branch_refresh))
+                }
+            }
+        }
+        is BranchListLoadState.Ready -> {
+            if (orderedBranches.isEmpty()) {
+                Column(
+                    modifier = listModifier.padding(vertical = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        stringResource(R.string.workspace_branch_empty),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Palette.TextDim,
+                    )
+                    TextButton(onClick = onRetry) {
+                        Text(stringResource(R.string.workspace_branch_refresh))
+                    }
+                }
+            } else {
+                LazyColumn(modifier = listModifier) {
+                    items(orderedBranches, key = { it }) { branch ->
+                        branchRow(branch)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun BranchSearchList(
+    loadState: BranchListLoadState,
     query: String,
     onQueryChange: (String) -> Unit,
     orderedBranches: List<String>,
     onPickBranch: (String) -> Unit,
+    onRetry: () -> Unit,
     sectionLabel: String? = null,
     onRefresh: (() -> Unit)? = null,
+    searchEnabled: Boolean = true,
 ) {
     if (sectionLabel != null) {
         Row(
@@ -511,6 +598,7 @@ private fun BranchSearchList(
             }
         }
     }
+    val canSearch = searchEnabled && loadState is BranchListLoadState.Ready
     androidx.compose.material3.OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
@@ -519,19 +607,15 @@ private fun BranchSearchList(
             .padding(vertical = 8.dp),
         placeholder = { Text(stringResource(R.string.workspace_search_branch)) },
         singleLine = true,
+        enabled = canSearch,
     )
-    LazyColumn(modifier = Modifier.fillMaxWidth()) {
-        items(orderedBranches, key = { it }) { branch ->
-            Text(
-                branch,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onPickBranch(branch) }
-                    .padding(vertical = 10.dp),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
-    }
+    BranchPickerListBody(
+        loadState = loadState,
+        orderedBranches = orderedBranches,
+        onPickBranch = onPickBranch,
+        onRetry = onRetry,
+        listEnabled = canSearch,
+    )
 }
 
 private fun orderBranchesForPicker(
@@ -580,8 +664,6 @@ fun BranchPickerDialog(
 
     var query by remember { mutableStateOf("") }
 
-    var branches by remember { mutableStateOf<List<String>?>(null) }
-
     var dirty by remember { mutableStateOf(false) }
 
     var pendingBranch by remember { mutableStateOf<String?>(null) }
@@ -598,31 +680,19 @@ fun BranchPickerDialog(
         BranchListCache.cacheKey(guestPath, branchCatalogGuestPath)
     }
 
+    val branchLoadState = rememberBranchListLoad(cacheKey, refreshNonce) {
+        GitWorkspace.listBranchesForPicker(context, guestPath, branchCatalogGuestPath)
+    }
 
-
-    LaunchedEffect(guestPath, branchCatalogGuestPath, refreshNonce) {
-        val force = refreshNonce > 0
-        if (!force) {
-            BranchListCache.get(cacheKey)?.let { cached ->
-                branches = cached
-            }
-        }
-        if (branches == null || force) {
-            val loaded = withContext(Dispatchers.IO) {
-                GitWorkspace.listBranchesForPicker(context, guestPath, branchCatalogGuestPath)
-            }
-            BranchListCache.put(cacheKey, loaded)
-            branches = loaded
-        }
+    LaunchedEffect(guestPath) {
         dirty = withContext(Dispatchers.IO) { GitWorkspace.isDirty(context, guestPath) }
     }
 
-
-
     val recent = remember(guestPath) { BranchRecentsStore.load(context, guestPath) }
 
-    val ordered = remember(branches, recent, query) {
-        orderBranchesForPicker(branches ?: emptyList(), recent, query)
+    val branchList = (branchLoadState as? BranchListLoadState.Ready)?.branches ?: emptyList()
+    val ordered = remember(branchList, recent, query) {
+        orderBranchesForPicker(branchList, recent, query)
     }
 
 
@@ -722,7 +792,7 @@ fun BranchPickerDialog(
                     stringResource(R.string.workspace_branch_title),
                     modifier = Modifier.weight(1f),
                 )
-                if (checkingOutBranch != null) {
+                if (checkingOutBranch != null || branchLoadState is BranchListLoadState.Loading) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(22.dp),
                         strokeWidth = 2.dp,
@@ -750,6 +820,8 @@ fun BranchPickerDialog(
 
                 }
 
+                val canSearch = branchLoadState is BranchListLoadState.Ready && checkingOutBranch == null
+
                 androidx.compose.material3.OutlinedTextField(
 
                     value = query,
@@ -762,40 +834,32 @@ fun BranchPickerDialog(
 
                     singleLine = true,
 
-                    enabled = checkingOutBranch == null,
+                    enabled = canSearch,
 
                 )
 
-                LazyColumn {
-
-                    items(ordered, key = { it }) { branch ->
-
-                        val switching = checkingOutBranch == branch
-
-                        Text(
-
-                            if (switching) "$branch …" else branch,
-
-                            color = if (switching) Palette.TextDim else Palette.Text,
-
-                            modifier = Modifier
-
-                                .fillMaxWidth()
-
-                                .clickable(enabled = checkingOutBranch == null) {
-
-                                    if (dirty) pendingBranch = branch
-
-                                    else applyCheckout(branch, CheckoutMode.FAIL_IF_DIRTY)
-
-                                }
-
-                                .padding(vertical = 10.dp),
-
-                        )
-
-                    }
-
+                BranchPickerListBody(
+                    loadState = branchLoadState,
+                    orderedBranches = ordered,
+                    onPickBranch = { branch ->
+                        if (dirty) pendingBranch = branch
+                        else applyCheckout(branch, CheckoutMode.FAIL_IF_DIRTY)
+                    },
+                    onRetry = { refreshNonce++ },
+                    listEnabled = checkingOutBranch == null,
+                ) { branch ->
+                    val switching = checkingOutBranch == branch
+                    Text(
+                        if (switching) "$branch …" else branch,
+                        color = if (switching) Palette.TextDim else Palette.Text,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = checkingOutBranch == null) {
+                                if (dirty) pendingBranch = branch
+                                else applyCheckout(branch, CheckoutMode.FAIL_IF_DIRTY)
+                            }
+                            .padding(vertical = 10.dp),
+                    )
                 }
 
             }
@@ -905,24 +969,49 @@ fun WorkspaceBranchPickDialog(
     var query by remember { mutableStateOf("") }
     var refreshNonce by remember { mutableIntStateOf(0) }
     val goldenGuest = remember(folder.id) { WorkspaceStore.goldenGuestPath(context, folder) }
-    val branches = rememberLoadedGoldenBranches(goldenGuest, refreshNonce)
+    val branchCacheKey = remember(goldenGuest) { BranchListCache.cacheKey(goldenGuest, null) }
+    val branchLoadState = rememberBranchListLoad(branchCacheKey, refreshNonce) {
+        GitWorkspace.listBranches(context, goldenGuest)
+    }
 
     val recentBranches = remember(goldenGuest) { BranchRecentsStore.load(context, goldenGuest) }
-    val orderedBranches = remember(branches, recentBranches, query) {
-        orderBranchesForPicker(branches ?: emptyList(), recentBranches, query)
+    val branchList = (branchLoadState as? BranchListLoadState.Ready)?.branches ?: emptyList()
+    val orderedBranches = remember(branchList, recentBranches, query) {
+        orderBranchesForPicker(branchList, recentBranches, query)
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            BranchPickerRefreshTitle(
-                title = stringResource(R.string.workspace_pick_branch),
-                onRefresh = { refreshNonce++ },
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    stringResource(R.string.workspace_pick_branch),
+                    modifier = Modifier.weight(1f),
+                )
+                if (branchLoadState is BranchListLoadState.Loading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        strokeWidth = 2.dp,
+                        color = Palette.Accent,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                BareIconButton(
+                    icon = TermFoldIcons.Refresh,
+                    contentDescription = stringResource(R.string.workspace_branch_refresh),
+                    onClick = { refreshNonce++ },
+                    tint = Palette.TextDim,
+                    size = 36,
+                )
+            }
         },
         text = {
             Column {
                 BranchSearchList(
+                    loadState = branchLoadState,
                     query = query,
                     onQueryChange = { query = it },
                     orderedBranches = orderedBranches,
@@ -930,6 +1019,7 @@ fun WorkspaceBranchPickDialog(
                         onPickBranch(branch)
                         onDismiss()
                     },
+                    onRetry = { refreshNonce++ },
                 )
             }
         },
