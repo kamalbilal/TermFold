@@ -176,6 +176,9 @@ fun AgentSessionScreen(
         branchLabel = com.termfold.app.gitworkspace.GitWorkspace.readBranchFromHost(context, guestDir)
             ?: com.termfold.app.gitworkspace.GitWorkspace.currentBranch(context, guestDir)
         isGitWorkspace = com.termfold.app.gitworkspace.GitWorkspace.isGitRepository(context, guestDir)
+        if (isGitWorkspace) {
+            com.termfold.app.gitworkspace.GitWorkspace.ensureSessionCopyGitUpstream(context, guestDir)
+        }
     }
 
     // The registry supplies the launch details and icon; its on-disk cache makes this instant
@@ -2960,6 +2963,13 @@ private fun PastSessionsDialog(
                     Text(stringResource(R.string.acp_cmd_new), style = MaterialTheme.typography.labelLarge, color = Palette.Text)
                 }
                 Spacer(Modifier.height(10.dp))
+                Text(
+                    stringResource(R.string.acp_history_explainer),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.TextFaint,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                )
+                Spacer(Modifier.height(6.dp))
                 val list = sessions
                 if (!list.isNullOrEmpty()) {
                     SessionSearch(query, onQuery = { query = it })

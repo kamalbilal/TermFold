@@ -61,6 +61,63 @@ class AcpPastSessionVisibilityTest {
         )
         assertEquals(listOf("other"), visible.map { it.sessionId })
     }
+
+    @Test
+    fun perTabDeletedKeysDifferForSameWorkspace() {
+        val workspace = "/guest/proj"
+        val tabA = AcpPastSessions.deletedKey("cursor", workspace, "f/w/s1")
+        val tabB = AcpPastSessions.deletedKey("cursor", workspace, "f/w/s2")
+        assertEquals(AcpPastSessions.legacyDeletedKey("cursor", workspace), "cursor|$workspace")
+        assertTrue(tabA != tabB)
+        assertTrue(tabA.endsWith("|f/w/s1"))
+    }
+
+    @Test
+    fun migrateHiddenIdsOnlyFirstTabGetsLegacy() {
+        val legacy = setOf("wire-old", "wire-clone")
+        val (first, doneFirst) = AcpPastSessions.migrateHiddenIds(null, legacy, false)
+        assertEquals(legacy, first)
+        assertTrue(doneFirst)
+
+        val (second, doneSecond) = AcpPastSessions.migrateHiddenIds(null, legacy, true)
+        assertEquals(emptySet<String>(), second)
+        assertTrue(doneSecond)
+    }
+
+    @Test
+    fun mergeListedDedupesAcrossPages() {
+        val page1 = listOf(
+            AcpPastSession("a", "one", ""),
+            AcpPastSession("b", "two", ""),
+        )
+        val page2 = listOf(
+            AcpPastSession("b", "two again", ""),
+            AcpPastSession("c", "three", ""),
+        )
+        assertEquals(
+            listOf("a", "b", "c"),
+            AcpPastSessions.mergeListed(listOf(page1, page2)).map { it.sessionId },
+        )
+    }
+
+    @Test
+    fun wireSessionToHideBeforeNewSession() {
+        assertEquals("wire-1", AcpPastSessions.wireSessionToHideBeforeNew("wire-1"))
+        assertEquals(null, AcpPastSessions.wireSessionToHideBeforeNew(null))
+        assertEquals(null, AcpPastSessions.wireSessionToHideBeforeNew(""))
+    }
+
+    @Test
+    fun perTabHiddenSetsAreIndependent() {
+        val sessions = listOf(
+            AcpPastSession("shared", "title", ""),
+            AcpPastSession("only-b", "b", ""),
+        )
+        val tabAHidden = setOf("shared")
+        val tabBHidden = emptySet<String>()
+        assertEquals(listOf("only-b"), AcpPastSessions.visible(sessions, tabAHidden).map { it.sessionId })
+        assertEquals(listOf("shared", "only-b"), AcpPastSessions.visible(sessions, tabBHidden).map { it.sessionId })
+    }
 }
 
 class AcpTimelineCodecTest {

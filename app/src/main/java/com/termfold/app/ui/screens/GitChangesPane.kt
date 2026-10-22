@@ -56,6 +56,7 @@ import com.termfold.app.ui.theme.Motion
 import com.termfold.app.R
 import com.termfold.app.gitworkspace.GitChangeFile
 import com.termfold.app.gitworkspace.GitChangeSummary
+import com.termfold.app.gitworkspace.gitSyncCountsVisible
 import com.termfold.app.gitworkspace.GitChanges
 import com.termfold.app.gitworkspace.GitFileStatus
 import com.termfold.app.gitworkspace.GitWorkspace
@@ -711,11 +712,9 @@ private fun SidebarRow(
 
 @Composable
 private fun SyncLine(summary: GitChangeSummary) {
-    val upstream = summary.upstream
-    if (upstream == null) return
+    if (!gitSyncCountsVisible(summary)) return
     val out = summary.outgoingCommits ?: 0
     val inc = summary.incomingCommits ?: 0
-    if (out == 0 && inc == 0) return
     Row(
         Modifier
             .fillMaxWidth()

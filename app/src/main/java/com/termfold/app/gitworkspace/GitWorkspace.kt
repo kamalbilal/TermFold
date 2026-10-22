@@ -14,6 +14,8 @@ import kotlinx.coroutines.withContext
 
 import java.io.File
 
+import java.util.concurrent.ConcurrentHashMap
+
 import kotlin.coroutines.coroutineContext
 
 enum class CheckoutMode {
@@ -27,6 +29,11 @@ enum class CheckoutMode {
 }
 
 object GitWorkspace {
+
+    /** Bump when session-copy upstream repair logic changes so existing copies re-run once. */
+    private const val UPSTREAM_REPAIR_SCHEMA = "3"
+
+    private val upstreamRepairedGuestPaths = ConcurrentHashMap.newKeySet<String>()
 
     data class ProvisionProgress(val copiedBytes: Long, val totalBytes: Long) {
 
@@ -82,6 +89,7 @@ object GitWorkspace {
         val (branchCode, branchOut) = runGit(context, guestPath, "rev-parse --abbrev-ref HEAD")
         if (branchCode != 0) return@withContext null
         val branch = branchOut.trim()
+        ensureSessionCopyGitUpstream(context, guestPath, branch)
         val (upCode, upOut) = runGit(context, guestPath, "rev-parse --abbrev-ref @{upstream}")
         val upstream = if (upCode == 0) upOut.trim().takeIf { it.isNotBlank() } else null
         val outgoing = upstream?.let {
@@ -169,8 +177,8 @@ object GitWorkspace {
         BranchNames.normalizeForPicker(lines)
 
     /**
-     * Branch names for the picker on a session copy: golden catalog minus branches that do not exist
-     * on the golden repo (so checkout import cannot reach them).
+     * Branch names for the picker on a session copy: golden catalog, filtered to branches that exist
+     * on the copy or resolve on the golden repo (one batched ref scan — not per-branch git calls).
      */
     suspend fun listBranchesForPicker(
         context: Context,
@@ -180,15 +188,37 @@ object GitWorkspace {
         val catalog = catalogGuestPath?.takeIf { it.isNotBlank() && it != checkoutGuestPath }
         if (catalog == null) return@withContext listBranches(context, checkoutGuestPath)
         val golden = listBranches(context, catalog)
+        if (!isGitRepository(context, checkoutGuestPath)) {
+            return@withContext golden
+        }
         val onCopy = listBranches(context, checkoutGuestPath).toSet()
-        golden.filter { name -> name in onCopy || branchRefExists(context, catalog, name) }
+        if (onCopy.isEmpty()) {
+            return@withContext golden
+        }
+        val resolvableOnCatalog = resolvableBranchNamesOnCatalog(context, catalog)
+        filterPickerBranches(golden, onCopy, resolvableOnCatalog)
     }
 
-    private fun branchRefExists(context: Context, guestPath: String, localName: String): Boolean {
-        val n = BranchNames.canonicalLocalName(localName)
-        if (n.isBlank()) return false
-        return refExists(context, guestPath, "refs/heads/$n") ||
-            refExists(context, guestPath, "refs/remotes/origin/$n")
+    internal fun filterPickerBranches(
+        golden: List<String>,
+        onCopy: Set<String>,
+        catalogResolvable: Set<String>,
+    ): List<String> =
+        golden.filter { name ->
+            name in onCopy || BranchNames.canonicalLocalName(name) in catalogResolvable
+        }
+
+    private fun resolvableBranchNamesOnCatalog(context: Context, catalogGuestPath: String): Set<String> {
+        val (code, out) = runGit(
+            context,
+            catalogGuestPath,
+            "for-each-ref --format='%(refname:short)' refs/heads refs/remotes/origin",
+        )
+        if (code != 0 || out.isBlank()) return emptySet()
+        return parseBranchLines(out.lines())
+            .map { BranchNames.canonicalLocalName(it) }
+            .filter { it.isNotBlank() }
+            .toSet()
     }
 
     suspend fun checkoutBranch(
@@ -266,13 +296,133 @@ object GitWorkspace {
             for (args in attempts) {
                 val (code, out) = runGit(context, guestPath, args)
                 lastOut = out
-                if (code == 0) return@withContext Result.success(Unit)
+                if (code == 0) {
+                    reconcileBranchUpstream(context, guestPath, localName)
+                    return@withContext Result.success(Unit)
+                }
             }
             Result.failure(IllegalStateException(lastOut.takeLast(400)))
         }
 
+    /**
+     * Align session-copy `origin`, fetch, and set or clear upstream tracking.
+     * Safe to call when opening a session or refreshing git status.
+     */
+    suspend fun ensureSessionCopyGitUpstream(
+        context: Context,
+        guestPath: String,
+        branchName: String? = null,
+    ) = withContext(Dispatchers.IO) {
+        if (!ProjectWorkspaces.looksLikeSessionWorkspace(guestPath)) return@withContext
+        if (!isGitRepository(context, guestPath)) return@withContext
+        val branch = branchName?.let { BranchNames.canonicalLocalName(it) }
+            ?: currentBranch(context, guestPath)
+            ?: readBranchFromHost(context, guestPath)
+            ?: return@withContext
+        if (branch.isBlank()) return@withContext
+        if (!shouldRunSessionUpstreamRepair(context, guestPath, branch)) return@withContext
+        if (!upstreamRepairedGuestPaths.add(guestPath)) return@withContext
+        reconcileBranchUpstream(context, guestPath, branch)
+        if (sessionCopyUpstreamIsSettled(context, guestPath, branch)) {
+            runGit(
+                context,
+                guestPath,
+                "config termfold.upstreamRepairSchema $UPSTREAM_REPAIR_SCHEMA",
+            )
+        } else {
+            upstreamRepairedGuestPaths.remove(guestPath)
+        }
+    }
+
+    suspend fun reconcileBranchUpstream(context: Context, guestPath: String, branchName: String) =
+        withContext(Dispatchers.IO) {
+            if (!ProjectWorkspaces.looksLikeSessionWorkspace(guestPath)) return@withContext
+            val branch = BranchNames.canonicalLocalName(branchName)
+            if (branch.isBlank() || !isGitRepository(context, guestPath)) return@withContext
+            alignSessionCopyOriginWithGolden(context, guestPath)
+            val (fetchCode, _) = runGit(context, guestPath, "fetch origin --prune")
+            val fetchSucceeded = fetchCode == 0
+            val hasOrigin = fetchSucceeded &&
+                refExists(context, guestPath, "refs/remotes/origin/$branch")
+            val current = currentBranch(context, guestPath)
+            val repair = SessionCopyUpstreamRepair.action(
+                originBranchExists = hasOrigin,
+                isCheckedOutBranch = current == branch,
+                fetchSucceeded = fetchSucceeded,
+            )
+            val args = SessionCopyUpstreamRepair.branchArgs(branch, repair) ?: return@withContext
+            runGit(context, guestPath, args)
+        }
+
+    private fun hasUpstream(context: Context, guestPath: String): Boolean =
+        runGit(context, guestPath, "rev-parse --abbrev-ref @{upstream}").first == 0
+
+    private suspend fun shouldRunSessionUpstreamRepair(
+        context: Context,
+        guestPath: String,
+        branch: String,
+    ): Boolean {
+        val (schemaCode, schemaOut) =
+            runGit(context, guestPath, "config --get termfold.upstreamRepairSchema")
+        val schemaCurrent = schemaCode == 0 && schemaOut.trim() == UPSTREAM_REPAIR_SCHEMA
+        if (hasUpstream(context, guestPath)) return false
+        if (!schemaCurrent) return true
+        alignSessionCopyOriginWithGolden(context, guestPath)
+        val (fetchCode, _) = runGit(context, guestPath, "fetch origin --prune")
+        if (fetchCode != 0) return true
+        return refExists(context, guestPath, "refs/remotes/origin/$branch")
+    }
+
+    private suspend fun sessionCopyUpstreamIsSettled(
+        context: Context,
+        guestPath: String,
+        branch: String,
+    ): Boolean {
+        if (hasUpstream(context, guestPath)) return true
+        val (fetchCode, _) = runGit(context, guestPath, "fetch origin --prune")
+        if (fetchCode != 0) return false
+        return !refExists(context, guestPath, "refs/remotes/origin/$branch")
+    }
+
     private fun refExists(context: Context, guestPath: String, ref: String): Boolean =
         runGit(context, guestPath, "rev-parse --verify ${shellQuote(ref)}").first == 0
+
+    private fun rememberGoldenGuestPath(context: Context, sessionGuestPath: String, goldenGuestPath: String) {
+        runGit(
+            context,
+            sessionGuestPath,
+            "config termfold.goldenGuestPath ${shellQuote(goldenGuestPath)}",
+        )
+    }
+
+    private suspend fun alignSessionCopyOriginWithGolden(context: Context, sessionGuestPath: String) {
+        val (copyCode, copyOrigin) = runGit(context, sessionGuestPath, "remote get-url origin")
+        if (copyCode != 0) return
+        val goldenGuestPath = readGoldenGuestPath(context, sessionGuestPath, copyOrigin.trim())
+            ?: return
+        val (_, goldenOrigin) = runGit(context, goldenGuestPath, "remote get-url origin")
+        val resolved = SessionCopyOriginSync.resolveOriginUrlForSessionCopy(
+            copyOrigin.trim(),
+            goldenOrigin.trim(),
+        ) ?: return
+        if (copyOrigin.trim() == resolved) return
+        runGit(context, sessionGuestPath, "remote set-url origin ${shellQuote(resolved)}")
+    }
+
+    private suspend fun readGoldenGuestPath(
+        context: Context,
+        sessionGuestPath: String,
+        sessionOriginUrl: String,
+    ): String? {
+        val (code, out) = runGit(context, sessionGuestPath, "config --get termfold.goldenGuestPath")
+        if (code == 0) {
+            val path = out.trim()
+            if (path.isNotBlank()) return path
+        }
+        val origin = sessionOriginUrl.trim()
+        if (origin.startsWith("/") && isGitRepository(context, origin)) return origin
+        return WorkspaceStore.findGoldenGuestPathForSessionCopy(context, sessionGuestPath)
+    }
 
     suspend fun provisionWorkspace(
 
@@ -295,6 +445,8 @@ object GitWorkspace {
             error("Invalid session destination")
 
         }
+
+        ProjectWorkspaces.ensureSessionStorageDirs(context, goldenGuestPath)
 
         val destHost = Projects.hostPath(context, destGuest)
 
@@ -376,9 +528,11 @@ object GitWorkspace {
 
         coroutineContext.ensureActive()
 
+        rememberGoldenGuestPath(context, destGuest, goldenGuestPath)
         switchToBranch(context, destGuest, branchLocal).getOrElse { err ->
             error("git switch failed: ${err.message?.takeLast(500) ?: err.toString()}")
         }
+        reconcileBranchUpstream(context, destGuest, branchLocal)
 
         runGit(context, destGuest, "reset --hard")
 

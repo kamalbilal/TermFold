@@ -170,3 +170,17 @@ The system SHALL keep the user on the same TermFold chat after undo or edit-with
 
 - **WHEN** the user edits a message, chooses revert files, then restarts the app and opens the same TermFold session
 - **THEN** the visible timeline is the truncated original turns plus the edited continuation, and `session/list` does not show the retired wire session or the resync clone as a separate past chat
+
+### Requirement: Hidden wire ids are per TermFold session tab
+
+The system SHALL store hidden wire session ids (from checkpoint wire resync retire, user delete, or new session) keyed by the TermFold session tab identifier together with agent and workspace, so hiding in one tab does not remove entries from another tab's Earlier sessions list.
+
+#### Scenario: Two tabs same workspace
+
+- **WHEN** tab A retires wire session ids during checkpoint resync and tab B has a different remembered wire id in the same workspace
+- **THEN** tab B's Earlier sessions list still includes wire ids that tab B has not hidden
+
+#### Scenario: Same tab after resync
+
+- **WHEN** tab A completes wire resync and retires the old and new clone wire ids for that tab
+- **THEN** those ids are hidden only when listing past sessions for tab A

@@ -458,31 +458,58 @@ class AcpClient(
      */
     suspend fun listPastSessions(): List<AcpPastSession> = withContext(Dispatchers.IO) {
         if (!canList) return@withContext emptyList()
-        val found = mutableListOf<AcpPastSession>()
         var cursor: String? = null
-        for (page in 0 until 4) {
+        val pages = mutableListOf<List<AcpPastSession>>()
+        for (page in 0 until AcpPastSessions.MAX_LIST_PAGES) {
             val params = JSONObject().put("cwd", workspaceGuestDir)
             cursor?.let { params.put("cursor", it) }
             val result = runCatching { request("session/list", params) }.getOrNull()?.optJSONObject("result") ?: break
             val list = result.optJSONArray("sessions") ?: JSONArray()
+            val pageSessions = mutableListOf<AcpPastSession>()
             for (i in 0 until list.length()) {
                 val entry = list.optJSONObject(i) ?: continue
                 val id = entry.text("sessionId")
-                if (id.isNotBlank()) found += AcpPastSession(id, entry.text("title"), entry.text("updatedAt"))
+                if (id.isNotBlank()) {
+                    pageSessions += AcpPastSession(id, entry.text("title"), entry.text("updatedAt"))
+                }
             }
+            pages += pageSessions
             cursor = result.text("nextCursor").ifBlank { null } ?: break
         }
         val deleted = deletedIds()
-        AcpPastSessions.visible(found.distinctBy { it.sessionId }, deleted)
+        AcpPastSessions.visible(AcpPastSessions.mergeListed(pages), deleted)
     }
 
     // ---- Deleting earlier sessions ----------------------------------------------------------
 
     private val deletedPrefs get() = context.getSharedPreferences("acp_deleted_sessions", Context.MODE_PRIVATE)
 
-    private fun deletedKey() = agent.id + "|" + workspaceGuestDir
+    private fun deletedKey() = AcpPastSessions.deletedKey(agent.id, workspaceGuestDir, sessionKey)
 
-    private fun deletedIds(): Set<String> = deletedPrefs.getStringSet(deletedKey(), emptySet()).orEmpty()
+    private fun legacyDeletedKey() = AcpPastSessions.legacyDeletedKey(agent.id, workspaceGuestDir)
+
+    private fun deletedIds(): Set<String> {
+        migrateDeletedHiddenIfNeeded()
+        return deletedPrefs.getStringSet(deletedKey(), emptySet()).orEmpty()
+    }
+
+    private fun migrateDeletedHiddenIfNeeded() {
+        val tabKey = deletedKey()
+        if (deletedPrefs.contains(tabKey)) return
+        val migrationDone = deletedPrefs.getBoolean(AcpPastSessions.PREFS_MIGRATION_FLAG, false)
+        val legacy = deletedPrefs.getStringSet(legacyDeletedKey(), null)
+        val (hidden, done) = AcpPastSessions.migrateHiddenIds(
+            perTabHidden = null,
+            legacyHidden = legacy,
+            globalMigrationDone = migrationDone,
+        )
+        if (hidden.isNotEmpty() || done) {
+            deletedPrefs.edit()
+                .putStringSet(tabKey, hidden)
+                .putBoolean(AcpPastSessions.PREFS_MIGRATION_FLAG, done)
+                .apply()
+        }
+    }
 
     /**
      * Deletes an earlier session: it leaves this list for good, and its saved conversation is
@@ -537,6 +564,7 @@ class AcpClient(
     /** Leaves the current conversation and starts an empty one with the same agent. */
     fun startNewSession() {
         scope.launch {
+            AcpPastSessions.wireSessionToHideBeforeNew(agentSessionId)?.let { hideFromPastList(it) }
             agentSessionId = null
             _state.update {
                 it.copy(

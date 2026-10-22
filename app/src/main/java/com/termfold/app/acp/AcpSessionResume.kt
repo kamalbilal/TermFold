@@ -32,8 +32,42 @@ object AcpSessionResume {
 }
 
 object AcpPastSessions {
+
+    const val MAX_LIST_PAGES = 32
+
+    /** SharedPreferences key: first workspace-wide → per-tab migration completed. */
+    const val PREFS_MIGRATION_FLAG = "hidden_wire_per_tab_migration_done"
+
+    fun deletedKey(agentId: String, workspaceGuestDir: String, sessionKey: String): String =
+        "$agentId|$workspaceGuestDir|$sessionKey"
+
+    fun legacyDeletedKey(agentId: String, workspaceGuestDir: String): String =
+        "$agentId|$workspaceGuestDir"
+
     fun visible(
         sessions: List<AcpPastSession>,
         hiddenIds: Set<String>,
     ): List<AcpPastSession> = sessions.filter { it.sessionId !in hiddenIds }
+
+    fun mergeListed(pages: Iterable<List<AcpPastSession>>): List<AcpPastSession> =
+        pages.flatten().distinctBy { it.sessionId }
+
+    /**
+     * One-time move of workspace-wide hidden ids to the first tab that needs them after upgrade.
+     * Other tabs start with an empty hidden set.
+     */
+    fun migrateHiddenIds(
+        perTabHidden: Set<String>?,
+        legacyHidden: Set<String>?,
+        globalMigrationDone: Boolean,
+    ): Pair<Set<String>, Boolean> {
+        if (perTabHidden != null) return perTabHidden to globalMigrationDone
+        if (!globalMigrationDone && !legacyHidden.isNullOrEmpty()) {
+            return legacyHidden to true
+        }
+        return emptySet<String>() to globalMigrationDone
+    }
+
+    fun wireSessionToHideBeforeNew(previousWireSessionId: String?): String? =
+        previousWireSessionId?.takeIf { it.isNotBlank() }
 }

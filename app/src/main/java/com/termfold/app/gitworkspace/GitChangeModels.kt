@@ -18,6 +18,14 @@ data class GitChangeFile(
     val staged: Boolean,
 )
 
+/** True when the changes pane should show incoming/outgoing sync counts (matches [SyncLine] rules). */
+fun gitSyncCountsVisible(summary: GitChangeSummary): Boolean {
+    if (summary.upstream == null) return false
+    val out = summary.outgoingCommits ?: 0
+    val inc = summary.incomingCommits ?: 0
+    return out > 0 || inc > 0
+}
+
 data class GitChangeSummary(
     val branch: String,
     val upstream: String?,
