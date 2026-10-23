@@ -166,8 +166,7 @@ dependencies {
 }
 
 tasks.withType<Test>().configureEach {
-    // The rootfs image is a build input, not a fixture checked into source control, so the test
-    // that reads it is pointed at the same file the app ships.
+    // The rootfs image ships in assets; this test reads the same file the app bundles.
     systemProperty(
         "termfold.rootfsAsset",
         layout.projectDirectory.file("src/main/assets/debian-x86_64.bin").asFile.absolutePath,

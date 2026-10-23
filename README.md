@@ -141,9 +141,15 @@ symptom and its fix, is written up in [docs/SHELL-NOTES.md](docs/SHELL-NOTES.md)
 ## Building
 
 ```bash
-py -3 tools/fetch-shell-runtime.py    # PRoot and the Debian images, into jniLibs/ and assets/
-py -3 tools/fetch-ca-bundle.py        # the CA bundle, into assets/
 ./gradlew :app:assembleDebug
+```
+
+Debian rootfs images and the CA bundle are checked in under `app/src/main/assets/`. PRoot binaries
+are under `app/src/main/jniLibs/`. To refresh those from upstream, run:
+
+```bash
+py -3 tools/fetch-shell-runtime.py
+py -3 tools/fetch-ca-bundle.py
 ```
 
 Release builds are signed when `termfold-release.jks` exists at the repo root and
