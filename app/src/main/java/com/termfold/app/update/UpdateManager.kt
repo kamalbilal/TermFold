@@ -34,6 +34,8 @@ import org.json.JSONObject
 object UpdateManager {
 
     private const val TAG = "UpdateManager"
+    /** GitHub release APKs are built for the published app, not fork ids such as [BuildConfig.APPLICATION_ID]. */
+    const val RELEASE_APPLICATION_ID = "com.termfold.app"
     private const val REPO = "Bibarud/TermFold"
     private const val DOWNLOAD_PREFIX = "https://github.com/$REPO/releases/download/"
     private const val PREFS = "updates"
@@ -72,10 +74,15 @@ object UpdateManager {
     /** True while a newer version is known, for the dot on the Settings tab. */
     val hasUpdate: StateFlow<Boolean> = _hasUpdate.asStateFlow()
 
+    /** In-app GitHub updates only apply when this install matches the release application id. */
+    fun supportsInAppUpdates(applicationId: String = BuildConfig.APPLICATION_ID): Boolean =
+        applicationId == RELEASE_APPLICATION_ID
+
     private var restored = false
 
     /** Picks up what the last check found, so the dot survives a restart without a network call. */
     private fun restore(context: Context) {
+        if (!supportsInAppUpdates()) return
         if (restored) return
         restored = true
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -99,6 +106,7 @@ object UpdateManager {
 
     /** Checks at most every [CHECK_EVERY_MS]; for app start and for opening Settings. */
     fun checkIfDue(context: Context) {
+        if (!supportsInAppUpdates()) return
         val app = context.applicationContext
         restore(app)
         val last = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong("checked_at", 0L)
@@ -107,6 +115,7 @@ object UpdateManager {
 
     /** Asks GitHub for the newest release. [quiet] keeps failures out of the UI (a launch-time check). */
     fun check(context: Context, quiet: Boolean = false) {
+        if (!supportsInAppUpdates()) return
         val app = context.applicationContext
         restore(app)
         val now = _state.value
@@ -144,6 +153,7 @@ object UpdateManager {
 
     /** Downloads the release that [State.Available] describes. */
     fun download(context: Context) {
+        if (!supportsInAppUpdates()) return
         val app = context.applicationContext
         val current = _state.value
         val release = (current as? State.Available)?.release ?: (current as? State.Failed)?.let { latestKnown(app) } ?: return
@@ -161,6 +171,7 @@ object UpdateManager {
 
     /** Hands the downloaded APK to Android's installer, which asks the user to confirm. */
     fun install(context: Context) {
+        if (!supportsInAppUpdates()) return
         val ready = _state.value as? State.Ready ?: return
         val app = context.applicationContext
         if (Build.VERSION.SDK_INT >= 26 && !app.packageManager.canRequestPackageInstalls()) {

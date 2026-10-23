@@ -301,9 +301,16 @@ fun AgentAuxTerminalDialog(
                     )
                 }
 
+                val wakeOn = TerminalHost.wakeEnabled(sessionKey)
+                val autoOn = TerminalHost.wakeAuto(sessionKey)
+
                 KeyRow(
                     controlDown = controlDown,
                     altDown = altDown,
+                    wakeOn = wakeOn,
+                    autoOn = autoOn,
+                    onToggleWake = { TerminalHost.setWakeEnabled(context, sessionKey, !wakeOn) },
+                    onToggleAuto = { TerminalHost.setWakeAuto(context, sessionKey, !autoOn) },
                     onToggleControl = {
                         controlDown = !controlDown
                         TerminalHost.currentBridge?.setControlKey(controlDown)

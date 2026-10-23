@@ -63,6 +63,8 @@ object TerminalHost : TerminalHostCallbacks {
         val session: TerminalSession,
         val bridge: TerminalBridge,
         val spec: Spec,
+        var wakeEnabled: Boolean = false,
+        var wakeAuto: Boolean = true,
     )
 
     /**
@@ -133,6 +135,8 @@ object TerminalHost : TerminalHostCallbacks {
         val folderLabel: String,
         val running: Boolean,
         val working: Boolean,
+        val wakeEnabled: Boolean,
+        val wakeAuto: Boolean,
     )
 
     fun liveSessions(): List<LiveSession> = entries.map { (key, entry) ->
@@ -142,7 +146,29 @@ object TerminalHost : TerminalHostCallbacks {
             folderLabel = entry.spec.workspace?.substringAfterLast('/').orEmpty(),
             running = entry.session.isRunning,
             working = entry.session.isRunning && entry.bridge.isWorking,
+            wakeEnabled = entry.wakeEnabled,
+            wakeAuto = entry.wakeAuto,
         )
+    }
+
+    fun wakeEnabled(key: String): Boolean = entries[key]?.wakeEnabled == true
+
+    fun wakeAuto(key: String): Boolean = entries[key]?.wakeAuto != false
+
+    fun setWakeEnabled(context: Context, key: String, enabled: Boolean) {
+        val entry = entries[key] ?: return
+        if (entry.wakeEnabled == enabled) return
+        entry.wakeEnabled = enabled
+        _generation.value += 1
+        com.termfold.app.notify.SessionWatcher.onKeepAliveInputsChanged(context.applicationContext)
+    }
+
+    fun setWakeAuto(context: Context, key: String, auto: Boolean) {
+        val entry = entries[key] ?: return
+        if (entry.wakeAuto == auto) return
+        entry.wakeAuto = auto
+        _generation.value += 1
+        com.termfold.app.notify.SessionWatcher.onKeepAliveInputsChanged(context.applicationContext)
     }
 
     /**

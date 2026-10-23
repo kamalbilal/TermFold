@@ -11,7 +11,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.termfold.app"
+        applicationId = "com.termfold.new"
         minSdk = 26
         // Pinned to 28 deliberately. Android only lets an app execute binaries from its own
         // nativeLibraryDir/data directory when the app targets API 28 or lower; at 29+ the process

@@ -18,3 +18,4 @@ app/src/main/assets/ubuntu-*.bin
 *.jks
 *.keystore
 
+.termfold/

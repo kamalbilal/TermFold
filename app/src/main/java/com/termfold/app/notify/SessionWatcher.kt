@@ -8,6 +8,7 @@ import com.termfold.app.R
 import com.termfold.app.acp.AcpItem
 import com.termfold.app.acp.AcpSessions
 import com.termfold.app.shell.TerminalHost
+import com.termfold.app.shell.TerminalWakeLock
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -18,7 +19,8 @@ import kotlinx.coroutines.launch
  * Watches every live session, agent chats and shells alike, and tells the user when one that
  * was working finishes or starts waiting on them, unless they are already looking at it.
  * It also keeps [KeepAliveService] running while any session is open. A partial wake lock is held
- * only while an agent or shell is actively working, not while a session sits idle at its prompt.
+ * when an ACP session needs it or when a terminal has Wake enabled (Auto on: only while working;
+ * Auto off: latched until Wake is turned off).
  *
  * Polling once a second is deliberate: it needs no hooks into every state change, costs next to
  * nothing, and the same signals already drive the working spinners in the session list.
@@ -63,6 +65,20 @@ object SessionWatcher {
     fun onSessionStarted(context: Context) {
         runCatching { syncKeepAlive(context) }
     }
+
+    /** Terminal Wake / Auto changed — refresh locks without waiting for the poll. */
+    fun onKeepAliveInputsChanged(context: Context) {
+        runCatching { syncKeepAlive(context) }
+    }
+
+    private data class KeepAliveSnapshot(
+        val live: Int,
+        val active: Int,
+        val working: Int,
+        val holdWakeLock: Boolean,
+        val terminalWake: Boolean,
+        val agentWake: Boolean,
+    )
 
     /** The terminal bell: a CLI agent asking for attention. */
     fun onBell(context: Context, sessionKey: String, title: String) {
@@ -150,40 +166,69 @@ object SessionWatcher {
             }
         }
 
-        val holdWake = needsBackgroundLocks(working)
-        syncKeepAlive(context, live = live, active = active, working = working, holdWakeLock = holdWake)
+        val terminalWake = TerminalWakeLock.anyTerminalWantsWakeLock(terminals)
+        val agentWake = AcpSessions.all().values.any { it.keepsCpuAwake() }
+        syncKeepAlive(
+            context,
+            KeepAliveSnapshot(
+                live = live,
+                active = active,
+                working = working,
+                holdWakeLock = terminalWake || agentWake,
+                terminalWake = terminalWake,
+                agentWake = agentWake,
+            ),
+        )
     }
 
-    private fun needsBackgroundLocks(shellWorkingCount: Int): Boolean {
-        if (shellWorkingCount > 0) return true
-        return AcpSessions.all().values.any { it.keepsCpuAwake() }
+    private fun recomputeKeepAlive(): KeepAliveSnapshot {
+        var live = AcpSessions.all().size
+        var active = 0
+        var working = 0
+        for (client in AcpSessions.all().values) {
+            val state = client.state.value
+            if (state.agentBusy) working++
+            if (state.agentBusy || state.pendingPermission != null) active++
+        }
+        val terminals = TerminalHost.liveSessions()
+        for (t in terminals) {
+            if (!t.running) continue
+            live++
+            if (t.working) {
+                working++
+                active++
+            }
+        }
+        val terminalWake = TerminalWakeLock.anyTerminalWantsWakeLock(terminals)
+        val agentWake = AcpSessions.all().values.any { it.keepsCpuAwake() }
+        return KeepAliveSnapshot(
+            live = live,
+            active = active,
+            working = working,
+            holdWakeLock = terminalWake || agentWake,
+            terminalWake = terminalWake,
+            agentWake = agentWake,
+        )
     }
 
-    private fun syncKeepAlive(
-        context: Context,
-        live: Int = countLive(),
-        active: Int = -1,
-        working: Int = -1,
-        holdWakeLock: Boolean = needsBackgroundLocks(if (working >= 0) working else 0),
-    ) {
-        val sessions = if (live < 0) countLive() else live
-        if (sessions == 0) {
+    private fun syncKeepAlive(context: Context, snapshot: KeepAliveSnapshot? = null) {
+        val s = snapshot ?: recomputeKeepAlive()
+        if (s.live == 0) {
             if (keepingAlive) {
                 KeepAliveService.stop(context)
                 keepingAlive = false
             }
             return
         }
-        val a = if (active >= 0) active else 0
-        val w = if (working >= 0) working else 0
-        KeepAliveService.update(context, active = a, working = w, holdWakeLock = holdWakeLock)
+        KeepAliveService.update(
+            context,
+            active = s.active,
+            working = s.working,
+            holdWakeLock = s.holdWakeLock,
+            terminalWake = s.terminalWake,
+            agentWake = s.agentWake,
+        )
         keepingAlive = true
-    }
-
-    private fun countLive(): Int {
-        var n = AcpSessions.all().size
-        for (t in TerminalHost.liveSessions()) if (t.running) n++
-        return n
     }
 
     private fun preview(text: String): String {
@@ -209,8 +254,10 @@ class KeepAliveService : android.app.Service() {
         val active = intent?.getIntExtra(EXTRA_ACTIVE, 0) ?: 0
         val working = intent?.getIntExtra(EXTRA_WORKING, 0) ?: 0
         val holdWake = intent?.getBooleanExtra(EXTRA_WAKE_LOCK, false) ?: false
+        val terminalWake = intent?.getBooleanExtra(EXTRA_WAKE_TERMINAL, false) ?: false
+        val agentWake = intent?.getBooleanExtra(EXTRA_WAKE_AGENT, false) ?: false
         setBackgroundLocksHeld(holdWake)
-        startForeground(Notifier.RUNNING_ID, notification(this, active, working))
+        startForeground(Notifier.RUNNING_ID, notification(this, active, working, holdWake, terminalWake, agentWake))
         return START_NOT_STICKY
     }
 
@@ -277,16 +324,35 @@ class KeepAliveService : android.app.Service() {
         private const val EXTRA_ACTIVE = "active"
         private const val EXTRA_WORKING = "working"
         private const val EXTRA_WAKE_LOCK = "wake_lock"
-        private var shown: Triple<Int, Int, Boolean>? = null
+        private const val EXTRA_WAKE_TERMINAL = "wake_terminal"
+        private const val EXTRA_WAKE_AGENT = "wake_agent"
+        private data class Shown(
+            val active: Int,
+            val working: Int,
+            val holdWakeLock: Boolean,
+            val terminalWake: Boolean,
+            val agentWake: Boolean,
+        )
 
-        fun update(context: Context, active: Int, working: Int, holdWakeLock: Boolean) {
-            val snapshot = Triple(active, working, holdWakeLock)
+        private var shown: Shown? = null
+
+        fun update(
+            context: Context,
+            active: Int,
+            working: Int,
+            holdWakeLock: Boolean,
+            terminalWake: Boolean,
+            agentWake: Boolean,
+        ) {
+            val snapshot = Shown(active, working, holdWakeLock, terminalWake, agentWake)
             if (shown == snapshot) return
             shown = snapshot
             val intent = Intent(context, KeepAliveService::class.java)
                 .putExtra(EXTRA_ACTIVE, active)
                 .putExtra(EXTRA_WORKING, working)
                 .putExtra(EXTRA_WAKE_LOCK, holdWakeLock)
+                .putExtra(EXTRA_WAKE_TERMINAL, terminalWake)
+                .putExtra(EXTRA_WAKE_AGENT, agentWake)
             runCatching {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent) else context.startService(intent)
             }
@@ -297,7 +363,14 @@ class KeepAliveService : android.app.Service() {
             runCatching { context.stopService(Intent(context, KeepAliveService::class.java)) }
         }
 
-        private fun notification(context: Context, active: Int, working: Int): android.app.Notification {
+        private fun notification(
+            context: Context,
+            active: Int,
+            working: Int,
+            holdWakeLock: Boolean,
+            terminalWake: Boolean,
+            agentWake: Boolean,
+        ): android.app.Notification {
             val stop = android.app.PendingIntent.getBroadcast(
                 context,
                 Notifier.RUNNING_ID + 1,
@@ -313,9 +386,14 @@ class KeepAliveService : android.app.Service() {
                     if (active > 0) context.resources.getQuantityString(R.plurals.running_title, active, active)
                     else context.getString(R.string.running_idle_title),
                 )
-                .setContentText(
-                    if (active > 0) context.getString(R.string.running_active_text)
-                    else context.getString(R.string.running_idle_text),
+                .setContentText(wakeLockStatusLine(context, holdWakeLock, terminalWake, agentWake))
+                .setStyle(
+                    androidx.core.app.NotificationCompat.BigTextStyle()
+                        .bigText(
+                            wakeLockStatusLine(context, holdWakeLock, terminalWake, agentWake) + "\n" +
+                                if (active > 0) context.getString(R.string.running_active_text)
+                                else context.getString(R.string.running_idle_text),
+                        ),
                 )
                 .addAction(0, context.getString(R.string.running_stop), stop)
                 .setOngoing(true)
@@ -323,6 +401,19 @@ class KeepAliveService : android.app.Service() {
                 .setShowWhen(false)
                 .setContentIntent(Notifier.openIntent(context, AppPresence.place, requestCode = Notifier.RUNNING_ID))
                 .build()
+        }
+
+        private fun wakeLockStatusLine(
+            context: Context,
+            holdWakeLock: Boolean,
+            terminalWake: Boolean,
+            agentWake: Boolean,
+        ): String = when {
+            !holdWakeLock -> context.getString(R.string.running_wake_lock_off)
+            terminalWake && agentWake -> context.getString(R.string.running_wake_lock_on_both)
+            terminalWake -> context.getString(R.string.running_wake_lock_on_terminal)
+            agentWake -> context.getString(R.string.running_wake_lock_on_chat)
+            else -> context.getString(R.string.running_wake_lock_off)
         }
     }
 }

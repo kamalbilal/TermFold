@@ -246,7 +246,7 @@
     <string name="settings_battery_off">Android may still pause TermFold when the screen is off.</string>
     <string name="settings_battery_allow">Allow</string>
     <string name="settings_phantom_title">Android child-process limits</string>
-    <string name="settings_phantom_desc">On Android 12 and newer the system can pause or kill extra processes TermFold starts (same as Termux). Wi‑Fi and mobile data both use a CPU wake lock and a network hold while an agent is working; only Wi‑Fi also uses a Wi‑Fi radio lock. If agents still stall with the screen off, allow unrestricted battery, then try Developer options → disable child process restrictions.</string>
+    <string name="settings_phantom_desc">On Android 12 and newer the system can pause or kill extra processes TermFold starts (same as Termux). Agent chats may hold a CPU wake lock while they are working. Terminals never wake-lock on their own: use Wake and Auto on the terminal key row (Wake off by default; Auto on keeps the lock only while output is flowing; Auto off keeps it until you turn Wake off). Wi‑Fi also uses a radio lock when a wake lock is active. If work still stalls with the screen off, allow unrestricted battery, then try Developer options → disable child process restrictions.</string>
     <string name="files_delete">Delete</string>
     <string name="files_new_file">New file</string>
     <string name="files_new_folder">New folder</string>
@@ -304,6 +304,7 @@
     <string name="update_title">Updates</string>
     <string name="update_current">TermFold %1$s</string>
     <string name="update_hint">Check GitHub for a newer version. It is downloaded here and installed over this one; your projects and files are kept.</string>
+    <string name="update_not_release_build">In-app updates from GitHub apply only to the published TermFold app (com.termfold.app). Install releases from GitHub on that app, or build this fork from source.</string>
     <string name="update_check">Check for updates</string>
     <string name="update_checking">Checking for updates…</string>
     <string name="update_latest">You have the latest version.</string>
@@ -320,6 +321,10 @@
     <string name="running_idle_title">Sessions are idle</string>
     <string name="running_idle_text">Kept open a few more minutes in case you come back.</string>
     <string name="running_active_text">Working while you are in other apps.</string>
+    <string name="running_wake_lock_off">Wake lock off</string>
+    <string name="running_wake_lock_on_terminal">Wake lock on - (terminal)</string>
+    <string name="running_wake_lock_on_chat">Wake lock on - (chat)</string>
+    <string name="running_wake_lock_on_both">Wake lock on - (terminal, chat)</string>
     <string name="running_stop">Stop sessions</string>
     <string name="provision_title">Setting up Linux</string>
     <string name="provision_body">Unpacking %1$s. This happens only once, and everything you install afterwards is kept.</string>
@@ -342,6 +347,8 @@
     <string name="key_enter" translatable="false">Enter</string>
     <string name="key_paste">Paste</string>
     <string name="key_image">Image</string>
+    <string name="key_wake" translatable="false">Wake</string>
+    <string name="key_auto" translatable="false">Auto</string>
     <string name="key_home" translatable="false">Home</string>
     <string name="key_end" translatable="false">End</string>
     <string name="key_pgup" translatable="false">PgUp</string>

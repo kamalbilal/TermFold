@@ -245,9 +245,16 @@ fun TerminalScreen(
             )
         }
 
+        val wakeOn = TerminalHost.wakeEnabled(sessionKey)
+        val autoOn = TerminalHost.wakeAuto(sessionKey)
+
         KeyRow(
             controlDown = controlDown,
             altDown = altDown,
+            wakeOn = wakeOn,
+            autoOn = autoOn,
+            onToggleWake = { TerminalHost.setWakeEnabled(context, sessionKey, !wakeOn) },
+            onToggleAuto = { TerminalHost.setWakeAuto(context, sessionKey, !autoOn) },
             onToggleControl = {
                 controlDown = !controlDown
                 TerminalHost.currentBridge?.setControlKey(controlDown)
@@ -394,6 +401,10 @@ private data class ExtraKey(
 internal fun KeyRow(
     controlDown: Boolean,
     altDown: Boolean,
+    wakeOn: Boolean = false,
+    autoOn: Boolean = true,
+    onToggleWake: () -> Unit = {},
+    onToggleAuto: () -> Unit = {},
     onToggleControl: () -> Unit,
     onToggleAlt: () -> Unit,
     onKey: (SpecialKey) -> Unit,
@@ -461,6 +472,22 @@ internal fun KeyRow(
                 }
             }
             KeyLine(wide = wide, gap = gap) { stretch ->
+                ModifierKey(
+                    label = stringResource(R.string.key_wake),
+                    active = wakeOn,
+                    height = keyHeight,
+                    wide = wide,
+                    onClick = onToggleWake,
+                    modifier = stretch(1f),
+                )
+                ModifierKey(
+                    label = stringResource(R.string.key_auto),
+                    active = autoOn && wakeOn,
+                    height = keyHeight,
+                    wide = wide,
+                    onClick = onToggleAuto,
+                    modifier = stretch(1f),
+                )
                 bottom.forEach { key ->
                     KeyButton(
                         label = key.label,

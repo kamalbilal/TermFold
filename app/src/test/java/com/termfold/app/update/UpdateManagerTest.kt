@@ -20,4 +20,10 @@ class UpdateManagerTest {
         assertFalse(UpdateManager.isNewer("2.2", "2.2.0"))
         assertFalse(UpdateManager.isNewer("2.1.9", "2.2.0"))
     }
+
+    @Test
+    fun `in-app updates only for the release application id`() {
+        assertTrue(UpdateManager.supportsInAppUpdates(UpdateManager.RELEASE_APPLICATION_ID))
+        assertFalse(UpdateManager.supportsInAppUpdates("com.termfold.new"))
+    }
 }

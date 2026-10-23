@@ -35,7 +35,10 @@ fun UpdatesCard() {
     val context = LocalContext.current
     val state by UpdateManager.state.collectAsState()
 
-    LaunchedEffect(Unit) { UpdateManager.checkIfDue(context) }
+    val inAppUpdates = UpdateManager.supportsInAppUpdates()
+    if (inAppUpdates) {
+        LaunchedEffect(Unit) { UpdateManager.checkIfDue(context) }
+    }
 
     Column(
         modifier = Modifier
@@ -50,6 +53,11 @@ fun UpdatesCard() {
             color = Palette.Text,
         )
         Spacer(Modifier.height(8.dp))
+
+        if (!inAppUpdates) {
+            Body(stringResource(R.string.update_not_release_build))
+            return@Column
+        }
 
         when (val s = state) {
             State.Idle -> Body(stringResource(R.string.update_hint))

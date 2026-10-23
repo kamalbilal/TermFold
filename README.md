@@ -158,6 +158,23 @@ environment). Without them the release APK is built unsigned.
 
 Tests: `./gradlew :app:testDebugUnitTest`.
 
+## Developing this fork
+
+This branch builds with application id **`com.termfold.new`** so you can keep the published
+**`com.termfold.app`** install on the same device. Debug builds show as **TermFold Dev** in the
+launcher. The two apps do not share data: each has its own Debian rootfs, projects, and settings.
+
+```bash
+py -3 tools/fetch-shell-runtime.py
+py -3 tools/fetch-ca-bundle.py
+./gradlew :app:assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell pm list packages | grep termfold
+```
+
+Expect a full Linux setup the first time you open the dev build. Settings → Updates is disabled
+here because GitHub APKs target `com.termfold.app`.
+
 Other tools:
 - `tools/make-icons.py` regenerates the launcher icon from `tools/brand/logo-source.png`
 - `tools/build-compat-shim.py` rebuilds the compatibility library preloaded into the guest (needs `pip install ziglang`)
