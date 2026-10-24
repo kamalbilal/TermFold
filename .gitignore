@@ -19,3 +19,6 @@ app/src/main/assets/ubuntu-*.bin
 *.keystore
 
 .termfold/
+
+# Ad-hoc APK copies at repo root (use app/build/outputs/apk/ for builds).
+TermFold-*.apk

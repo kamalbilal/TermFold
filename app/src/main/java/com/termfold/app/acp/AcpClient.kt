@@ -289,6 +289,46 @@ class AcpClient(
         start()
     }
 
+    /**
+     * Deletes the Cursor CLI from the guest and runs a full install again. Chat history on screen
+     * is kept; sign-in (Settings API key or `agent login` in Shell) may be required again afterward.
+     */
+    fun reinstallCursor() {
+        if (agent.id != "cursor") return
+        if (_state.value.phase == AcpPhase.INSTALLING) return
+        val retryable = _state.value.phase in setOf(AcpPhase.ERROR, AcpPhase.AUTH_REQUIRED, AcpPhase.CLOSED)
+        if (running.get() && !retryable) return
+        runCatching { process?.destroy() }
+        process = null
+        agentSessionId = null
+        failPending("Agent restarted")
+        closedByUser = false
+        running.set(true)
+        scope.launch {
+            try {
+                _state.update {
+                    it.copy(
+                        phase = AcpPhase.INSTALLING,
+                        statusText = context.getString(R.string.acp_reinstalling_cursor),
+                        errorDetail = "",
+                    )
+                }
+                withContext(Dispatchers.IO) {
+                    AcpInstaller.purgeCursor(context)
+                }
+                begin()
+            } catch (failure: Throwable) {
+                Log.e(TAG, "Cursor reinstall failed", failure)
+                _state.update {
+                    it.copy(
+                        phase = AcpPhase.ERROR,
+                        errorDetail = withAgentOutput(failure.message ?: failure.javaClass.simpleName),
+                    )
+                }
+            }
+        }
+    }
+
     /** The agent's latest stderr lines, for error reports. */
     private val stderrTail = ArrayDeque<String>()
 
@@ -314,15 +354,23 @@ class AcpClient(
                 _state.update { it.copy(statusText = step) }
             }
         }
+        if (agent.id == "cursor") {
+            AcpInstaller.verifyCursorLaunch(context, launch)
+        }
 
         _state.update { it.copy(statusText = "Starting ${agent.name}") }
         val guestArgv = listOf(launch.command) + guestLaunchArgs(launch.args)
+        val agentEnv = if (agent.id == "cursor") {
+            launch.env + CursorAcpPrefs.agentEnvironment(context)
+        } else {
+            launch.env
+        }
         val command = ProotCommand.build(
             context = context,
             argv = guestArgv,
             guestCwd = workspaceGuestDir,
             pathPrefix = AcpInstaller.pathPrefix(context, agent),
-            extraEnv = launch.env,
+            extraEnv = agentEnv,
         )
 
         val process = ProcessBuilder(command).apply {
@@ -1051,9 +1099,17 @@ class AcpClient(
         return if (content.length() == 0) null else content
     }
 
-    private fun abortInFlightUserTurn() {
-        _state.update { it.copy(agentBusy = false) }
+    private fun abortInFlightUserTurn(optimisticUserMessageId: Long? = null) {
+        _state.update { state ->
+            val items = if (optimisticUserMessageId != null) {
+                state.items.filter { it.id != optimisticUserMessageId }
+            } else {
+                state.items
+            }
+            state.copy(agentBusy = false, items = items)
+        }
         turnInFlight = false
+        if (optimisticUserMessageId != null) persistTimeline()
     }
 
     private suspend fun awaitPreTurnHash(messageId: Long): String? {
@@ -1315,11 +1371,15 @@ class AcpClient(
     }
 
     fun cancel() {
-        val sessionId = agentSessionId ?: return
+        val sessionId = agentSessionId
         stoppedByUser = true
         steerId = null
-        scope.launch { notify("session/cancel", JSONObject().put("sessionId", sessionId)) }
-        _state.update { it.copy(agentBusy = false) }
+        if (!sessionId.isNullOrBlank()) {
+            scope.launch { notify("session/cancel", JSONObject().put("sessionId", sessionId)) }
+        }
+        // session/prompt blocks until the turn ends; cancel must unblock it or edit/resend waits forever.
+        failPending("Turn cancelled")
+        abortInFlightUserTurn()
     }
 
     /** Restores files to before [userMessageId] was sent; dims later chat; rotates wire session. */
@@ -1420,47 +1480,58 @@ class AcpClient(
         scope.launch {
             awaitTurnIdle()
             var optimisticMessageId: Long? = null
-            for (step in editResendSteps(revertFiles)) {
-                when (step) {
-                    EditResendStep.Restore -> {
-                        val hash = awaitPreTurnHash(fromUserMessageId)
-                            ?: _state.value.checkpoints.preTurnByMessageId[fromUserMessageId]
-                        if (hash != null) {
-                            val ok = withContext(Dispatchers.IO) { checkpointStore.restore(context, hash) }
-                            if (!ok) {
-                                appendSystemError("Could not restore workspace files.")
+            var turnCompleted = false
+            try {
+                for (step in editResendSteps(revertFiles)) {
+                    when (step) {
+                        EditResendStep.Restore -> {
+                            val hash = awaitPreTurnHash(fromUserMessageId)
+                                ?: _state.value.checkpoints.preTurnByMessageId[fromUserMessageId]
+                            if (hash != null) {
+                                val ok = withContext(Dispatchers.IO) { checkpointStore.restore(context, hash) }
+                                if (!ok) {
+                                    appendSystemError("Could not restore workspace files.")
+                                    return@launch
+                                }
+                            }
+                        }
+                        EditResendStep.Truncate -> truncateFromUserMessage(fromUserMessageId, clearRedo = true)
+                        EditResendStep.WireResync -> {
+                            wireResync(ghostFromItemId = null)
+                            if (agentSessionId == null) {
+                                appendSystemError("Agent session could not be refreshed after restore.")
                                 return@launch
                             }
                         }
-                    }
-                    EditResendStep.Truncate -> truncateFromUserMessage(fromUserMessageId, clearRedo = true)
-                    EditResendStep.BeginTurn -> {
-                        optimisticMessageId = beginUserTurn(text, images, files) ?: return@launch
-                    }
-                    EditResendStep.WireResync -> {
-                        wireResync(ghostFromItemId = null)
-                        if (agentSessionId == null) {
-                            abortInFlightUserTurn()
-                            return@launch
+                        EditResendStep.BeginTurn -> {
+                            optimisticMessageId = beginUserTurn(text, images, files) ?: return@launch
+                        }
+                        EditResendStep.CompleteTurn -> {
+                            val messageId = optimisticMessageId ?: return@launch
+                            completeUserTurn(messageId, text, images, files)
+                            turnCompleted = true
                         }
                     }
-                    EditResendStep.CompleteTurn -> {
-                        val messageId = optimisticMessageId ?: return@launch
-                        completeUserTurn(messageId, text, images, files)
-                    }
+                }
+            } finally {
+                if (optimisticMessageId != null && !turnCompleted) {
+                    abortInFlightUserTurn(optimisticMessageId)
                 }
             }
         }
     }
 
     private suspend fun awaitTurnIdle() {
+        if (!turnInFlight) return
+        agentSessionId?.let { notify("session/cancel", JSONObject().put("sessionId", it)) }
+        failPending("Turn cancelled")
+        var spins = 0
+        while (turnInFlight && spins < 600) {
+            kotlinx.coroutines.delay(100)
+            spins++
+        }
         if (turnInFlight) {
-            agentSessionId?.let { notify("session/cancel", JSONObject().put("sessionId", it)) }
-            var spins = 0
-            while (turnInFlight && spins < 600) {
-                kotlinx.coroutines.delay(100)
-                spins++
-            }
+            abortInFlightUserTurn()
         }
     }
 

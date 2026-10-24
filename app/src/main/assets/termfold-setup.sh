@@ -75,7 +75,12 @@ apt-get "${APT_OPTS[@]}" install --no-install-recommends \
   || fail "Installing developer tools failed."
 
 step "Installing Node.js $NODE_VERSION"
-if [ "$(cat /opt/node/.termfold-version 2>/dev/null)" != "$NODE_VERSION" ]; then
+node_ok() {
+  [ -f /opt/node/bin/npm ] && \
+  [ -f /opt/node/lib/node_modules/npm/node_modules/@npmcli/run-script/lib/package-envs.js ] && \
+  /opt/node/bin/npm --version >/dev/null 2>&1
+}
+if [ "$(cat /opt/node/.termfold-version 2>/dev/null)" != "$NODE_VERSION" ] || ! node_ok; then
   case "$(uname -m)" in
     x86_64) arch=x64 ;;
     aarch64|arm64) arch=arm64 ;;
@@ -114,4 +119,5 @@ touch "$MARK"
 printf '\n%sReady.%s node %s · npm %s · python %s · git %s\n' "$green" "$reset" \
   "$(node --version)" "$(npm --version)" "$(python3 --version | cut -d' ' -f2)" "$(git --version | cut -d' ' -f3)"
 printf '%sAgent CLIs install themselves the first time you run them: claude, codex, gemini, opencode, pi, qwen.%s\n' "$dim" "$reset"
-printf '%sPhone speed: run termfold-bench; use ESLint --cache in npm run lint; split type-aware lint to lint:ci; try turbo --concurrency=1 on device.%s\n\n' "$dim" "$reset"
+printf '%sPhone speed: run termfold-bench; use ESLint --cache in npm run lint; split type-aware lint to lint:ci; try turbo --concurrency=1 on device.%s\n' "$dim" "$reset"
+printf '%sWeb apps: open the in-app preview browser (termfold-browser / MCP) to test localhost dev servers while you watch.%s\n\n' "$dim" "$reset"

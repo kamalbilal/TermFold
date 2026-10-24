@@ -20,6 +20,7 @@
     <string name="acp_auth_required">Authentication required</string>
     <string name="acp_auth_body">Open a Shell session in this folder and sign in to the agent there (for example run claude, codex login, or pi), then come back and tap Retry. The sign-in is shared with this session.</string>
     <string name="acp_auth_body_cursor">Open a Shell session in this folder and run agent login, then come back and tap Retry. The sign-in is shared with this Cursor session.</string>
+    <string name="acp_auth_body_cursor_api_key">Cursor did not accept the API key from Settings. Check the key in Cursor Dashboard → API Keys, update it under Settings → Cursor agent, then tap Retry. You can also run agent login in Shell instead.</string>
     <string name="acp_auth_methods">Supported: %1$s</string>
     <string name="acp_agent_unavailable">Agent details unavailable</string>
     <string name="acp_restart">Restart agent</string>
@@ -209,7 +210,7 @@
     <string name="terminal_find">Search the terminal</string>
     <string name="settings_agent_chat">Agent chat</string>
     <string name="settings_agent_chat_live_diffs">Show live file diffs</string>
-    <string name="settings_agent_chat_live_diffs_desc">Update line-level diffs while a tool call is still running. When off, diffs appear after each tool finishes.</string>
+    <string name="settings_agent_chat_live_diffs_desc">Update line-level diffs while a tool call is still running and keep file edit tools expanded in chat. When off, diffs appear after each tool finishes and completed tools stay collapsed.</string>
     <string name="acp_tool_diff_binary">Binary file (no text diff)</string>
     <string name="acp_tool_diff_added">New file</string>
     <string name="acp_tool_diff_deleted">Deleted</string>
@@ -218,6 +219,11 @@
     <string name="settings_cursor">Cursor agent</string>
     <string name="settings_cursor_allow_everything">Allow everything</string>
     <string name="settings_cursor_allow_everything_desc">Auto-approve tool and command prompts in Cursor sessions. Reopen the session after changing this.</string>
+    <string name="settings_cursor_api_key">API key</string>
+    <string name="settings_cursor_api_key_desc">Optional. User API key from Cursor Dashboard → API Keys. When set, the agent uses it instead of agent login. Reopen the Cursor session after saving.</string>
+    <string name="settings_cursor_api_key_hint">Paste API key</string>
+    <string name="settings_cursor_api_key_saved_hint">Key saved — paste a new key to replace</string>
+    <string name="settings_cursor_api_key_clear">Remove key</string>
     <string name="settings_terminal">Terminal colours</string>
     <string name="terminal_find_hint">Find in terminal</string>
     <string name="terminal_find_none">No matches</string>
@@ -276,6 +282,8 @@
     <string name="files_delete_denied">the file could not be removed (it may be read-only or in use).</string>
     <string name="files_unsaved_body">%1$s has changes that are not saved.</string>
     <string name="acp_error_title">Agent error</string>
+    <string name="acp_reinstall_cursor">Reinstall Cursor</string>
+    <string name="acp_reinstalling_cursor">Removing Cursor…</string>
     <string name="acp_permission_title">The agent needs your approval</string>
     <string name="acp_attach_image">Attach images</string>
     <string name="acp_agent_label">ACP agent</string>
@@ -428,6 +436,11 @@
     <string name="preview_open_outside">Open in browser app</string>
     <string name="preview_copy_link">Copy address</string>
     <string name="preview_start_page">Start page</string>
+    <string name="preview_clear_site_data">Clear cookies &amp; storage</string>
+    <string name="preview_captcha_handoff">Solve the security check on screen, then continue the agent.</string>
+    <string name="preview_captcha_not">Not a captcha</string>
+    <string name="settings_browser_allowlist">Browser allowlist (agents)</string>
+    <string name="settings_browser_allow_lan">Allow LAN dev hosts for agents</string>
     <string name="preview_full_screen">Full screen</string>
     <string name="preview_side_by_side">Side by side</string>
     <string name="preview_start_title">Preview your work</string>

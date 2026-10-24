@@ -10,6 +10,7 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.file.Files
 import java.security.MessageDigest
 
 /**
@@ -71,9 +72,41 @@ object AcpInstaller {
             ?.let { it.readText().contains("\"version\":\"${agent.version}\"") } == true
         if (!manifestOk) return false
         if (agent.id == "cursor") {
-            return locateCursorAgentSource(ShellPaths.rootfsDir(context)) != null
+            return CursorAgentPaths.locateSource(ShellPaths.rootfsDir(context)) != null
         }
         return true
+    }
+
+    /**
+     * After a full backup restore, recreate Cursor PATH shims and drop a stale manifest when the
+     * install tree did not come back with the backup.
+     */
+    fun reconcileAfterRestore(context: Context) {
+        val rootfs = ShellPaths.rootfsDir(context)
+        val source = CursorAgentPaths.locateSource(rootfs)
+        if (source != null) {
+            publishCursorAgentBinaries(context, source)
+            Log.i(TAG, "Recreated Cursor agent shims after restore")
+        } else if (manifestFile(context, "cursor").isFile) {
+            manifestFile(context, "cursor").delete()
+            Log.i(TAG, "Removed stale Cursor install manifest after restore")
+        }
+    }
+
+    fun verifyCursorLaunch(context: Context, launch: Launch) {
+        verifyCursorLaunchHost(ShellPaths.rootfsDir(context), launch)
+    }
+
+    /** Drops TermFold's Cursor install so the next session fetch runs from scratch. */
+    fun purgeCursor(context: Context) {
+        val rootfs = ShellPaths.rootfsDir(context)
+        manifestFile(context, "cursor").delete()
+        installDir(context, "cursor").deleteRecursively()
+        File(rootfs, "root/.local/share/cursor-agent").deleteRecursively()
+        for (name in listOf("agent", "cursor-agent")) {
+            File(rootfs, "root/.local/bin/$name").delete()
+        }
+        Log.i(TAG, "Purged Cursor agent install")
     }
 
     private fun cursorAgentBinary(context: Context): File =
@@ -108,9 +141,7 @@ object AcpInstaller {
 
         if (isInstalled(context, agent)) {
             if (agent.id == "cursor") {
-                locateCursorAgentSource(ShellPaths.rootfsDir(context))?.let {
-                    publishCursorAgentBinaries(context, it)
-                }
+                return ensureCursorLaunch(context, agent, onProgress)
             }
             onProgress("Already installed")
             return launch(context, agent)
@@ -268,6 +299,9 @@ object AcpInstaller {
 
     /** Resolves how to spawn an already-installed [agent] from its install manifest. */
     private fun launch(context: Context, agent: AcpAgent): Launch {
+        if (agent.id == "cursor") {
+            return ensureCursorLaunch(context, agent) { }
+        }
         val manifest = JSONObject(manifestFile(context, agent.id).readText())
         val args = manifest.optJSONArray("args")?.let { array ->
             List(array.length()) { array.getString(it) }
@@ -405,9 +439,8 @@ object AcpInstaller {
     }
 
     /**
-     * Cursor's registry archive lands under /opt/acp, but the supported install path for login
-     * and updates is cursor.com/install, which puts `agent` on ~/.local/bin. ACP spawns that
-     * binary; Shell picks it up via profile.d and the guest PATH.
+     * Cursor's registry archive lands under /opt/acp; cursor.com/install uses ~/.local/share.
+     * ACP spawns the real `cursor-agent` binary; ~/.local/bin/agent is only a shell PATH shim.
      */
     private fun installCursorOfficial(
         context: Context,
@@ -417,7 +450,7 @@ object AcpInstaller {
         val dir = installDir(context, agent.id)
         dir.mkdirs()
         val rootfs = ShellPaths.rootfsDir(context)
-        var source = locateCursorAgentSource(rootfs)
+        var source = CursorAgentPaths.locateSource(rootfs)
         if (source == null) {
             onProgress("Installing Cursor CLI")
             val result = runCapture(
@@ -428,38 +461,55 @@ object AcpInstaller {
             if (result.first != 0) {
                 Log.w(TAG, "Cursor install script exited ${result.first}: ${result.second.takeLast(2_000)}")
             }
-            source = locateCursorAgentSource(rootfs)
+            source = CursorAgentPaths.locateSource(rootfs)
         }
         if (source == null) {
             onProgress("Downloading ${agent.name} ${agent.version}")
             source = installCursorFromRegistry(context, agent, onProgress)
         }
-        val binary = publishCursorAgentBinaries(context, source)
-        check(binary.isFile && binary.length() > 0L) {
-            "Cursor install finished but $CURSOR_AGENT_BIN is missing. Try Shell: termfold-setup, then reopen this session."
-        }
-        val launch = Launch(CURSOR_AGENT_BIN, agent.args, agent.env)
+        return finishCursorInstall(context, agent, dir, rootfs, source, onProgress)
+    }
+
+    private fun ensureCursorLaunch(
+        context: Context,
+        agent: AcpAgent,
+        onProgress: (String) -> Unit,
+    ): Launch {
+        val rootfs = ShellPaths.rootfsDir(context)
+        val source = CursorAgentPaths.locateSource(rootfs)
+            ?: return installCursorOfficial(context, agent, onProgress)
+        publishCursorAgentBinaries(context, source)
+        val launch = cursorLaunch(rootfs, agent, source)
+        verifyCursorLaunchHost(rootfs, launch)
+        onProgress("Already installed")
+        return launch
+    }
+
+    private fun finishCursorInstall(
+        context: Context,
+        agent: AcpAgent,
+        dir: File,
+        rootfs: File,
+        source: File,
+        onProgress: (String) -> Unit,
+    ): Launch {
+        publishCursorAgentBinaries(context, source)
+        val launch = cursorLaunch(rootfs, agent, source)
+        verifyCursorLaunchHost(rootfs, launch)
         writeManifest(dir, agent, launch)
         Log.i(TAG, "Installed cursor ${agent.version} -> ${launch.command}")
         return launch
     }
 
-    /** Finds the real cursor-agent launcher (bash + bundled node in the same directory). */
-    private fun locateCursorAgentSource(rootfs: File): File? {
-        fun isCursorInstallDir(agent: File): Boolean =
-            agent.isFile && agent.name == "cursor-agent" && File(agent.parentFile, "node").isFile
+    private fun cursorLaunch(rootfs: File, agent: AcpAgent, source: File): Launch =
+        Launch(CursorAgentPaths.guestPath(rootfs, source), agent.args, agent.env)
 
-        val versions = File(rootfs, "root/.local/share/cursor-agent/versions")
-        if (versions.isDirectory) {
-            versions.walkTopDown().maxDepth(6)
-                .filter { isCursorInstallDir(it) }
-                .minByOrNull { it.relativeTo(rootfs).invariantSeparatorsPath.length }
-                ?.let { return it }
+    private fun verifyCursorLaunchHost(rootfs: File, launch: Launch) {
+        val host = File(rootfs, launch.command.removePrefix("/"))
+        check(host.isFile && host.length() > 0L) {
+            "Cursor install finished but ${launch.command} is missing on disk. " +
+                "Try Shell: rm -rf /opt/acp/cursor, then reopen this session on Wi‑Fi."
         }
-        AcpArchives.resolveCommand(File(rootfs, "opt/acp/cursor"), "dist-package/cursor-agent")
-            ?.takeIf { isCursorInstallDir(it) }
-            ?.let { return it }
-        return null
     }
 
     /**
@@ -477,6 +527,16 @@ object AcpInstaller {
 
     private fun writeCursorPathShim(dest: File, guestTarget: String) {
         dest.parentFile?.mkdirs()
+        val path = dest.toPath()
+        if (Files.isSymbolicLink(path)) {
+            val target = runCatching { Files.readSymbolicLink(path).toString() }.getOrNull()
+            if (target == guestTarget) return
+        } else if (dest.isFile) {
+            val text = runCatching { dest.readText() }.getOrDefault("")
+            if (text == "#!/bin/sh\nexec $guestTarget \"\$@\"\n") return
+        }
+        // Never write through an existing symlink — that would corrupt the real cursor-agent script.
+        Files.deleteIfExists(path)
         dest.writeText("#!/bin/sh\nexec $guestTarget \"\$@\"\n")
         dest.setExecutable(true, false)
     }
@@ -582,11 +642,40 @@ object AcpInstaller {
      * mirrors and locks were the least reliable link on mobile networks. The tarball unpacks as
      * node-<version>-linux-<arch>/, which is renamed to a stable /opt/node.
      */
+    /** True when the official Node tarball unpacked completely (npm's own modules are present). */
+    internal fun nodeInstallHealthy(nodeDir: File): Boolean {
+        if (!File(nodeDir, "bin/npm").isFile || !File(nodeDir, "bin/npx").isFile) return false
+        val npmProbe = File(
+            nodeDir,
+            "lib/node_modules/npm/node_modules/@npmcli/run-script/lib/package-envs.js",
+        )
+        return npmProbe.isFile && npmProbe.length() > 0L
+    }
+
+    /**
+     * Re-downloads Node when `/opt/node` exists but npm is broken (common after a partial backup
+     * restore or a failed unpack). Safe to call from shell bootstrap; no-op when healthy or absent.
+     */
+    fun reconcileNodeInstall(context: Context) {
+        val nodeDir = File(ShellPaths.rootfsDir(context), NODE_ROOT.trimStart('/'))
+        if (!File(nodeDir, "bin/npx").isFile && !nodeDir.isDirectory) return
+        if (nodeInstallHealthy(nodeDir)) return
+        Log.w(TAG, "Node/npm install is incomplete; reinstalling $NODE_VERSION")
+        ensureNode(context) { step -> Log.i(TAG, "Node repair: $step") }
+    }
+
     private fun ensureNode(context: Context, onProgress: (String) -> Unit) {
         val nodeDir = File(ShellPaths.rootfsDir(context), NODE_ROOT.trimStart('/'))
         // Installs made before the version marker existed have no marker, so they upgrade too.
         val marker = File(nodeDir, ".termfold-version")
-        if (File(nodeDir, "bin/npx").isFile && marker.isFile && marker.readText() == NODE_VERSION) return
+        if (
+            File(nodeDir, "bin/npx").isFile &&
+            marker.isFile &&
+            marker.readText() == NODE_VERSION &&
+            nodeInstallHealthy(nodeDir)
+        ) {
+            return
+        }
 
         onProgress("Installing Node.js (one-time)")
         val arch = when {

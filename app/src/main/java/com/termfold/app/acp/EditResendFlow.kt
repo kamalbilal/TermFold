@@ -13,8 +13,8 @@ internal fun editResendSteps(revertFiles: Boolean): List<EditResendStep> =
     buildList {
         if (revertFiles) add(EditResendStep.Restore)
         add(EditResendStep.Truncate)
-        add(EditResendStep.BeginTurn)
         if (revertFiles) add(EditResendStep.WireResync)
+        add(EditResendStep.BeginTurn)
         add(EditResendStep.CompleteTurn)
     }
 

@@ -63,6 +63,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -101,6 +102,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.viewinterop.AndroidView
 import com.termfold.app.R
 import com.termfold.app.ui.components.LaunchedWhileVisible
@@ -111,6 +113,9 @@ import com.termfold.app.preview.DevServers
 import com.termfold.app.preview.DriverUi
 import com.termfold.app.preview.Preview
 import com.termfold.app.preview.PreviewFiles
+import com.termfold.app.preview.PreviewTabHost
+import org.json.JSONArray
+import android.webkit.WebStorage
 import com.termfold.app.shell.ShellPaths
 import com.termfold.app.ui.components.BareIconButton
 import com.termfold.app.ui.theme.Mono
@@ -131,7 +136,7 @@ private data class ConsoleLine(val id: Long, val level: ConsoleMessage.MessageLe
 private const val CONSOLE_LIMIT = 500
 
 /** One request the page made, for an agent checking for failed API calls and missing files. */
-private class NetEntry(val method: String, val url: String, val document: Boolean) {
+private class NetEntry(val method: String, val url: String, val document: Boolean, val gen: Int) {
     @Volatile var failure: String? = null
     val failed get() = failure != null
     fun line() = "$method ${url.take(200)}" + (failure?.let { "  -> $it" } ?: "") + if (document) "  (page)" else ""
@@ -140,7 +145,7 @@ private class NetEntry(val method: String, val url: String, val document: Boolea
 private fun markFailed(network: MutableList<NetEntry>, url: String, why: String) {
     synchronized(network) {
         val entry = network.lastOrNull { it.url == url && it.failure == null }
-        if (entry != null) entry.failure = why else network.add(NetEntry("GET", url, false).also { it.failure = why })
+        if (entry != null) entry.failure = why else network.add(NetEntry("GET", url, false, BrowserBridge.networkGeneration).also { it.failure = why })
     }
 }
 private const val PHONE_WIDTH = 390
@@ -168,7 +173,11 @@ fun PreviewPane(
     val scope = rememberCoroutineScope()
     val focus = LocalFocusManager.current
 
+    val tabHost = remember { PreviewTabHost() }
+    var activeTabId by remember { mutableIntStateOf(1) }
     var webView by remember { mutableStateOf<WebView?>(null) }
+    var captchaBanner by remember { mutableStateOf(false) }
+    var pendingPopupUrl by remember { mutableStateOf<String?>(null) }
     var currentUrl by remember { mutableStateOf(state.url) }
     var title by remember { mutableStateOf("") }
     var progress by remember { mutableIntStateOf(100) }
@@ -192,6 +201,7 @@ fun PreviewPane(
     var pendingUpload by remember { mutableStateOf<File?>(null) }
     var uploadTaken by remember { mutableStateOf(false) }
     val agent by BrowserBridge.activity.collectAsState()
+    val agentCommandBusy by BrowserBridge.commandInFlight.collectAsState()
     val cursor = remember { androidx.compose.animation.core.Animatable(androidx.compose.ui.geometry.Offset.Unspecified, androidx.compose.ui.geometry.Offset.VectorConverter) }
     val ripple = remember { androidx.compose.animation.core.Animatable(1f) }
 
@@ -209,14 +219,29 @@ fun PreviewPane(
         }
     }
 
-    fun go(url: String) {
+    fun go(url: String, newTab: Boolean = false) {
         if (url.isBlank()) return
         loadError = null
+        if (newTab) {
+            val id = tabHost.newTab(url) ?: return
+            activeTabId = id
+            tabHost.activeTab().url = url
+            currentUrl = url
+            webView = null
+            return
+        }
         currentUrl = url
+        tabHost.activeTab().url = url
         webView?.loadUrl(url)
     }
 
     // A new request from outside (a header button, a file's Preview, a link) loads its page.
+    LaunchedEffect(pendingPopupUrl) {
+        val url = pendingPopupUrl ?: return@LaunchedEffect
+        pendingPopupUrl = null
+        go(url, newTab = true)
+    }
+
     LaunchedEffect(state.nonce, webView) {
         val view = webView ?: return@LaunchedEffect
         val url = state.url
@@ -316,15 +341,20 @@ fun PreviewPane(
     // This pane's driver. Panes are recreated (maximize, restore, rotation) and the old one can
     // finish going away after the new one registered; it must not unregister the new one.
     var driver by remember { mutableStateOf<BrowserDriver?>(null) }
-    LaunchedEffect(webView) {
+    LaunchedEffect(webView, activeTabId) {
         val view = webView ?: return@LaunchedEffect
+        tabHost.attachWebView(activeTabId, view)
         val density = context.resources.displayMetrics.density
         driver = BrowserDriver(
             context,
-            view,
             object : DriverUi {
+                override fun activeWebView() = tabHost.activeWebView()
                 override fun projectDir() = state.projectDir
                 override fun navigate(url: String) = go(url)
+                override fun navigateNewTab(url: String): Int? {
+                    go(url, newTab = true)
+                    return tabHost.activeId
+                }
                 override fun progress() = progress
                 override fun loadError() = loadError
                 override fun httpError() = httpError
@@ -339,8 +369,6 @@ fun PreviewPane(
                 override suspend fun moveCursor(x: Float, y: Float, label: String) {
                     BrowserBridge.setLabel(label)
                     val to = androidx.compose.ui.geometry.Offset(x, y)
-                    // Animations need the screen's frame clock, which only the composition's
-                    // scope has; the driver waits for the glide to finish before it taps.
                     scope.launch {
                         if (cursor.value == androidx.compose.ui.geometry.Offset.Unspecified) {
                             cursor.snapTo(androidx.compose.ui.geometry.Offset(view.width * 0.5f, view.height * 0.8f))
@@ -364,16 +392,77 @@ fun PreviewPane(
                     }
                 }
                 override fun consoleErrorsSince(since: Int) = console.count { it.id >= since && it.level == ConsoleMessage.MessageLevel.ERROR }
-                override fun networkText(failedOnly: Boolean): String {
-                    val list = synchronized(network) { network.toList() }.filter { !failedOnly || it.failed }
+                override fun networkText(failedOnly: Boolean, sinceGeneration: Int): String {
+                    val list = synchronized(network) {
+                        network.toList().filter { it.gen >= sinceGeneration && (!failedOnly || it.failed) }
+                    }
                     if (list.isEmpty()) return if (failedOnly) "No failed requests." else "No requests recorded yet."
                     return "Requests (${list.size}, newest last):\n" + list.takeLast(120).joinToString("\n") { it.line() }
+                }
+                override fun networkInFlight(): Int = if (progress < 100) 1 else 0
+                override fun networkGeneration(): Int = BrowserBridge.networkGeneration
+                override fun failedRequestCount() = synchronized(network) { network.count { it.failed } }
+                override fun visibleControlCount() = tabHost.activeTab().visibleControls
+                override fun setVisibleControls(count: Int) {
+                    tabHost.activeTab().visibleControls = count
                 }
                 override fun offerUpload(file: File) {
                     uploadTaken = false
                     pendingUpload = file
                 }
                 override fun uploadTaken() = uploadTaken
+                override fun captchaPending(): Boolean =
+                    captchaBanner && !tabHost.activeTab().captchaDismissed
+                override fun updateCaptchaFromPage(detected: Boolean) {
+                    tabHost.activeTab().captchaDetected = detected
+                    captchaBanner = detected && !tabHost.activeTab().captchaDismissed
+                    BrowserBridge.captchaPending = captchaBanner
+                }
+                override fun dismissCaptchaFalsePositive() {
+                    tabHost.activeTab().captchaDismissed = true
+                    captchaBanner = false
+                    BrowserBridge.captchaPending = false
+                }
+                override fun clearSiteData() {
+                    val url = currentUrl ?: return
+                    CookieManager.getInstance().removeAllCookies(null)
+                    WebStorage.getInstance().deleteAllData()
+                    webView?.reload()
+                }
+                override fun tabList(): JSONArray = tabHost.listJson()
+                override fun tabSwitch(id: Int): Boolean {
+                    if (!tabHost.switch(id)) return false
+                    activeTabId = id
+                    val tab = tabHost.activeTab()
+                    webView = tab.webView
+                    currentUrl = tab.url
+                    title = tab.title
+                    return true
+                }
+                override fun tabNew(url: String?): Int? {
+                    val id = tabHost.newTab(url) ?: return null
+                    activeTabId = id
+                    webView = null
+                    if (url != null) {
+                        tabHost.activeTab().url = url
+                        currentUrl = url
+                    } else {
+                        currentUrl = null
+                    }
+                    return id
+                }
+                override fun tabClose(id: Int): Boolean {
+                    val closed = tabHost.close(id)
+                    if (closed) {
+                        activeTabId = tabHost.activeId
+                        webView = tabHost.activeTab().webView
+                        currentUrl = tabHost.activeTab().url
+                    }
+                    return closed
+                }
+                override fun ensureResumed() {
+                    webView?.onResume()
+                }
             },
         )
     }
@@ -389,9 +478,11 @@ fun PreviewPane(
         if (visible) BrowserBridge.controller = d
         else if (BrowserBridge.controller === d) BrowserBridge.controller = null
     }
-    LaunchedEffect(webView, parked, agent.active, visible) {
+    // Keep the page interactive whenever it is on screen, including while the agent is idle or the
+    // user paused the agent (pause only blocks new agent commands, not touch/scroll).
+    LaunchedEffect(webView, parked, visible) {
         val view = webView ?: return@LaunchedEffect
-        if (!agent.active && (parked || !visible)) view.onPause() else view.onResume()
+        if (parked || !visible) view.onPause() else view.onResume()
     }
 
     DisposableEffect(Unit) {
@@ -474,6 +565,15 @@ fun PreviewPane(
                     MenuEntry(TermFoldIcons.Home, stringResource(R.string.preview_start_page)) {
                         act { currentUrl = null; loadError = null; webView?.loadUrl("about:blank") }
                     }
+                    currentUrl?.let {
+                        MenuEntry(TermFoldIcons.Refresh, stringResource(R.string.preview_clear_site_data)) {
+                            act {
+                                CookieManager.getInstance().removeAllCookies(null)
+                                WebStorage.getInstance().deleteAllData()
+                                webView?.reload()
+                            }
+                        }
+                    }
                 }
             }
             if (onToggleMaximize != null) {
@@ -491,6 +591,62 @@ fun PreviewPane(
             val shown by animateFloatAsState(if (progress >= 100 || showStart) 0f else progress / 100f, animationSpec = Motion.standard(), label = "progress")
             if (shown > 0f) Box(Modifier.fillMaxWidth(shown).fillMaxHeight().background(Palette.Accent))
         }
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            tabHost.listJson().let { arr ->
+                for (i in 0 until arr.length()) {
+                    val t = arr.getJSONObject(i)
+                    val id = t.optInt("id")
+                    val active = t.optBoolean("active")
+                    val label = t.optString("title").ifBlank { "Tab $id" }.take(18)
+                    Text(
+                        label,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (active) Palette.Accent.copy(alpha = 0.2f) else Palette.Field)
+                            .clickable {
+                                tabHost.switch(id)
+                                activeTabId = id
+                                webView = tabHost.activeTab().webView
+                                currentUrl = tabHost.activeTab().url
+                            }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (active) Palette.Accent else Palette.TextDim,
+                        maxLines = 1,
+                    )
+                }
+            }
+            Text(
+                "+",
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { go("about:blank", newTab = true) }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                color = Palette.TextDim,
+            )
+        }
+        if (captchaBanner) {
+            Row(
+                Modifier.fillMaxWidth().background(Palette.Pink.copy(alpha = 0.15f)).padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    stringResource(R.string.preview_captcha_handoff),
+                    Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.Text,
+                )
+                Text(
+                    stringResource(R.string.preview_captcha_not),
+                    modifier = Modifier.clickable { BrowserBridge.controller?.let { scope.launch { } }; tabHost.activeTab().captchaDismissed = true; captchaBanner = false; BrowserBridge.captchaPending = false },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Palette.TextDim,
+                )
+            }
+        }
 
         // ---- Page
         // Clipped: the WebView is a native view and must never draw over the toolbar.
@@ -503,12 +659,14 @@ fun PreviewPane(
                     .fillMaxHeight()
                     .clipToBounds(),
             ) {
+                androidx.compose.runtime.key(activeTabId) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     // Tear the WebView down when it leaves the screen. Without this every pane that was
                     // ever shown (the bubble's, a restored one) kept its page, scripts and renderer
                     // memory alive, and closing a window had to clean up all at once.
                     onRelease = { view ->
+                        tabHost.onWebViewReleased(view)
                         view.stopLoading()
                         view.destroy()
                     },
@@ -523,18 +681,20 @@ fun PreviewPane(
                             settings.mediaPlaybackRequiresUserGesture = false
                             settings.builtInZoomControls = true
                             settings.displayZoomControls = false
-                            settings.setSupportMultipleWindows(false)
+                            settings.setSupportMultipleWindows(true)
+                            settings.javaScriptCanOpenWindowsAutomatically = true
                             settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                             // Pages reach files only through the project server, never file://.
                             settings.allowFileAccess = false
                             settings.allowContentAccess = false
                             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                             applyViewport(this)
+                            tabHost.attachWebView(activeTabId, this)
                             webViewClient = object : WebViewClient() {
                                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
                                     val url = request.url
                                     synchronized(network) {
-                                        network.add(NetEntry(request.method, url.toString(), request.isForMainFrame))
+                                        network.add(NetEntry(request.method, url.toString(), request.isForMainFrame, BrowserBridge.networkGeneration))
                                         if (network.size > 400) network.removeAt(0)
                                     }
                                     if (url.host != Preview.FILES_HOST) return null
@@ -600,6 +760,19 @@ fun PreviewPane(
 
                                 override fun onReceivedTitle(view: WebView, t: String?) {
                                     title = t.orEmpty()
+                                    tabHost.activeTab().title = t.orEmpty()
+                                }
+
+                                override fun onCreateWindow(
+                                    view: WebView,
+                                    isDialog: Boolean,
+                                    isUserGesture: Boolean,
+                                    resultMsg: android.os.Message,
+                                ): Boolean {
+                                    val href = view.hitTestResult.extra ?: return false
+                                    val url = Preview.normalize(href, state.projectDir)
+                                    pendingPopupUrl = url
+                                    return false
                                 }
 
                                 override fun onConsoleMessage(message: ConsoleMessage): Boolean {
@@ -656,10 +829,12 @@ fun PreviewPane(
                             }
                             setDownloadListener { url, _, _, _, _ -> openOutside(url) }
                             webView = this
+                            tabHost.activeTab().url?.let { u -> if (u != "about:blank") loadUrl(u) }
                         }
                     },
                 )
-                AgentPointer(cursor.value, ripple.value, agent.label, visible = agent.active)
+                }
+                AgentPointer(cursor.value, ripple.value, agent.label, visible = agentCommandBusy)
             }
 
             if (showStart) {
@@ -675,7 +850,12 @@ fun PreviewPane(
                 )
             }
 
-            AgentFrame(active = agent.active, paused = agent.paused, label = agent.label)
+            AgentFrame(
+                active = agent.active,
+                paused = agent.paused,
+                label = agent.label,
+                recent = BrowserBridge.actionLog().takeLast(3).joinToString(" → ") { it.label },
+            )
 
             // ---- Console, over the bottom of the page
             androidx.compose.animation.AnimatedVisibility(
@@ -1119,7 +1299,12 @@ fun PreviewButton(projectDir: String?) {
 private fun AgentPointer(at: androidx.compose.ui.geometry.Offset, ripple: Float, label: String, visible: Boolean) {
     val alpha by animateFloatAsState(if (visible && at != androidx.compose.ui.geometry.Offset.Unspecified) 1f else 0f, Motion.slow(), label = "pointer")
     if (alpha == 0f || at == androidx.compose.ui.geometry.Offset.Unspecified) return
-    Box(Modifier.fillMaxSize().graphicsLayer { this.alpha = alpha }) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .pointerInteropFilter { false }
+            .graphicsLayer { this.alpha = alpha },
+    ) {
         androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
             val u = density
             if (ripple < 1f) {
@@ -1165,7 +1350,7 @@ private fun AgentPointer(at: androidx.compose.ui.geometry.Offset, ripple: Float,
 
 /** While an agent drives: a glowing orange frame and a bar saying so, with Stop. */
 @Composable
-private fun AgentFrame(active: Boolean, paused: Boolean, label: String) {
+private fun AgentFrame(active: Boolean, paused: Boolean, label: String, recent: String = "") {
     val shown by animateFloatAsState(if (active) 1f else 0f, Motion.slow(), label = "frameShown")
     if (shown > 0f) {
         // Created only while shown: an infinite animation ticks every frame (144 a second on some
@@ -1216,7 +1401,14 @@ private fun AgentFrame(active: Boolean, paused: Boolean, label: String) {
                 Spacer(Modifier.width(10.dp))
             }
             Text(
-                if (paused) stringResource(R.string.agent_browser_paused) else stringResource(R.string.agent_browser_working) + if (label.isNotBlank()) " · $label" else "",
+                buildString {
+                    if (paused) append(stringResource(R.string.agent_browser_paused))
+                    else {
+                        append(stringResource(R.string.agent_browser_working))
+                        if (label.isNotBlank()) append(" · ").append(label)
+                        if (recent.isNotBlank()) append(" · ").append(recent)
+                    }
+                },
                 style = MaterialTheme.typography.labelLarge.copy(fontSize = 13.sp),
                 color = if (paused) Palette.Text else Palette.OnAccent,
                 maxLines = 1,

@@ -74,6 +74,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateSetOf
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -107,6 +108,7 @@ import com.termfold.app.acp.AcpDrafts
 import com.termfold.app.acp.AcpBlock
 import com.termfold.app.acp.AcpImageBitmaps
 import com.termfold.app.acp.AcpClient
+import com.termfold.app.acp.CursorAcpPrefs
 import com.termfold.app.acp.AcpCommand
 import com.termfold.app.acp.AcpSetting
 import com.termfold.app.acp.AcpItem
@@ -371,7 +373,11 @@ fun AgentSessionScreen(
                 // Once there is a conversation it stays on screen; a restart or failure shows as a
                 // slim banner above it rather than replacing what the user was reading.
                 hasConversation -> Column(Modifier.widthIn(max = ContentMaxWidth).fillMaxSize()) {
-                    PhaseBanner(state, onRetry = { client.start() })
+                    PhaseBanner(
+                        state,
+                        onRetry = { client.start() },
+                        onReinstallCursor = if (isCursor) ({ client.reinstallCursor() }) else null,
+                    )
                     Timeline(
                         state = state,
                         workspaceDir = guestDir,
@@ -407,10 +413,15 @@ fun AgentSessionScreen(
                     Spacer(Modifier.height(8.dp))
                     PanelBody(
                         stringResource(
-                            if (isCursor) R.string.acp_auth_body_cursor else R.string.acp_auth_body,
+                            when {
+                                isCursor && CursorAcpPrefs.hasApiKey(context) ->
+                                    R.string.acp_auth_body_cursor_api_key
+                                isCursor -> R.string.acp_auth_body_cursor
+                                else -> R.string.acp_auth_body
+                            },
                         ),
                     )
-                    if (state.authMethods.isNotEmpty()) {
+                    if (state.authMethods.isNotEmpty() && !(isCursor && CursorAcpPrefs.hasApiKey(context))) {
                         Spacer(Modifier.height(10.dp))
                         PanelBody(stringResource(R.string.acp_auth_methods, state.authMethods.joinToString(", ")))
                     }
@@ -437,6 +448,17 @@ fun AgentSessionScreen(
                     }
                     Spacer(Modifier.height(16.dp))
                     PillButton(stringResource(R.string.action_retry), TermFoldIcons.Refresh) { client.start() }
+                    if (isCursor) {
+                        Spacer(Modifier.height(10.dp))
+                        val cursorBusy = state.phase == AcpPhase.INSTALLING || state.phase == AcpPhase.CONNECTING
+                        PillButton(
+                            stringResource(R.string.acp_reinstall_cursor),
+                            TermFoldIcons.Refresh,
+                            enabled = !cursorBusy,
+                        ) {
+                            client.reinstallCursor()
+                        }
+                    }
                 }
 
                 else -> CenterPanel {
@@ -925,7 +947,11 @@ private fun SessionHeaderOverflowMenu(
 
 /** Shown above an existing conversation while the agent restarts or after it fails. */
 @Composable
-private fun PhaseBanner(state: AcpUiState, onRetry: () -> Unit) {
+private fun PhaseBanner(
+    state: AcpUiState,
+    onRetry: () -> Unit,
+    onReinstallCursor: (() -> Unit)? = null,
+) {
     val text: String
     val loading: Boolean
     when (state.phase) {
@@ -970,6 +996,18 @@ private fun PhaseBanner(state: AcpUiState, onRetry: () -> Unit) {
             modifier = Modifier.weight(1f),
         )
         if (!loading) {
+            if (onReinstallCursor != null && state.phase == AcpPhase.ERROR) {
+                Text(
+                    text = stringResource(R.string.acp_reinstall_cursor),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Palette.TextDim,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(onClick = onReinstallCursor)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                )
+                Spacer(Modifier.width(4.dp))
+            }
             Text(
                 text = stringResource(R.string.action_retry),
                 style = MaterialTheme.typography.labelLarge,
@@ -1011,18 +1049,25 @@ private fun PanelBody(text: String) {
 }
 
 @Composable
-private fun PillButton(label: String, icon: ImageVector, onClick: () -> Unit) {
+private fun PillButton(
+    label: String,
+    icon: ImageVector,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    val contentColor = if (enabled) Palette.Text else Palette.TextDim
+    val accent = if (enabled) Palette.Accent else Palette.TextDim
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(12.dp))
             .border(1.dp, Palette.Border, RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, contentDescription = null, tint = Palette.Accent, modifier = Modifier.size(16.dp))
+        Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(16.dp))
         Spacer(Modifier.width(8.dp))
-        Text(label, style = MaterialTheme.typography.labelLarge, color = Palette.Text)
+        Text(label, style = MaterialTheme.typography.labelLarge, color = contentColor)
     }
 }
 
@@ -1107,11 +1152,12 @@ private fun Timeline(
     var previewImage by remember { mutableStateOf<AcpBlock.Image?>(null) }
 
     var collapsedTools by remember { mutableStateOf(mapOf<Long, Boolean>()) }
+    val userToggledToolIds = remember { mutableStateSetOf<Long>() }
     var expandedToolFiles by remember { mutableStateOf(mapOf<String, Boolean>()) }
     val toolContextFolds = remember { mutableStateMapOf<String, Set<String>>() }
-    LaunchedEffect(items) {
+    LaunchedEffect(items, showLiveToolDiffs) {
         val next = collapsedTools.toMutableMap()
-        syncCompletedToolCollapse(items, next)
+        syncCompletedToolCollapse(items, next, showLiveToolDiffs, userToggledToolIds)
         if (next != collapsedTools) collapsedTools = next
     }
     // Snapshot maps here so collapse/expand toggles always rebuild lazy rows.
@@ -1250,6 +1296,7 @@ private fun Timeline(
                             workspaceDir = workspaceDir,
                             collapsed = collapsed,
                             onToggle = {
+                                userToggledToolIds.add(item.id)
                                 collapsedTools = collapsedTools.toMutableMap().apply {
                                     this[item.id] = !collapsed
                                 }
@@ -2503,51 +2550,54 @@ private fun Composer(
                     tint = Palette.TextDim,
                     size = 38,
                 )
-                if (branchName != null && onBranchClick != null) {
-                    BranchChip(
-                        label = branchName.ifBlank { stringResource(R.string.workspace_branch_unknown) },
-                        onClick = onBranchClick,
-                        modifier = Modifier.weight(1f, fill = false),
-                        truncate = true,
-                        uncommittedChanges = branchUncommitted,
-                    )
-                } else {
-                    Spacer(Modifier.weight(1f))
-                }
-                if (settings.isNotEmpty()) {
-                    SettingsButton(agentId, settings, onChangeSetting)
-                    Spacer(Modifier.width(4.dp))
-                }
-                // While the agent works: Stop, and beside it Send, which queues the message.
-                if (agentBusy) {
-                    Box(
-                        modifier = Modifier
-                            .padding(start = 4.dp)
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(Palette.CardPressed)
-                            .clickable(onClick = onCancel),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(TermFoldIcons.Stop, stringResource(R.string.acp_stop), tint = Palette.Text, modifier = Modifier.size(16.dp))
-                    }
-                }
-                if (!agentBusy || canSend) {
-                    Box(
-                        modifier = Modifier
-                            .padding(start = 6.dp)
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(if (canSend) Palette.Accent else Palette.CardPressed)
-                            .clickable(enabled = canSend) { send() },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = TermFoldIcons.Send,
-                            contentDescription = stringResource(if (agentBusy) R.string.acp_queue else R.string.cd_send),
-                            tint = if (canSend) Palette.OnAccent else Palette.TextFaint,
-                            modifier = Modifier.size(18.dp),
+                Spacer(Modifier.weight(1f))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    if (branchName != null && onBranchClick != null) {
+                        BranchChip(
+                            label = branchName.ifBlank { stringResource(R.string.workspace_branch_unknown) },
+                            onClick = onBranchClick,
+                            truncate = true,
+                            uncommittedChanges = branchUncommitted,
                         )
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    if (settings.isNotEmpty()) {
+                        SettingsButton(agentId, settings, onChangeSetting)
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    // While the agent works: Stop, and beside it Send, which queues the message.
+                    if (agentBusy) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(Palette.CardPressed)
+                                .clickable(onClick = onCancel),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(TermFoldIcons.Stop, stringResource(R.string.acp_stop), tint = Palette.Text, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                    if (!agentBusy || canSend) {
+                        Box(
+                            modifier = Modifier
+                                .padding(start = if (agentBusy) 6.dp else 0.dp)
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(if (canSend) Palette.Accent else Palette.CardPressed)
+                                .clickable(enabled = canSend) { send() },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                imageVector = TermFoldIcons.Send,
+                                contentDescription = stringResource(if (agentBusy) R.string.acp_queue else R.string.cd_send),
+                                tint = if (canSend) Palette.OnAccent else Palette.TextFaint,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
                     }
                 }
             }

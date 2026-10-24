@@ -105,16 +105,27 @@ fun buildAgentChatTimelineEntries(
     return out
 }
 
-/** Default collapse for completed tool calls; in-progress tools stay expanded. */
+/** Default collapsed state for a tool row; in-progress tools stay expanded. */
+fun defaultToolCallCollapsed(tool: AcpItem.ToolCall, showLiveToolDiffs: Boolean): Boolean {
+    if (tool.status == "in_progress") return false
+    if (showLiveToolDiffs && tool.fileDiffs.isNotEmpty()) return false
+    return true
+}
+
 fun syncCompletedToolCollapse(
     items: List<AcpItem>,
     collapsedTools: MutableMap<Long, Boolean>,
+    showLiveToolDiffs: Boolean,
+    userToggledToolIds: Set<Long> = emptySet(),
 ) {
-    // Only set defaults for newly seen tools; never override user expand/collapse.
     for (item in items) {
         if (item !is AcpItem.ToolCall) continue
+        if (item.id in userToggledToolIds) continue
+        val defaultCollapsed = defaultToolCallCollapsed(item, showLiveToolDiffs)
         if (!collapsedTools.containsKey(item.id)) {
-            collapsedTools[item.id] = item.status != "in_progress"
+            collapsedTools[item.id] = defaultCollapsed
+        } else if (collapsedTools[item.id] != defaultCollapsed) {
+            collapsedTools[item.id] = defaultCollapsed
         }
     }
 }

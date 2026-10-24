@@ -5,7 +5,33 @@ import android.content.Context
 /** User preferences for the Cursor ACP agent in TermFold. */
 object CursorAcpPrefs {
     private const val PREFS = "cursor_acp"
+    private const val SECRETS_PREFS = "cursor_acp_secrets"
     private const val KEY_ALLOW_EVERYTHING = "allow_everything"
+    private const val KEY_API_KEY = "api_key"
+
+    /** User API key from Cursor Dashboard → API Keys; passed as `CURSOR_API_KEY` to the agent CLI. */
+    fun apiKey(context: Context): String? =
+        context.getSharedPreferences(SECRETS_PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_API_KEY, null)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+
+    fun setApiKey(context: Context, value: String) {
+        val trimmed = value.trim()
+        context.getSharedPreferences(SECRETS_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_API_KEY, trimmed.ifEmpty { null })
+            .apply()
+    }
+
+    fun hasApiKey(context: Context): Boolean = apiKey(context) != null
+
+    fun agentEnvironment(context: Context): Map<String, String> = apiKeyEnvironment(apiKey(context))
+
+    internal fun apiKeyEnvironment(apiKey: String?): Map<String, String> {
+        val key = apiKey?.trim()?.takeIf { it.isNotEmpty() } ?: return emptyMap()
+        return mapOf("CURSOR_API_KEY" to key)
+    }
 
     fun allowEverything(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

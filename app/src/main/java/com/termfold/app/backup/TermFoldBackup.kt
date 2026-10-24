@@ -93,6 +93,9 @@ object TermFoldBackup {
 
     private val ROOTFS_SKIP_FILES = setOf("etc/hosts", "etc/resolv.conf")
 
+    /** Shared-preferences files that must not leave the device in a portable backup. */
+    private val PREFS_SKIP_FILES = setOf("cursor_acp_secrets.xml")
+
 
 
     /** Top-level names under `files/` that are never backed up (scratch or swap trees). */
@@ -204,6 +207,7 @@ object TermFoldBackup {
                     onProgress(Progress("Archiving $relative", base))
 
                     val skipRootfs = relative == "files/linux/rootfs"
+                    val skipPrefs = relative == "shared_prefs"
 
                     walkTree(
 
@@ -223,7 +227,11 @@ object TermFoldBackup {
 
                         },
 
-                        skipRelative = if (skipRootfs) ::shouldSkipRootfsEntry else { _ -> false },
+                        skipRelative = when {
+                            skipRootfs -> ::shouldSkipRootfsEntry
+                            skipPrefs -> ::shouldSkipPrefsEntry
+                            else -> { _ -> false }
+                        },
 
                     )
 
@@ -530,6 +538,8 @@ object TermFoldBackup {
         return top in ROOTFS_SKIP_TOP
 
     }
+
+    private fun shouldSkipPrefsEntry(relative: String): Boolean = relative in PREFS_SKIP_FILES
 
 
 

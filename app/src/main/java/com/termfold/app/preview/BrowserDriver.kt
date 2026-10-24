@@ -24,8 +24,10 @@ import kotlin.coroutines.resume
 
 /** What the driver needs from the preview pane around it. */
 interface DriverUi {
+    fun activeWebView(): WebView
     fun projectDir(): String?
     fun navigate(url: String)
+    fun navigateNewTab(url: String): Int?
     fun progress(): Int
     fun loadError(): String?
     /** The HTTP error the page itself was served with (404, 500...), if any. */
@@ -38,9 +40,23 @@ interface DriverUi {
     fun consoleSize(): Int
     fun consoleText(errorsOnly: Boolean, since: Int): String
     fun consoleErrorsSince(since: Int): Int
-    fun networkText(failedOnly: Boolean): String
+    fun networkText(failedOnly: Boolean, sinceGeneration: Int = 0): String
+    fun networkInFlight(): Int
+    fun networkGeneration(): Int
+    fun failedRequestCount(): Int
+    fun visibleControlCount(): Int
+    fun setVisibleControls(count: Int)
     fun offerUpload(file: File)
     fun uploadTaken(): Boolean
+    fun captchaPending(): Boolean
+    fun updateCaptchaFromPage(detected: Boolean)
+    fun dismissCaptchaFalsePositive()
+    fun clearSiteData()
+    fun tabList(): JSONArray
+    fun tabSwitch(id: Int): Boolean
+    fun tabNew(url: String?): Int?
+    fun tabClose(id: Int): Boolean
+    fun ensureResumed()
 }
 
 /**
@@ -50,19 +66,27 @@ interface DriverUi {
  */
 class BrowserDriver(
     private val context: Context,
-    private val web: WebView,
     private val ui: DriverUi,
 ) : BrowserBridge.Controller {
 
+    private val web: WebView get() = ui.activeWebView()
+
     override suspend fun run(action: String, args: JSONObject): JSONObject = withContext(Dispatchers.Main) {
-        // A minimized browser is paused to save power; the agent needs it running.
+        ui.ensureResumed()
         web.onResume()
+        resolveTab(args)?.let { return@withContext it }
         when (action) {
             "open" -> open(args)
             "back" -> history { if (web.canGoBack()) web.goBack() else return@history "There is no earlier page." ; null }
             "forward" -> history { if (web.canGoForward()) web.goForward() else return@history "There is no later page."; null }
             "reload" -> history { web.reload(); null }
             "status" -> ok(pageLine())
+            "health" -> health()
+            "tab_list" -> ok(tabListText())
+            "tab_new" -> tabNew(args)
+            "tab_switch" -> tabSwitch(args)
+            "tab_close" -> tabClose(args)
+            "dismiss_captcha" -> dismissCaptcha()
             "snapshot" -> snapshot(args)
             "text" -> text(args)
             "outline" -> outline()
@@ -77,7 +101,7 @@ class BrowserDriver(
             "wait" -> waitFor(args)
             "screenshot" -> screenshot(args)
             "console" -> ok(ui.consoleText(args.optBoolean("errors_only"), 0))
-            "network" -> ok(ui.networkText(args.optBoolean("failed_only")))
+            "network" -> ok(ui.networkText(args.optBoolean("failed_only"), args.optInt("since_generation", 0)))
             "eval" -> eval(args)
             "viewport" -> viewport(args)
             "upload" -> upload(args)
@@ -87,10 +111,86 @@ class BrowserDriver(
 
     // ---- Navigation --------------------------------------------------------------------------
 
+    private fun resolveTab(args: JSONObject): JSONObject? {
+        if (!args.has("tab_id")) return null
+        val id = args.optInt("tab_id")
+        return if (ui.tabSwitch(id)) null else err("No tab with id $id.")
+    }
+
+    private suspend fun health(): JSONObject {
+        refreshCaptcha()
+        val errors = ui.consoleErrorsSince(0)
+        val failed = ui.failedRequestCount()
+        val controls = ui.visibleControlCount()
+        val json = JSONObject()
+            .put("url", web.url.orEmpty())
+            .put("title", runCatching { JSONTokener(js("document.title")).nextValue() as? String }.getOrNull().orEmpty())
+            .put("viewport", ui.viewportName())
+            .put("console_errors", errors.coerceAtLeast(0))
+            .put("failed_requests", failed.coerceAtLeast(0))
+            .put("visible_controls", controls)
+            .put("captcha_pending", ui.captchaPending())
+            .put("network_generation", ui.networkGeneration())
+        return ok(json.toString(2))
+    }
+
+    private fun tabListText(): String {
+        val tabs = ui.tabList()
+        val sb = StringBuilder("Tabs:\n")
+        for (i in 0 until tabs.length()) {
+            val t = tabs.getJSONObject(i)
+            sb.append(if (t.optBoolean("active")) "* " else "  ")
+                .append('[').append(t.optInt("id")).append("] ")
+                .append(t.optString("title").ifBlank { "(untitled)" })
+                .append(" — ").append(Preview.display(t.optString("url"))).append('\n')
+        }
+        return sb.toString().trimEnd()
+    }
+
+    private suspend fun tabNew(args: JSONObject): JSONObject {
+        val raw = args.optString("url").trim()
+        val url = if (raw.isEmpty()) null else Preview.normalize(raw, ui.projectDir()).also {
+            BrowserNavPolicy.checkAgentOpen(it)?.let { blocked -> return err(blocked) }
+        }
+        val id = ui.tabNew(url) ?: return err("Could not open a new tab (limit reached).")
+        if (url != null) awaitLoad()
+        return ok("Opened tab $id." + if (url != null) " " + pageLine() else "")
+    }
+
+    private suspend fun tabSwitch(args: JSONObject): JSONObject {
+        val id = args.optInt("tab_id", args.optInt("id"))
+        if (!ui.tabSwitch(id)) return err("No tab with id $id.")
+        return ok("Switched to tab $id. " + pageLine())
+    }
+
+    private fun tabClose(args: JSONObject): JSONObject {
+        val id = args.optInt("tab_id", args.optInt("id", -1))
+        if (id < 0) return err("Give tab_id.")
+        if (!ui.tabClose(id)) return err("Could not close tab $id.")
+        return ok("Closed tab $id.")
+    }
+
+    private fun dismissCaptcha(): JSONObject {
+        ui.dismissCaptchaFalsePositive()
+        return ok("Captcha handoff dismissed. Continue when the page is ready.")
+    }
+
+    private suspend fun refreshCaptcha() {
+        val raw = js("(function(){${BrowserPageScript.HELPER};return window.__tf.captchaDetect();})()")
+        ui.updateCaptchaFromPage(raw == "true")
+    }
+
     private suspend fun open(args: JSONObject): JSONObject {
         val raw = args.optString("url").trim()
         if (raw.isEmpty()) return err("Give a URL, a port (5173) or a file path.")
         val url = Preview.normalize(raw, ui.projectDir())
+        BrowserNavPolicy.checkAgentOpen(url)?.let { return err(it) }
+        if (args.optBoolean("new_tab", false)) {
+            val id = ui.navigateNewTab(url) ?: return err("Could not open a new tab (tab limit reached).")
+            awaitLoad()
+            ui.loadError()?.let { return err("Could not open ${Preview.display(url)}: $it.") }
+            return ok("Opened tab $id. " + pageLine())
+        }
         ui.navigate(url)
         awaitLoad()
         ui.loadError()?.let { return err("Could not open ${Preview.display(url)}: $it. If it is a dev server, is it running?") }
@@ -131,22 +231,33 @@ class BrowserDriver(
             options.put("scope", if (scope.all(Char::isDigit)) JSONObject().put("ref", scope.toInt()) else JSONObject().put("selector", scope))
         }
         val data = call("snapshot($options)") ?: return err("The page could not be read.")
-        if (data.has("error")) return err("Nothing on the page matches scope \"$scope\".")
+        if (data.has("error")) {
+            val code = data.optString("error")
+            return err(
+                when (code) {
+                    "cross_origin_frame" -> "That iframe is cross-origin and cannot be automated in-app."
+                    "scope not found" -> "Nothing on the page matches scope \"$scope\"."
+                    else -> code
+                },
+            )
+        }
         val items = data.optJSONArray("items") ?: JSONArray()
         val find = args.optString("find").trim().lowercase()
         val all = args.optBoolean("all", false)
         val links = args.optBoolean("links", false)
         val changed = args.optBoolean("changed", false)
 
-        fun line(o: JSONObject, withHref: Boolean, marker: Boolean): String {
+        fun line(o: JSONObject, withHref: Boolean, marker: Boolean, withHint: Boolean = false): String {
             val sb = StringBuilder()
             sb.append('[').append(o.optInt("ref")).append("] ").append(o.optString("role"))
             val name = o.optString("name").take(80)
             if (name.isNotEmpty()) sb.append(" \"").append(name).append('"')
+            if (o.has("expanded")) sb.append(if (o.optBoolean("expanded")) " (open)" else " (closed)")
             if (o.has("value")) sb.append(" = \"").append(o.optString("value").take(60)).append('"')
             if (o.has("checked")) sb.append(if (o.optBoolean("checked")) " (checked)" else " (unchecked)")
             if (o.optBoolean("disabled")) sb.append(" (disabled)")
             if (withHref && o.has("href")) sb.append(" → ").append(o.optString("href").take(120))
+            if (withHint && o.has("hint")) sb.append(" ⟨").append(o.optString("hint")).append('⟩')
             if (marker && !o.optBoolean("visible")) sb.append(" ↓")
             return sb.toString()
         }
@@ -160,7 +271,10 @@ class BrowserDriver(
 
         // The complete list goes to a file; the answer below is the short version of it.
         val full = StringBuilder(header).append("Elements:\n")
-        objects.forEach { full.append(line(it, withHref = true, marker = true)).append('\n') }
+        objects.forEach { full.append(line(it, withHref = true, marker = true, withHint = true)).append('\n') }
+        if (data.optBoolean("shadowCapped")) full.append("(Shadow DOM depth capped.)\n")
+        if (data.optBoolean("captcha")) full.append("(Possible CAPTCHA — ask the user to solve it on screen.)\n")
+        ui.updateCaptchaFromPage(data.optBoolean("captcha"))
         val path = runCatching {
             val dir = File(ShellPaths.rootfsDir(context), SNAPSHOT_DIR.trimStart('/')).apply { mkdirs() }
             File(dir, "snapshot.txt").writeText(full.toString())
@@ -168,6 +282,7 @@ class BrowserDriver(
         }.getOrNull()
 
         val visible = objects.filter { it.optBoolean("visible") }
+        ui.setVisibleControls(visible.size)
         val visibleLines = visible.map { line(it, withHref = false, marker = false) }
         val previous = lastSnapshot?.takeIf { it.first == data.optString("url") }?.second
         lastSnapshot = data.optString("url") to visibleLines
@@ -378,15 +493,42 @@ class BrowserDriver(
     private suspend fun waitFor(args: JSONObject): JSONObject {
         val timeout = (args.optDouble("timeout", 10.0) * 1000).toLong().coerceIn(500, 60_000)
         val until = SystemClock.uptimeMillis() + timeout
+        val quietMs = (args.optDouble("quiet_ms", 500.0)).toLong().coerceIn(200, 5000)
         val what = when {
+            args.optBoolean("captcha_cleared", false) -> "captcha to clear"
+            args.has("url") -> "URL containing \"${args.optString("url")}\""
+            args.optBoolean("network_idle", false) -> "network idle"
             args.has("text") -> "the text \"${args.optString("text")}\""
             args.has("selector") -> "\"${args.optString("selector")}\""
             else -> "the page to load"
         }
         BrowserBridge.setLabel("Waiting for " + what.take(30))
+        var idleSince = 0L
         while (SystemClock.uptimeMillis() < until) {
-            val has = call("has(${spec(args)})")
-            if (has?.optBoolean("found") == true && ui.progress() >= 100) return ok("Found $what. " + pageLine())
+            when {
+                args.optBoolean("captcha_cleared", false) -> {
+                    refreshCaptcha()
+                    if (!ui.captchaPending()) return ok("Captcha cleared. " + pageLine())
+                }
+                args.has("url") -> {
+                    val loc = web.url.orEmpty()
+                    if (loc.contains(args.optString("url")) && ui.progress() >= 100) return ok("URL matched. " + pageLine())
+                }
+                args.optBoolean("network_idle", false) -> {
+                    if (ui.networkInFlight() == 0) {
+                        if (idleSince == 0L) idleSince = SystemClock.uptimeMillis()
+                        if (SystemClock.uptimeMillis() - idleSince >= quietMs && ui.progress() >= 100) {
+                            return ok("Network idle. " + pageLine())
+                        }
+                    } else {
+                        idleSince = 0L
+                    }
+                }
+                else -> {
+                    val has = call("has(${spec(args)})")
+                    if (has?.optBoolean("found") == true && ui.progress() >= 100) return ok("Found $what. " + pageLine())
+                }
+            }
             delay(300)
         }
         return err("Timed out after ${timeout / 1000}s waiting for $what. " + pageLine())
@@ -425,6 +567,21 @@ class BrowserDriver(
         BrowserBridge.setLabel("Taking a screenshot")
         delay(80)
         if (web.width == 0 || web.height == 0) return err("The browser is not on screen.")
+        val baseline = args.optString("baseline").trim()
+        if (baseline.isNotEmpty()) {
+            val rootfs = ShellPaths.rootfsDir(context)
+            val guest = if (baseline.startsWith("/")) baseline else workDir(args) + "/" + baseline
+            val file = File(rootfs, guest.trimStart('/'))
+            if (!file.isFile) return err("Baseline not found: $guest")
+            val baseBmp = android.graphics.BitmapFactory.decodeFile(file.absolutePath)
+                ?: return err("Could not read baseline image.")
+            var shot = Bitmap.createBitmap(web.width, web.height, Bitmap.Config.ARGB_8888)
+            web.draw(Canvas(shot))
+            val match = pictureHash(baseBmp) == pictureHash(shot)
+            baseBmp.recycle()
+            shot.recycle()
+            return ok(if (match) "Screenshot matches baseline." else "Screenshot differs from baseline (not an error).")
+        }
         // A capture taken while the page is still drawing (right after a scroll, say) can come
         // out as one flat colour; give it a moment and take it again.
         // A picture of one element: bring it into view and remember where it is.
@@ -622,6 +779,17 @@ class BrowserDriver(
         if (args.has("ref")) s.put("ref", args.optInt("ref"))
         if (args.has("selector")) s.put("selector", args.optString("selector"))
         if (args.has("text") && !extra.has("text")) s.put("text", args.optString("text"))
+        if (args.has("frame")) {
+            val f = args.opt("frame")
+            val frame = JSONObject()
+            when (f) {
+                is Number -> frame.put("index", f.toInt())
+                is String -> if (f.all { it.isDigit() }) frame.put("index", f.toInt()) else frame.put("url", f)
+            }
+            if (frame.length() > 0) s.put("frame", frame)
+        }
+        if (args.optBoolean("captcha_cleared", false)) extra.put("captcha_cleared", true)
+        if (args.has("url") && extra.length() == 0) extra.put("url", args.optString("url"))
         extra.keys().forEach { s.put(it, extra.get(it)) }
         return s.toString()
     }
@@ -683,7 +851,7 @@ class BrowserDriver(
 
     /** Calls a helper in the page (installing it first) and parses the JSON it returns. */
     private suspend fun call(expression: String): JSONObject? {
-        val raw = js("(function(){$HELPER;try{return JSON.stringify(window.__tf.$expression);}catch(e){return JSON.stringify({error:String(e)});}})()")
+        val raw = js("(function(){${BrowserPageScript.HELPER};try{return JSON.stringify(window.__tf.$expression);}catch(e){return JSON.stringify({error:String(e)});}})()")
         val text = runCatching { JSONTokener(raw).nextValue() as? String }.getOrNull() ?: return null
         return runCatching { JSONObject(text) }.getOrNull()
     }
@@ -726,85 +894,5 @@ class BrowserDriver(
         const val SNAPSHOT_DIR = "/tmp/termfold-browser"
         const val SNAPSHOT_LIMIT = 60
         const val KEEP_TEMP_SHOTS = 100
-
-        /** Installed once per page; finds, describes and numbers what a person could interact with. */
-        val HELPER = """
-if(!window.__tf)window.__tf=(function(){
-var next=1;
-function visible(el){var r=el.getBoundingClientRect();if(r.width<1||r.height<1)return false;var s=getComputedStyle(el);return s.visibility!=='hidden'&&s.display!=='none'&&parseFloat(s.opacity||'1')>0.02;}
-function clean(t){return (t||'').replace(/\s+/g,' ').trim();}
-function name(el){var n=el.getAttribute('aria-label')||'';
-if(!n&&el.labels&&el.labels.length)n=el.labels[0].innerText;
-if(!n&&el.getAttribute('aria-labelledby')){var l=document.getElementById(el.getAttribute('aria-labelledby'));if(l)n=l.innerText;}
-if(!n)n=el.getAttribute('placeholder')||el.getAttribute('alt')||el.getAttribute('title')||'';
-var t=el.tagName;
-if(!n&&t!=='INPUT'&&t!=='TEXTAREA'&&t!=='SELECT')n=el.innerText||el.textContent;
-if(!n&&t==='INPUT'&&/^(submit|button|reset)$/i.test(el.type))n=el.value;
-if(!n&&el.querySelector){var im=el.querySelector('img[alt],svg[aria-label],[aria-label]');if(im)n=im.getAttribute('alt')||im.getAttribute('aria-label');}
-if(!n&&el.name)n=el.name;
-n=clean(n);return n.length>80?n.slice(0,77)+'...':n;}
-function role(el){var r=el.getAttribute('role');if(r)return r;var t=el.tagName.toLowerCase();
-if(t==='a')return 'link';if(t==='button'||t==='summary')return 'button';if(t==='select')return 'select';if(t==='textarea')return 'textbox';
-if(t==='input'){var y=(el.type||'text').toLowerCase();if(y==='checkbox'||y==='radio')return y;if(/^(submit|button|reset|image)$/.test(y))return 'button';if(y==='range')return 'slider';if(y==='file')return 'file';return y==='text'?'textbox':'textbox:'+y;}
-if(el.isContentEditable)return 'textbox';return 'clickable';}
-var SEL='a[href],button,input:not([type=hidden]),textarea,select,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[role=switch],[role=option],[role=combobox],[role=textbox],[role=slider],[contenteditable=""],[contenteditable=true],[onclick],[tabindex]:not([tabindex="-1"])';
-function ref(el){if(!el.dataset.tfRef){while(document.querySelector('[data-tf-ref="'+next+'"]'))next++;el.dataset.tfRef=String(next++);}return +el.dataset.tfRef;}
-function describe(el){return {ref:ref(el),role:role(el),name:name(el)};}
-function snapshot(o){o=o||{};var root=document;if(o.scope){root=find(o.scope);if(!root)return {error:'scope not found'};}var out=[];var els=root.querySelectorAll(SEL);
-for(var i=0;i<els.length&&out.length<400;i++){var el=els[i];if(!visible(el)||el.closest('[aria-hidden=true]'))continue;
-var r=el.getBoundingClientRect();var it=describe(el);
-if(el.tagName==='SELECT'){var o=el.options[el.selectedIndex];it.value=o?clean(o.text):'';}
-else if(el.tagName==='TEXTAREA'||(el.tagName==='INPUT'&&it.role.indexOf('textbox')===0)){it.value=el.type==='password'?(el.value?'****':''):String(el.value).slice(0,80);}
-if(el.type==='checkbox'||el.type==='radio')it.checked=!!el.checked;
-if(el.getAttribute('aria-checked'))it.checked=el.getAttribute('aria-checked')==='true';
-if(el.disabled||el.getAttribute('aria-disabled')==='true')it.disabled=true;
-if(el.tagName==='A')it.href=el.getAttribute('href');
-it.visible=r.bottom>0&&r.top<innerHeight;out.push(it);}
-var heads=[];document.querySelectorAll('h1,h2,h3').forEach(function(h){if(heads.length<25&&visible(h))heads.push(h.tagName.toLowerCase()+': '+clean(h.innerText).slice(0,100));});
-var se=document.scrollingElement||document.documentElement;
-return {title:document.title,url:location.href,scrollY:Math.round(se.scrollTop),scrollHeight:se.scrollHeight,viewHeight:innerHeight,headings:heads,items:out};}
-function find(a){if(a.ref!=null){var e=document.querySelector('[data-tf-ref="'+a.ref+'"]');if(e)return e;}
-if(a.selector){try{var e2=document.querySelector(a.selector);if(e2)return e2;}catch(x){}}
-if(a.text){var q=String(a.text).toLowerCase(),els=document.querySelectorAll(SEL),best=null;
-for(var i=0;i<els.length;i++){if(!visible(els[i]))continue;var n=name(els[i]).toLowerCase();if(n===q)return els[i];if(!best&&n.indexOf(q)>=0)best=els[i];}
-if(best)return best;
-var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT),nd;
-while((nd=w.nextNode())){if(nd.nodeValue.toLowerCase().indexOf(q)>=0&&nd.parentElement&&visible(nd.parentElement))return nd.parentElement;}}
-return null;}
-function vv(){return window.visualViewport||{offsetLeft:0,offsetTop:0,width:innerWidth,height:innerHeight};}
-function point(a){var el=find(a);if(!el)return {error:'not found'};
-el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
-var r=el.getBoundingClientRect(),v=vv(),d=describe(el);
-d.x=r.left+r.width/2-v.offsetLeft;d.y=r.top+r.height/2-v.offsetTop;d.vw=v.width;d.vh=v.height;
-d.type=el.type||'';d.disabled=!!el.disabled||el.getAttribute('aria-disabled')==='true';return d;}
-function viewport(){var v=vv();return {vw:v.width,vh:v.height};}
-function fill(a){var el=find(a);if(!el)return {error:'not found'};
-el.focus();var f=el.tagName==='INPUT'||el.tagName==='TEXTAREA';
-if(f){try{el.select();}catch(x){}}else if(el.isContentEditable){var s=getSelection(),g=document.createRange();g.selectNodeContents(el);s.removeAllRanges();s.addRange(g);}
-var ok=false;try{ok=a.text===''?document.execCommand('delete'):document.execCommand('insertText',false,a.text);}catch(x){}
-if(!ok||(f&&el.value!==a.text)){if(f){var p=el.tagName==='INPUT'?HTMLInputElement.prototype:HTMLTextAreaElement.prototype;
-Object.getOwnPropertyDescriptor(p,'value').set.call(el,a.text);el.dispatchEvent(new Event('input',{bubbles:true}));}
-else if(el.isContentEditable){el.textContent=a.text;el.dispatchEvent(new Event('input',{bubbles:true}));}}
-el.dispatchEvent(new Event('change',{bubbles:true}));
-var d=describe(el);d.password=el.type==='password';d.value=d.password?'':String(f?el.value:clean(el.innerText)).slice(0,120);return d;}
-function select(a){var el=find(a);if(!el)return {error:'not found'};if(el.tagName!=='SELECT')return {error:'That element is not a dropdown (select). Click it and pick the option instead.'};
-var v=String(a.value).toLowerCase(),hit=null,i;
-for(i=0;i<el.options.length;i++){var o=el.options[i];if(o.value.toLowerCase()===v||clean(o.text).toLowerCase()===v){hit=o;break;}}
-if(!hit)for(i=0;i<el.options.length;i++){if(clean(el.options[i].text).toLowerCase().indexOf(v)>=0){hit=el.options[i];break;}}
-if(!hit)return {error:'No option matches "'+a.value+'".',options:[].map.call(el.options,function(o){return clean(o.text);}).slice(0,50)};
-el.value=hit.value;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));
-var d=describe(el);d.value=clean(hit.text);return d;}
-function state(a){var el=find(a);if(!el)return {error:'not found'};var d=describe(el);d.checked=(el.type==='checkbox'||el.type==='radio')?!!el.checked:el.getAttribute('aria-checked')==='true';return d;}
-function hover(a){var el=find(a);if(!el)return {error:'not found'};['pointerover','pointerenter','mouseover','mouseenter','mousemove'].forEach(function(t){el.dispatchEvent(new MouseEvent(t,{bubbles:t.indexOf('enter')<0}));});return describe(el);}
-function pos(){var se=document.scrollingElement||document.documentElement;return {scrollY:Math.round(se.scrollTop),scrollHeight:se.scrollHeight,viewHeight:innerHeight};}
-function text(o){o=o||{};var root=o.selector?document.querySelector(o.selector):document.body;if(!root)return {error:'not found'};var t=root.innerText||'';var max=o.max||8000;return {title:document.title,url:location.href,text:t.length>max?t.slice(0,max)+'\n...(cut at '+max+' of '+t.length+' characters; pass a selector or a larger max)':t};}
-function outline(){var heads=[];document.querySelectorAll('h1,h2,h3,h4').forEach(function(h){if(heads.length<60&&visible(h)){var l=+h.tagName.charAt(1);heads.push('  '.repeat(l-1)+h.tagName.toLowerCase()+': '+clean(h.innerText).slice(0,90));}});return {title:document.title,url:location.href,headings:heads};}
-function box(a){var el=find(a);if(!el)return {error:'not found'};el.scrollIntoView({block:'center',inline:'center',behavior:'instant'});var r=el.getBoundingClientRect();return {x:r.left,y:r.top,w:r.width,h:r.height,vw:vv().width};}
-function has(a){if(a.selector){try{var e=document.querySelector(a.selector);return {found:!!e&&visible(e)};}catch(x){return {found:false};}}
-if(a.text)return {found:!!document.body&&document.body.innerText.toLowerCase().indexOf(String(a.text).toLowerCase())>=0};
-return {found:document.readyState==='complete'};}
-return {snapshot:snapshot,point:point,viewport:viewport,fill:fill,select:select,state:state,hover:hover,pos:pos,text:text,has:has,outline:outline,box:box};
-})()
-""".trimIndent()
     }
 }

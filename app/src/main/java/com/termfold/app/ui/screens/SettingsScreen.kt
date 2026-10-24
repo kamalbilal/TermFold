@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -27,8 +29,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.termfold.app.BuildConfig
 import com.termfold.app.R
@@ -198,6 +202,8 @@ private fun AgentChatCard() {
 private fun CursorAcpCard() {
     val context = LocalContext.current
     var allowEverything by remember { androidx.compose.runtime.mutableStateOf(CursorAcpPrefs.allowEverything(context)) }
+    var hasStoredKey by remember { androidx.compose.runtime.mutableStateOf(CursorAcpPrefs.hasApiKey(context)) }
+    var apiKeyDraft by remember { androidx.compose.runtime.mutableStateOf("") }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -217,6 +223,66 @@ private fun CursorAcpCard() {
             actionLabel = "",
             onAction = {},
         )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = stringResource(R.string.settings_cursor_api_key),
+            style = MaterialTheme.typography.titleSmall,
+            color = Palette.Text,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = stringResource(R.string.settings_cursor_api_key_desc),
+            style = MaterialTheme.typography.bodySmall,
+            color = Palette.TextDim,
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = apiKeyDraft,
+            onValueChange = { apiKeyDraft = it },
+            placeholder = {
+                Text(
+                    stringResource(
+                        if (hasStoredKey && apiKeyDraft.isEmpty()) {
+                            R.string.settings_cursor_api_key_saved_hint
+                        } else {
+                            R.string.settings_cursor_api_key_hint
+                        },
+                    ),
+                )
+            },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .onFocusChanged { focus ->
+                    if (focus.isFocused || apiKeyDraft.isBlank()) return@onFocusChanged
+                    CursorAcpPrefs.setApiKey(context, apiKeyDraft)
+                    hasStoredKey = true
+                    apiKeyDraft = ""
+                },
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = Palette.Text,
+                unfocusedTextColor = Palette.Text,
+                focusedBorderColor = Palette.Accent,
+                unfocusedBorderColor = Palette.BorderSoft,
+            ),
+        )
+        if (hasStoredKey) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = stringResource(R.string.settings_cursor_api_key_clear),
+                style = MaterialTheme.typography.labelLarge,
+                color = Palette.Accent,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable {
+                        CursorAcpPrefs.setApiKey(context, "")
+                        hasStoredKey = false
+                        apiKeyDraft = ""
+                    }
+                    .padding(vertical = 4.dp),
+            )
+        }
     }
 }
 

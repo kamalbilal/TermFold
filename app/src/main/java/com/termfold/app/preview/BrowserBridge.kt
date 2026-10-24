@@ -53,6 +53,31 @@ object BrowserBridge {
 
     /** Commands being carried out right now; the frame stays lit while any is running. */
     private val running = java.util.concurrent.atomic.AtomicInteger(0)
+    private val _commandInFlight = MutableStateFlow(false)
+    /** True while an agent browser command is executing on the main thread. */
+    val commandInFlight: StateFlow<Boolean> = _commandInFlight.asStateFlow()
+
+    private fun syncCommandInFlight() {
+        _commandInFlight.value = running.get() > 0
+    }
+
+    @Volatile var captchaPending: Boolean = false
+
+    private val actionLog = ArrayDeque<ActionEntry>(8)
+    data class ActionEntry(val label: String, val tabId: Int = 0, val at: Long = System.currentTimeMillis())
+
+    @Volatile var networkGeneration: Int = 0
+
+    fun actionLog(): List<ActionEntry> = synchronized(actionLog) { actionLog.toList() }
+
+    fun recordAction(label: String, tabId: Int = 0) = synchronized(actionLog) {
+        actionLog.addLast(ActionEntry(label, tabId))
+        while (actionLog.size > 8) actionLog.removeFirst()
+    }
+
+    fun bumpNetworkGeneration() {
+        networkGeneration++
+    }
     @Volatile private var started = false
     private lateinit var token: String
 
@@ -130,6 +155,13 @@ object BrowserBridge {
                     "\"Let agent continue\" in the preview, then try again.",
             )
         }
+        if (captchaPending && action !in setOf("dismiss_captcha", "status", "health", "tab_list")) {
+            return JSONObject().put(
+                "error",
+                "A CAPTCHA or security challenge is on screen. Ask the user to solve it on the device, " +
+                    "then use wait with captcha_cleared or tap Continue in the preview.",
+            )
+        }
         lastCommand = System.currentTimeMillis()
         _activity.update { it.copy(active = true, label = labelFor(action, args)) }
         // The browser draws only while the pane is on screen: open it and wait for it.
@@ -156,11 +188,17 @@ object BrowserBridge {
             )
         }
         running.incrementAndGet()
+        syncCommandInFlight()
         return runCatching {
             withTimeout(90_000) { driver.run(action, args) }
-        }.getOrElse { JSONObject().put("error", it.message ?: it.javaClass.simpleName) }.also {
+        }.getOrElse { JSONObject().put("error", it.message ?: it.javaClass.simpleName) }.also { result ->
             running.decrementAndGet()
+            syncCommandInFlight()
             lastCommand = System.currentTimeMillis()
+            if (!result.has("error")) {
+                bumpNetworkGeneration()
+                recordAction(labelFor(action, args))
+            }
         }
     }
 
@@ -177,6 +215,9 @@ object BrowserBridge {
         "hover" -> "Hovering"
         "upload" -> "Uploading a file"
         "console", "network" -> "Reading the console"
+        "health" -> "Checking page health"
+        "tab_list", "tab_new", "tab_switch", "tab_close" -> "Managing tabs"
+        "dismiss_captcha" -> "Dismissing captcha hint"
         else -> "Working"
     }
 

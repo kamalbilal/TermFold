@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -44,6 +45,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.termfold.app.R
 import com.termfold.app.shell.TerminalHost
 import com.termfold.app.ui.components.BareIconButton
+import com.termfold.app.ui.components.ConfigureDialogWindowForKeyboard
 import com.termfold.app.ui.theme.Palette
 import com.termfold.app.ui.theme.TermFoldIcons
 
@@ -207,12 +209,17 @@ fun AgentAuxTerminalDialog(
 
     Dialog(
         onDismissRequest = ::dismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
     ) {
+        ConfigureDialogWindowForKeyboard()
         Surface(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Palette.Bg)
+                .statusBarsPadding()
                 .navigationBarsPadding()
                 .imePadding(),
             color = Palette.Bg,

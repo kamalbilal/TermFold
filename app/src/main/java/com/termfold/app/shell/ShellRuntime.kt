@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.res.AssetManager
 import android.net.ConnectivityManager
 import android.util.Log
+import com.termfold.app.acp.AcpInstaller
 import java.io.File
 /**
  * Owns the bundled Linux environment: unpacking the Debian root filesystem and writing the few
@@ -123,6 +124,7 @@ object ShellRuntime {
         ensureGuestScratchDirs(context, rootfs)
         fixGroupDatabase(rootfs)
         writeHostFiles(context)
+        AcpInstaller.reconcileAfterRestore(context)
     }
 
     /** Host scratch for binds plus placeholder dirs in the rootfs image. */
@@ -258,6 +260,8 @@ object ShellRuntime {
         // separately is what lets pip, npm, git and the agents use https.
 
         installCaCertificates(context, rootfs)
+        runCatching { AcpInstaller.reconcileNodeInstall(context) }
+            .onFailure { Log.w(TAG, "Node repair skipped", it) }
     }
 
     /**

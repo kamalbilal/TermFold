@@ -8,10 +8,10 @@ import org.junit.Test
 class EditResendFlowTest {
 
     @Test
-    fun revertFilesRunsOptimisticTurnBeforeWireResync() {
+    fun revertFilesResyncsWireBeforeNewTurn() {
         val steps = editResendSteps(revertFiles = true)
-        assertTrue(steps.indexOf(EditResendStep.BeginTurn) < steps.indexOf(EditResendStep.WireResync))
-        assertTrue(steps.indexOf(EditResendStep.WireResync) < steps.indexOf(EditResendStep.CompleteTurn))
+        assertTrue(steps.indexOf(EditResendStep.WireResync) < steps.indexOf(EditResendStep.BeginTurn))
+        assertTrue(steps.indexOf(EditResendStep.BeginTurn) < steps.indexOf(EditResendStep.CompleteTurn))
     }
 
     @Test

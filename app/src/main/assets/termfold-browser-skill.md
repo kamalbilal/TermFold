@@ -65,6 +65,6 @@ much faster when ESLint keeps a cache and when type-checking rules are not in th
 - For testing, use obvious test values, not real card numbers or personal data.
 - You may type a password the user gives you. When it is for a real website, tell the user it
   passed through you (the AI) and recommend they change it after this session.
-- Do not try to solve CAPTCHAs.
+- CAPTCHAs: ask the user to solve on screen; use `browser_wait` with captcha_cleared or wait until health shows captcha_pending false. Never use automated solvers.
 - If a command says the user paused agent control, stop and ask them.
 - Screenshots are of the visible area; scroll to see more.
