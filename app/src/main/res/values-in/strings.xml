@@ -98,6 +98,7 @@
     <string name="fm_deleting">Menghapus…</string>
     <string name="fm_selected">%1$d dipilih</string>
     <string name="fm_hidden">Tampilkan file tersembunyi</string>
+    <string name="fm_persist_location">Ingat folder</string>
     <string name="fm_cut">Potong</string>
     <string name="fm_share">Bagikan</string>
     <string name="fm_open_with">Buka dengan…</string>

@@ -1,0 +1,14 @@
+---
+description: Run assembleDebug after Android app code changes without waiting to be asked
+alwaysApply: true
+---
+
+# Auto-build debug APK
+
+After changing Android app code under `app/` (Kotlin, resources, manifest) that the user will test on device:
+
+1. Run `./gradlew :app:assembleDebug -Pandroid.aapt2FromMavenOverride=/root/projects/Termfold/.tools/aapt2` before finishing the turn.
+2. If the build fails, fix compile errors and rebuild.
+3. Mention the APK path in the response: `app/build/outputs/apk/debug/TermFold-debug.apk`.
+
+Skip the build for question-only replies, docs-only edits, or when the user explicitly says not to build.

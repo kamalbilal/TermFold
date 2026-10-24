@@ -98,6 +98,7 @@
     <string name="fm_deleting">हटाया जा रहा है…</string>
     <string name="fm_selected">%1$d चुने गए</string>
     <string name="fm_hidden">छिपी फ़ाइलें दिखाएँ</string>
+    <string name="fm_persist_location">फ़ोल्डर याद रखें</string>
     <string name="fm_cut">कट करें</string>
     <string name="fm_share">शेयर करें</string>
     <string name="fm_open_with">इसके साथ खोलें…</string>

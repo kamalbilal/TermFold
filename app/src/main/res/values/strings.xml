@@ -152,6 +152,7 @@
     <string name="fm_deleting">Deleting…</string>
     <string name="fm_selected">%1$d selected</string>
     <string name="fm_hidden">Show hidden files</string>
+    <string name="fm_persist_location">Remember folder</string>
     <string name="fm_cut">Cut</string>
     <string name="fm_share">Share</string>
     <string name="fm_open_with">Open with…</string>
@@ -276,7 +277,7 @@
     <string name="files_unsaved_body">%1$s has changes that are not saved.</string>
     <string name="acp_error_title">Agent error</string>
     <string name="acp_permission_title">The agent needs your approval</string>
-    <string name="acp_attach_image">Attach image</string>
+    <string name="acp_attach_image">Attach images</string>
     <string name="acp_agent_label">ACP agent</string>
     <string name="acp_registry_loading">Loading agents…</string>
     <string name="acp_registry_offline">Could not load the ACP registry. Check your connection.</string>

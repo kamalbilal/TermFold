@@ -98,6 +98,7 @@
     <string name="fm_deleting">Eliminando…</string>
     <string name="fm_selected">%1$d seleccionados</string>
     <string name="fm_hidden">Mostrar archivos ocultos</string>
+    <string name="fm_persist_location">Recordar carpeta</string>
     <string name="fm_cut">Cortar</string>
     <string name="fm_share">Compartir</string>
     <string name="fm_open_with">Abrir con…</string>
@@ -209,7 +210,7 @@
     <string name="files_unsaved_body">%1$s tiene cambios sin guardar.</string>
     <string name="acp_error_title">Error del agente</string>
     <string name="acp_permission_title">El agente necesita tu aprobación</string>
-    <string name="acp_attach_image">Adjuntar imagen</string>
+    <string name="acp_attach_image">Adjuntar imágenes</string>
     <string name="acp_agent_label">Agente ACP</string>
     <string name="acp_registry_loading">Cargando agentes…</string>
     <string name="acp_registry_offline">No se pudo cargar el registro de ACP. Revisa tu conexión.</string>

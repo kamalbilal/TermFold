@@ -98,6 +98,7 @@
     <string name="fm_deleting">正在删除…</string>
     <string name="fm_selected">已选 %1$d 项</string>
     <string name="fm_hidden">显示隐藏文件</string>
+    <string name="fm_persist_location">记住当前文件夹</string>
     <string name="fm_cut">剪切</string>
     <string name="fm_share">分享</string>
     <string name="fm_open_with">打开方式…</string>

@@ -1056,22 +1056,29 @@ private fun Timeline(
         WorkspacePathResolver.resolve(context, path, workspaceDir)?.let { openWorkspaceFile(it) }
     }
 
-    val collapsedTools = remember { mutableStateMapOf<Long, Boolean>() }
-    val expandedToolFiles = remember { mutableStateMapOf<String, Boolean>() }
+    var previewImage by remember { mutableStateOf<AcpBlock.Image?>(null) }
+
+    var collapsedTools by remember { mutableStateOf(mapOf<Long, Boolean>()) }
+    var expandedToolFiles by remember { mutableStateOf(mapOf<String, Boolean>()) }
     val toolContextFolds = remember { mutableStateMapOf<String, Set<String>>() }
     LaunchedEffect(items) {
-        syncCompletedToolCollapse(items, collapsedTools)
+        val next = collapsedTools.toMutableMap()
+        syncCompletedToolCollapse(items, next)
+        if (next != collapsedTools) collapsedTools = next
     }
-    // Rebuild when timeline or tool UI state changes. Do not wrap in derivedStateOf with a plain
-    // `items` list — that is not snapshot-tracked and new messages would not appear.
+    // Snapshot maps here so collapse/expand toggles always rebuild lazy rows.
+    val collapsedSnapshot = collapsedTools
+    val expandedFilesSnapshot = expandedToolFiles
+    val presentationSnapshot = toolDiffPresentationCache.toMap()
+    val toolContextSnapshot = toolContextFolds.toMap()
     val lazyEntries = buildAgentChatTimelineEntries(
         items = items,
-        collapsedTools = collapsedTools,
-        expandedToolFiles = expandedToolFiles,
-        contextFolds = toolContextFolds,
+        collapsedTools = collapsedSnapshot,
+        expandedToolFiles = expandedFilesSnapshot,
+        contextFolds = toolContextSnapshot,
         workspaceDir = workspaceDir,
         showLiveToolDiffs = showLiveToolDiffs,
-        presentationCache = toolDiffPresentationCache,
+        presentationCache = presentationSnapshot,
     )
 
     // Follow the conversation while the user is at the bottom; debounce scroll-to-bottom so
@@ -1175,6 +1182,7 @@ private fun Timeline(
                                     redoLoading = redoBusy,
                                     onRedo = { if (actionsEnabled && !redoBusy) client.redoCheckpoint(item.id) },
                                     actionsEnabled = !actionsLocked || undoBusy || redoBusy,
+                                    onImageClick = { previewImage = it },
                                 )
                             }
                             is AcpItem.AgentText -> Markdown(item.text, Modifier.fillMaxWidth(), onOpenPath = onOpenPath)
@@ -1187,14 +1195,16 @@ private fun Timeline(
                 }
                 is AgentChatLazyEntry.ToolHeader -> item(key = entry.key) {
                     val item = entry.item
-                    val collapsed = collapsedTools[item.id] == true
+                    val collapsed = collapsedSnapshot[item.id] == true
                     Box(dimModifier(item.id)) {
                         ToolCallHeaderRow(
                             item = item,
                             workspaceDir = workspaceDir,
                             collapsed = collapsed,
                             onToggle = {
-                                collapsedTools[item.id] = !collapsed
+                                collapsedTools = collapsedTools.toMutableMap().apply {
+                                    this[item.id] = !collapsed
+                                }
                             },
                         )
                     }
@@ -1202,7 +1212,9 @@ private fun Timeline(
                 is AgentChatLazyEntry.ToolFileSection -> {
                     val fileUiKey = "${entry.item.id}:${entry.fileIndex}"
                     val onFileHeaderClick = {
-                        expandedToolFiles[fileUiKey] = !entry.fileExpanded
+                        expandedToolFiles = expandedToolFiles.toMutableMap().apply {
+                            this[fileUiKey] = !entry.fileExpanded
+                        }
                     }
                     val headerModifier = dimModifier(entry.item.id)
                         .fillMaxWidth()
@@ -1286,7 +1298,11 @@ private fun Timeline(
                 added = section.added,
                 removed = section.removed,
                 expanded = section.fileExpanded,
-                onClick = { expandedToolFiles[fileUiKey] = !section.fileExpanded },
+                onClick = {
+                    expandedToolFiles = expandedToolFiles.toMutableMap().apply {
+                        this[fileUiKey] = !section.fileExpanded
+                    }
+                },
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
@@ -1325,6 +1341,10 @@ private fun Timeline(
                 )
             }
         }
+    }
+
+    previewImage?.let { image ->
+        AcpImagePreviewDialog(image = image, onDismiss = { previewImage = null })
     }
 
     undoConfirmId?.let { messageId ->
@@ -1388,6 +1408,7 @@ private fun UserMessageRow(
     redoLoading: Boolean,
     onRedo: () -> Unit,
     actionsEnabled: Boolean,
+    onImageClick: (AcpBlock.Image) -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -1400,7 +1421,9 @@ private fun UserMessageRow(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 item.files.forEach { file -> FileChip(file) }
-                item.images.forEach { image -> ImageThumb(image, size = 88) }
+                item.images.forEach { image ->
+                    ImageThumb(image, size = 88, onClick = { onImageClick(image) })
+                }
             }
             if (item.text.isNotBlank()) Spacer(Modifier.height(6.dp))
         }
@@ -1496,7 +1519,12 @@ private fun MessageActionChip(
 }
 
 @Composable
-private fun ImageThumb(image: AcpBlock.Image, size: Int, onRemove: (() -> Unit)? = null) {
+private fun ImageThumb(
+    image: AcpBlock.Image,
+    size: Int,
+    onClick: (() -> Unit)? = null,
+    onRemove: (() -> Unit)? = null,
+) {
     // Decoded off the main thread, and only as large as the thumbnail: a pasted screenshot is
     // ~10 MB as a full bitmap, which a chat with a few of them cannot afford on a small phone.
     val targetPx = with(androidx.compose.ui.platform.LocalDensity.current) { size.dp.roundToPx() }
@@ -1520,7 +1548,8 @@ private fun ImageThumb(image: AcpBlock.Image, size: Int, onRemove: (() -> Unit)?
             .size(size.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(Palette.Card)
-            .border(1.dp, Palette.BorderSoft, RoundedCornerShape(12.dp)),
+            .border(1.dp, Palette.BorderSoft, RoundedCornerShape(12.dp))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
     ) {
         bitmap?.let { thumb ->
             Image(
@@ -1771,8 +1800,8 @@ private fun ToolCallHeaderRow(
                 collapsed -> Palette.TextFaint
                 else -> Palette.TextDim
             },
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+            maxLines = if (collapsed) 1 else 12,
+            overflow = if (collapsed) TextOverflow.Ellipsis else TextOverflow.Clip,
             modifier = Modifier.weight(1f),
         )
         if (item.status != "completed" && item.status != "failed") {
@@ -2088,6 +2117,7 @@ private fun Composer(
     }
     var pasteCounter by remember { mutableIntStateOf(0) }
     var preview by remember { mutableStateOf<AcpBlock.TextFile?>(null) }
+    var previewImage by remember { mutableStateOf<AcpBlock.Image?>(null) }
 
     fun addImage(uri: android.net.Uri) {
         scope.launch {
@@ -2105,8 +2135,10 @@ private fun Composer(
         persistAttachments()
     }
 
-    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) addImage(uri)
+    val pickImages = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(MAX_COMPOSER_IMAGES),
+    ) { uris ->
+        uris.forEach { addImage(it) }
     }
 
     val canSend = input.text.isNotBlank() || images.isNotEmpty() || files.isNotEmpty()
@@ -2316,7 +2348,12 @@ private fun Composer(
                         FileChip(file, onClick = { preview = file }, onRemove = { files.remove(file); persistAttachments() })
                     }
                     images.forEach { image ->
-                        ImageThumb(image, size = 56, onRemove = { images.remove(image); persistAttachments() })
+                        ImageThumb(
+                            image,
+                            size = 56,
+                            onClick = { previewImage = image },
+                            onRemove = { images.remove(image); persistAttachments() },
+                        )
                     }
                 }
             }
@@ -2420,7 +2457,9 @@ private fun Composer(
                     icon = TermFoldIcons.Image,
                     contentDescription = stringResource(R.string.acp_attach_image),
                     onClick = {
-                        pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        pickImages.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                        )
                     },
                     tint = Palette.TextDim,
                     size = 38,
@@ -2473,6 +2512,10 @@ private fun Composer(
                 }
             }
         }
+    }
+
+    previewImage?.let { image ->
+        AcpImagePreviewDialog(image = image, onDismiss = { previewImage = null })
     }
 
     preview?.let { file ->
@@ -2978,6 +3021,8 @@ private fun SettingRow(label: String, description: String, selected: Boolean, on
 }
 
 /** Commands the app handles itself rather than sending to the agent. */
+private const val MAX_COMPOSER_IMAGES = 20
+
 private const val BUILTIN_RESUME = "resume"
 private const val BUILTIN_NEW = "new"
 private const val BUILTIN_SUMMARIZE = "summarize"

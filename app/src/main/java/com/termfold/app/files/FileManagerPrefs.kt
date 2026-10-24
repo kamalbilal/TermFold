@@ -2,7 +2,7 @@ package com.termfold.app.files
 
 import android.content.Context
 
-/** User choices for the built-in file manager (sort, layout, hidden files). */
+/** User choices for the built-in file manager (sort, layout, hidden files, last folder). */
 enum class FileSortBy {
     NAME,
     MODIFIED,
@@ -21,6 +21,8 @@ object FileManagerPrefs {
     private const val KEY_SORT = "sort"
     private const val KEY_GRID = "grid"
     private const val KEY_SHOW_HIDDEN = "show_hidden"
+    private const val KEY_PERSIST_LOCATION = "persist_location"
+    private const val KEY_LAST_GUEST_PATH = "last_guest_path"
 
     fun sort(context: Context): FileSortBy {
         val raw = prefs(context).getString(KEY_SORT, FileSortBy.NAME.name) ?: FileSortBy.NAME.name
@@ -41,6 +43,20 @@ object FileManagerPrefs {
 
     fun setShowHidden(context: Context, show: Boolean) {
         prefs(context).edit().putBoolean(KEY_SHOW_HIDDEN, show).apply()
+    }
+
+    fun persistLocation(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_PERSIST_LOCATION, false)
+
+    fun setPersistLocation(context: Context, persist: Boolean) {
+        prefs(context).edit().putBoolean(KEY_PERSIST_LOCATION, persist).apply()
+    }
+
+    fun lastGuestPath(context: Context): String? =
+        prefs(context).getString(KEY_LAST_GUEST_PATH, null)?.takeIf { it.isNotBlank() }
+
+    fun setLastGuestPath(context: Context, guestPath: String) {
+        prefs(context).edit().putString(KEY_LAST_GUEST_PATH, guestPath).apply()
     }
 
     private fun prefs(context: Context) =

@@ -147,10 +147,19 @@ fun FileManagerScreen(wide: Boolean, modifier: Modifier = Modifier, startGuestPa
     val scope = rememberCoroutineScope()
     val focus = LocalFocusManager.current
     val rootfs = remember { ShellPaths.rootfsDir(context) }
-    var cwd by rememberSaveable { mutableStateOf(startGuestPath) }
+    fun restoreCwd(): String {
+        val default = startGuestPath
+        if (!FileManagerPrefs.persistLocation(app)) return default
+        val saved = FileManagerPrefs.lastGuestPath(app) ?: return default
+        val guest = saved.ifBlank { "/" }
+        val folder = File(rootfs, guest.trimStart('/'))
+        return if (folder.isDirectory) guest else default
+    }
+    var cwd by remember { mutableStateOf(restoreCwd()) }
     var showHidden by remember { mutableStateOf(FileManagerPrefs.showHidden(app)) }
     var sort by remember { mutableStateOf(FileManagerPrefs.sort(app)) }
     var grid by remember { mutableStateOf(FileManagerPrefs.gridView(app)) }
+    var persistLocation by remember { mutableStateOf(FileManagerPrefs.persistLocation(app)) }
     var query by rememberSaveable { mutableStateOf("") }
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var refresh by remember { mutableIntStateOf(0) }
@@ -167,6 +176,10 @@ fun FileManagerScreen(wide: Boolean, modifier: Modifier = Modifier, startGuestPa
     var exportSource by remember { mutableStateOf<File?>(null) }
     var projects by remember { mutableStateOf<List<String>>(emptyList()) }
     val dir = File(rootfs, cwd.trimStart('/'))
+
+    LaunchedEffect(cwd, persistLocation) {
+        if (persistLocation) FileManagerPrefs.setLastGuestPath(app, cwd)
+    }
 
     LaunchedEffect(Unit) {
         if (!iconsReady) {
@@ -410,6 +423,12 @@ fun FileManagerScreen(wide: Boolean, modifier: Modifier = Modifier, startGuestPa
                             showHidden = hidden
                             FileManagerPrefs.setShowHidden(app, hidden)
                         },
+                        persistLocation = persistLocation,
+                        onPersistLocation = { persist ->
+                            persistLocation = persist
+                            FileManagerPrefs.setPersistLocation(app, persist)
+                            if (persist) FileManagerPrefs.setLastGuestPath(app, cwd)
+                        },
                     )
                     androidx.compose.animation.AnimatedVisibility(
                         visible = selected.isNotEmpty(),
@@ -642,6 +661,8 @@ private fun Header(
     onGrid: (Boolean) -> Unit,
     showHidden: Boolean,
     onShowHidden: (Boolean) -> Unit,
+    persistLocation: Boolean,
+    onPersistLocation: (Boolean) -> Unit,
 ) {
     var uploadMenu by remember { mutableStateOf(false) }
     var newMenu by remember { mutableStateOf(false) }
@@ -766,6 +787,11 @@ private fun Header(
                     CheckEntry(stringResource(R.string.fm_view_grid), grid, TermFoldIcons.Grid) { onGrid(true) }
                     HorizontalDivider(color = Palette.Border, modifier = Modifier.padding(vertical = 4.dp))
                     CheckEntry(stringResource(R.string.fm_hidden), showHidden, if (showHidden) TermFoldIcons.Eye else TermFoldIcons.EyeOff) { onShowHidden(!showHidden) }
+                    CheckEntry(
+                        stringResource(R.string.fm_persist_location),
+                        persistLocation,
+                        TermFoldIcons.History,
+                    ) { onPersistLocation(!persistLocation) }
                 }
             }
         }

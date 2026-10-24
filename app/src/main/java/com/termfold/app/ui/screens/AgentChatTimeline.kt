@@ -110,11 +110,11 @@ fun syncCompletedToolCollapse(
     items: List<AcpItem>,
     collapsedTools: MutableMap<Long, Boolean>,
 ) {
+    // Only set defaults for newly seen tools; never override user expand/collapse.
     for (item in items) {
         if (item !is AcpItem.ToolCall) continue
-        when {
-            item.status == "in_progress" -> collapsedTools[item.id] = false
-            !collapsedTools.containsKey(item.id) -> collapsedTools[item.id] = true
+        if (!collapsedTools.containsKey(item.id)) {
+            collapsedTools[item.id] = item.status != "in_progress"
         }
     }
 }
