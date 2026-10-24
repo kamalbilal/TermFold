@@ -9,6 +9,8 @@ import org.json.JSONObject
 data class AcpPersistedTimeline(
     val items: List<AcpItem>,
     val checkpoints: AcpCheckpointUiState = AcpCheckpointUiState(),
+    /** Injected on the next prompt after compress / wire resync. */
+    val pendingWireContext: String? = null,
 )
 
 /** JSON for the TermFold-owned chat timeline, independent of ACP wire session ids. */
@@ -24,10 +26,11 @@ object AcpTimelineCodec {
 
     fun encode(snapshot: AcpPersistedTimeline): String {
         val durable = durableCheckpoints(snapshot.checkpoints)
-        return JSONObject()
+        val obj = JSONObject()
             .put("items", encodeItems(snapshot.items))
             .put("checkpoints", encodeCheckpoints(durable))
-            .toString()
+        snapshot.pendingWireContext?.takeIf { it.isNotBlank() }?.let { obj.put("pendingWireContext", it) }
+        return obj.toString()
     }
 
     fun decode(json: String): AcpPersistedTimeline {
@@ -35,6 +38,7 @@ object AcpTimelineCodec {
         return AcpPersistedTimeline(
             items = decodeItems(root.optJSONArray("items")),
             checkpoints = durableCheckpoints(decodeCheckpoints(root.optJSONObject("checkpoints"))),
+            pendingWireContext = root.optString("pendingWireContext").takeIf { it.isNotBlank() },
         )
     }
 
@@ -50,6 +54,7 @@ object AcpTimelineCodec {
             .put("undoableMessageIds", undoable)
             .put("redoStack", frames)
         state.ghostFromItemId?.let { obj.put("ghostFromItemId", it) }
+        state.compressedForUserMessageId?.let { obj.put("compressedForUserMessageId", it) }
         return obj
     }
 
@@ -83,11 +88,17 @@ object AcpTimelineCodec {
         } else {
             null
         }
+        val compressed = if (obj.has("compressedForUserMessageId") && !obj.isNull("compressedForUserMessageId")) {
+            obj.optLong("compressedForUserMessageId")
+        } else {
+            null
+        }
         return AcpCheckpointUiState(
             preTurnByMessageId = hashes,
             undoableMessageIds = undoable,
             redoStack = frames,
             ghostFromItemId = ghost,
+            compressedForUserMessageId = compressed,
         )
     }
 
@@ -180,6 +191,7 @@ object AcpTimelineCodec {
             .put("status", item.status)
             .put("detail", item.detail)
             .put("paths", JSONArray(item.paths))
+            .put("fileDiffs", encodeFileDiffs(item.fileDiffs))
         is AcpItem.Plan -> JSONObject()
             .put("type", "plan")
             .put("id", item.id)
@@ -209,6 +221,7 @@ object AcpTimelineCodec {
                 status = obj.optString("status"),
                 detail = obj.optString("detail"),
                 paths = decodeStrings(obj.optJSONArray("paths")),
+                fileDiffs = decodeFileDiffs(obj.optJSONArray("fileDiffs")),
             )
             "plan" -> {
                 val entries = obj.optJSONArray("entries")
@@ -257,5 +270,42 @@ object AcpTimelineCodec {
     private fun decodeStrings(array: JSONArray?): List<String> = buildList {
         if (array == null) return@buildList
         for (i in 0 until array.length()) add(array.optString(i))
+    }
+
+    private fun encodeFileDiffs(diffs: List<AcpToolFileDiff>): JSONArray =
+        JSONArray().also { arr ->
+            diffs.forEach { diff ->
+                arr.put(
+                    JSONObject()
+                        .put("path", diff.path)
+                        .put("operation", diff.operation.name.lowercase())
+                        .put("oldPath", diff.oldPath)
+                        .put("patchText", diff.patchText),
+                )
+            }
+        }
+
+    private fun decodeFileDiffs(array: JSONArray?): List<AcpToolFileDiff> = buildList {
+        if (array == null) return@buildList
+        for (i in 0 until array.length()) {
+            val obj = array.optJSONObject(i) ?: continue
+            val path = obj.optString("path").takeIf { it.isNotBlank() } ?: continue
+            val op = when (obj.optString("operation").lowercase()) {
+                "add" -> AcpToolFileDiff.Operation.ADD
+                "delete" -> AcpToolFileDiff.Operation.DELETE
+                "modify" -> AcpToolFileDiff.Operation.MODIFY
+                "move" -> AcpToolFileDiff.Operation.MOVE
+                "copy" -> AcpToolFileDiff.Operation.COPY
+                else -> AcpToolFileDiff.Operation.UNKNOWN
+            }
+            add(
+                AcpToolFileDiff(
+                    path = path,
+                    operation = op,
+                    oldPath = obj.optString("oldPath").takeIf { it.isNotBlank() },
+                    patchText = obj.optString("patchText").takeIf { it.isNotBlank() },
+                ),
+            )
+        }
     }
 }

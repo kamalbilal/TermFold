@@ -51,6 +51,12 @@ object AcpInstaller {
 
     private const val UV_ROOT = "/opt/uv"
 
+    /** Guest path to the Cursor Agent CLI after [CURSOR_INSTALL_SCRIPT] (symlink from cursor.com/install). */
+    const val CURSOR_AGENT_BIN = "/root/.local/bin/agent"
+
+    private const val CURSOR_INSTALL_SCRIPT =
+        "bash -c 'set -o pipefail; curl https://cursor.com/install -fsS | bash'"
+
     /** Where one agent's files live inside the guest. */
     fun installDir(context: Context, agentId: String): File =
         File(ShellPaths.rootfsDir(context), "opt/acp/$agentId")
@@ -60,9 +66,18 @@ object AcpInstaller {
     fun pathPrefix(context: Context, agent: AcpAgent): String? =
         if (agent.kind == AcpAgent.Kind.NPX) NODE_BIN else null
 
-    fun isInstalled(context: Context, agent: AcpAgent): Boolean =
-        manifestFile(context, agent.id).takeIf { it.isFile }
+    fun isInstalled(context: Context, agent: AcpAgent): Boolean {
+        val manifestOk = manifestFile(context, agent.id).takeIf { it.isFile }
             ?.let { it.readText().contains("\"version\":\"${agent.version}\"") } == true
+        if (!manifestOk) return false
+        if (agent.id == "cursor") {
+            return locateCursorAgentSource(ShellPaths.rootfsDir(context)) != null
+        }
+        return true
+    }
+
+    private fun cursorAgentBinary(context: Context): File =
+        File(ShellPaths.rootfsDir(context), "root/.local/bin/agent")
 
     private fun manifestFile(context: Context, agentId: String): File =
         File(installDir(context, agentId), "manifest.json")
@@ -92,12 +107,20 @@ object AcpInstaller {
         }
 
         if (isInstalled(context, agent)) {
+            if (agent.id == "cursor") {
+                locateCursorAgentSource(ShellPaths.rootfsDir(context))?.let {
+                    publishCursorAgentBinaries(context, it)
+                }
+            }
             onProgress("Already installed")
             return launch(context, agent)
         }
 
         when (agent.kind) {
             AcpAgent.Kind.BINARY -> {
+                if (agent.id == "cursor") {
+                    return installCursorOfficial(context, agent, onProgress)
+                }
                 onProgress("Downloading ${agent.name} ${agent.version}")
                 val archive = download(agent.archiveUrl!!, context.cacheDir, agent.id)
                 verify(archive, agent.archiveSha256)
@@ -379,6 +402,104 @@ object AcpInstaller {
             }
         }
         staging.deleteRecursively()
+    }
+
+    /**
+     * Cursor's registry archive lands under /opt/acp, but the supported install path for login
+     * and updates is cursor.com/install, which puts `agent` on ~/.local/bin. ACP spawns that
+     * binary; Shell picks it up via profile.d and the guest PATH.
+     */
+    private fun installCursorOfficial(
+        context: Context,
+        agent: AcpAgent,
+        onProgress: (String) -> Unit,
+    ): Launch {
+        val dir = installDir(context, agent.id)
+        dir.mkdirs()
+        val rootfs = ShellPaths.rootfsDir(context)
+        var source = locateCursorAgentSource(rootfs)
+        if (source == null) {
+            onProgress("Installing Cursor CLI")
+            val result = runCapture(
+                context,
+                CURSOR_INSTALL_SCRIPT,
+                timeoutSeconds = 900,
+            )
+            if (result.first != 0) {
+                Log.w(TAG, "Cursor install script exited ${result.first}: ${result.second.takeLast(2_000)}")
+            }
+            source = locateCursorAgentSource(rootfs)
+        }
+        if (source == null) {
+            onProgress("Downloading ${agent.name} ${agent.version}")
+            source = installCursorFromRegistry(context, agent, onProgress)
+        }
+        val binary = publishCursorAgentBinaries(context, source)
+        check(binary.isFile && binary.length() > 0L) {
+            "Cursor install finished but $CURSOR_AGENT_BIN is missing. Try Shell: termfold-setup, then reopen this session."
+        }
+        val launch = Launch(CURSOR_AGENT_BIN, agent.args, agent.env)
+        writeManifest(dir, agent, launch)
+        Log.i(TAG, "Installed cursor ${agent.version} -> ${launch.command}")
+        return launch
+    }
+
+    /** Finds the real cursor-agent launcher (bash + bundled node in the same directory). */
+    private fun locateCursorAgentSource(rootfs: File): File? {
+        fun isCursorInstallDir(agent: File): Boolean =
+            agent.isFile && agent.name == "cursor-agent" && File(agent.parentFile, "node").isFile
+
+        val versions = File(rootfs, "root/.local/share/cursor-agent/versions")
+        if (versions.isDirectory) {
+            versions.walkTopDown().maxDepth(6)
+                .filter { isCursorInstallDir(it) }
+                .minByOrNull { it.relativeTo(rootfs).invariantSeparatorsPath.length }
+                ?.let { return it }
+        }
+        AcpArchives.resolveCommand(File(rootfs, "opt/acp/cursor"), "dist-package/cursor-agent")
+            ?.takeIf { isCursorInstallDir(it) }
+            ?.let { return it }
+        return null
+    }
+
+    /**
+     * cursor-agent is a bash script that runs `$SCRIPT_DIR/node index.js`. PATH shims must exec
+     * the install tree, not a copy of the script alone.
+     */
+    private fun publishCursorAgentBinaries(context: Context, source: File): File {
+        val rootfs = ShellPaths.rootfsDir(context)
+        val guestTarget = "/" + source.relativeTo(rootfs).invariantSeparatorsPath
+        val dest = cursorAgentBinary(context)
+        writeCursorPathShim(dest, guestTarget)
+        writeCursorPathShim(File(dest.parentFile, "cursor-agent"), guestTarget)
+        return dest
+    }
+
+    private fun writeCursorPathShim(dest: File, guestTarget: String) {
+        dest.parentFile?.mkdirs()
+        dest.writeText("#!/bin/sh\nexec $guestTarget \"\$@\"\n")
+        dest.setExecutable(true, false)
+    }
+
+    private fun installCursorFromRegistry(
+        context: Context,
+        agent: AcpAgent,
+        onProgress: (String) -> Unit,
+    ): File {
+        val archive = download(agent.archiveUrl!!, context.cacheDir, agent.id)
+        verify(archive, agent.archiveSha256)
+        onProgress("Unpacking")
+        val dir = installDir(context, agent.id)
+        dir.deleteRecursively()
+        dir.mkdirs()
+        AcpArchives.extract(archive, dir, agent.cmd)
+        archive.delete()
+        val cmd = agent.cmd ?: "dist-package/cursor-agent"
+        return AcpArchives.resolveCommand(dir, cmd)
+            ?: error(
+                "Downloaded archive did not contain '$cmd'. Top level: " +
+                    dir.listFiles()?.joinToString(", ") { it.name }.orEmpty(),
+            )
     }
 
     private fun writeManifest(dir: File, agent: AcpAgent, launch: Launch) {

@@ -1253,6 +1253,8 @@ private fun TextEditor(
 
     val relative = root?.let { file.relativeToOrNull(it)?.path }?.replace('\\', '/') ?: file.path
     val text = loaded as? Loaded.Text
+    val unavailable = loaded as? Loaded.Unavailable
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     Column(modifier) {
         Row(
@@ -1286,9 +1288,13 @@ private fun TextEditor(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            if (unavailable != null) {
+                EditorAction(TermFoldIcons.OpenExternal, stringResource(R.string.fm_open_with)) {
+                    FileActions.openWith(context, file)
+                }
+            }
             if (text != null) {
                 if (com.termfold.app.preview.Preview.canPreview(file)) {
-                    val context = androidx.compose.ui.platform.LocalContext.current
                     EditorAction(TermFoldIcons.Globe, stringResource(R.string.preview_title)) {
                         com.termfold.app.preview.Preview.openFile(context, file)
                     }

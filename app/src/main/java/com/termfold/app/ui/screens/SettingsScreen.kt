@@ -32,6 +32,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.termfold.app.BuildConfig
 import com.termfold.app.R
+import com.termfold.app.acp.AcpChatPrefs
 import com.termfold.app.acp.CursorAcpPrefs
 import com.termfold.app.core.AppViewModel
 import com.termfold.app.core.ShellState
@@ -100,6 +101,10 @@ fun SettingsScreen(
             item { UpdatesCard() }
 
             item { Spacer(Modifier.height(20.dp)) }
+            item { GroupLabel(stringResource(R.string.settings_agent_chat)) }
+            item { AgentChatCard() }
+
+            item { Spacer(Modifier.height(20.dp)) }
             item { GroupLabel(stringResource(R.string.settings_cursor)) }
             item { CursorAcpCard() }
 
@@ -160,6 +165,32 @@ fun SettingsScreen(
 
             item { BottomNavSpacer() }
         }
+    }
+}
+
+@Composable
+private fun AgentChatCard() {
+    val context = LocalContext.current
+    var liveDiffs by remember { androidx.compose.runtime.mutableStateOf(AcpChatPrefs.showLiveToolDiffs(context)) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(Palette.Card)
+            .padding(horizontal = 18.dp, vertical = 8.dp),
+    ) {
+        SwitchRow(
+            title = stringResource(R.string.settings_agent_chat_live_diffs),
+            body = stringResource(R.string.settings_agent_chat_live_diffs_desc),
+            checked = liveDiffs,
+            onChange = {
+                liveDiffs = it
+                AcpChatPrefs.setShowLiveToolDiffs(context, it)
+            },
+            warning = null,
+            actionLabel = "",
+            onAction = {},
+        )
     }
 }
 

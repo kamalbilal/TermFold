@@ -99,6 +99,8 @@ sealed interface AcpItem {
          * the path-like fields of its `rawInput`. Titles alone are often just "Read" or "Write".
          */
         val paths: List<String> = emptyList(),
+        /** Structured per-file patches from ACP `diff` content entries. */
+        val fileDiffs: List<AcpToolFileDiff> = emptyList(),
     ) : AcpItem
 
     /** The agent's plan (todo list), replaced wholesale on every update. */
@@ -234,8 +236,11 @@ class AcpClient(
     @Volatile
     private var agentSessionId: String? = null
 
-    /** The agent session this chat is in, once one is open. */
+    /** Wire session used for prompts (may be a hidden background rotation after compress). */
     val currentSessionId: String? get() = agentSessionId
+
+    /** Wire session shown in “Sessions in this folder” as the conversation the user is in. */
+    val listedSessionId: String? get() = rememberedSessionId()
 
     @Volatile
     private var closedByUser = false
@@ -407,22 +412,50 @@ class AcpClient(
         // Stay on this TermFold chat. A wire resync may have rotated the ACP session id;
         // restore the local timeline and attach the latest wire session without replaying
         // the agent's summary-first clone into a second listed conversation.
-        val local = withContext(Dispatchers.IO) { AcpTimelineStore.load(context, sessionKey) }
+        val listed = rememberedSessionId()
+        val local = withContext(Dispatchers.IO) {
+            listed?.let { AcpTimelineStore.load(context, sessionKey, it) }
+                ?: AcpTimelineStore.load(context, sessionKey)
+        }
         if (local != null) adoptTimeline(local)
-        val remembered = rememberedSessionId()
+        val activeWire = rememberedActiveWireId()
         val resume = AcpSessionResume.plan(
             hasLocalTimeline = local != null,
-            rememberedWireId = remembered,
+            rememberedWireId = activeWire,
             canReopen = canLoad || canResume,
         )
-        if (resume.useRememberedWireSession && remembered != null) {
-            suppressReplayForMcpReload = resume.suppressAgentReplayUpdates
-            val opened = try {
-                reopen(remembered, replay = resume.replayAgentHistory)
+        if (local != null) {
+            val preferred = if (resume.useRememberedWireSession) activeWire else null
+            val opened = preferred != null && attachWireKeepingTimeline(preferred, local)
+            if (!opened && listed != null && listed != preferred) {
+                if (attachWireKeepingTimeline(listed, local)) {
+                    bindConversation(listed, listed)
+                    persistTimeline()
+                    return
+                }
+            } else if (opened) {
+                persistTimeline()
+                return
+            }
+            suppressReplayForMcpReload = true
+            try {
+                openSession(updateListed = false)
             } finally {
                 suppressReplayForMcpReload = false
             }
-            if (opened) {
+            adoptTimeline(local)
+            val newActive = agentSessionId
+            val keepListed = rememberedSessionId() ?: listed
+            if (newActive != null && keepListed != null) {
+                bindConversation(keepListed, newActive)
+                hideFromPastList(newActive)
+                suppressReplayForWireId = newActive
+            }
+            persistTimeline()
+            return
+        }
+        if (resume.useRememberedWireSession && activeWire != null) {
+            if (reopen(activeWire, replay = true)) {
                 persistTimeline()
                 return
             }
@@ -437,6 +470,12 @@ class AcpClient(
     /** Drops replayed chat chunks while `session/load` reconnects MCP on the same session. */
     @Volatile private var suppressReplayForMcpReload = false
 
+    /**
+     * When set, drop chat replay chunks that belong to this background wire only.
+     * User-initiated session/load must clear this so reopening a thread can replay.
+     */
+    @Volatile private var suppressReplayForWireId: String? = null
+
     private val prefs get() = context.getSharedPreferences("acp_sessions", Context.MODE_PRIVATE)
 
     /** Where the agents keep their conversations, under the guest home. */
@@ -445,11 +484,32 @@ class AcpClient(
         ".gemini/tmp", ".local/share/opencode/storage", ".qwen/tmp",
     )
 
-    /** The agent session this chat last used, so it can be reopened next time. */
+    /** Listed wire id for this tab (user-visible session in session/list). */
     private fun rememberedSessionId(): String? = prefs.getString(sessionKey, null)
 
-    private fun rememberSession(id: String) {
-        prefs.edit().putString(sessionKey, id).apply()
+    private fun activeWirePrefsKey(): String = "$sessionKey|active"
+
+    private fun wireMapKey(): String = "$sessionKey|wireMap"
+
+    /** Wire id that receives prompts; may differ from [rememberedSessionId] after compress. */
+    private fun rememberedActiveWireId(): String? =
+        prefs.getString(activeWirePrefsKey(), null) ?: rememberedSessionId()
+
+    private fun wireMap(): Map<String, String> = AcpConversationWires.parse(prefs.getString(wireMapKey(), null))
+
+    private fun bindConversation(listed: String, active: String) {
+        val next = AcpConversationWires.bind(wireMap(), listed, active)
+        prefs.edit()
+            .putString(sessionKey, listed)
+            .putString(activeWirePrefsKey(), active)
+            .putString(wireMapKey(), AcpConversationWires.encode(next))
+            .apply()
+    }
+
+    private fun activeWireFor(listed: String): String = AcpConversationWires.activeFor(wireMap(), listed)
+
+    private fun clearCurrentWirePointers() {
+        prefs.edit().remove(sessionKey).remove(activeWirePrefsKey()).apply()
     }
 
     /**
@@ -518,8 +578,13 @@ class AcpClient(
      * session id. The session in use cannot be deleted.
      */
     suspend fun deletePastSession(sessionId: String): Boolean = withContext(Dispatchers.IO) {
-        if (sessionId.isBlank() || sessionId == agentSessionId) return@withContext false
+        if (sessionId.isBlank() || sessionId == agentSessionId || sessionId == listedSessionId) {
+            return@withContext false
+        }
         deletedPrefs.edit().putStringSet(deletedKey(), deletedIds() + sessionId).apply()
+        val nextMap = AcpConversationWires.without(wireMap(), sessionId)
+        prefs.edit().putString(wireMapKey(), AcpConversationWires.encode(nextMap)).apply()
+        AcpTimelineStore.clear(context, sessionKey, sessionId)
         runCatching { request("session/delete", JSONObject().put("sessionId", sessionId), timeoutMs = 5_000) }
         // Only ids long enough to be unique (UUIDs and the like) are matched against file names.
         if (sessionId.length >= 12) {
@@ -551,8 +616,31 @@ class AcpClient(
 
     /** Reopens an earlier session chosen by the user, replacing the current conversation. */
     fun openPastSession(sessionId: String) {
-        if (sessionId == agentSessionId) return
+        if (sessionId.isBlank() || sessionId == rememberedSessionId()) return
         scope.launch {
+            persistTimeline()
+            suppressReplayForWireId = null
+            pendingWireContext = null
+            val local = AcpTimelineStore.load(context, sessionKey, sessionId)
+            val active = activeWireFor(sessionId)
+            if (local != null) {
+                bindConversation(sessionId, active)
+                val opened = attachWireKeepingTimeline(active, local)
+                if (!opened && active != sessionId) {
+                    if (attachWireKeepingTimeline(sessionId, local)) {
+                        bindConversation(sessionId, sessionId)
+                    } else {
+                        appendSystemError("That session could not be reopened.")
+                        return@launch
+                    }
+                } else if (!opened) {
+                    appendSystemError("That session could not be reopened.")
+                    return@launch
+                }
+                persistTimeline()
+                return@launch
+            }
+            bindConversation(sessionId, sessionId)
             if (!reopen(sessionId, replay = true)) {
                 appendSystemError("That session could not be reopened.")
             } else {
@@ -564,7 +652,9 @@ class AcpClient(
     /** Leaves the current conversation and starts an empty one with the same agent. */
     fun startNewSession() {
         scope.launch {
-            AcpPastSessions.wireSessionToHideBeforeNew(agentSessionId)?.let { hideFromPastList(it) }
+            persistTimeline()
+            suppressReplayForWireId = null
+            pendingWireContext = null
             agentSessionId = null
             _state.update {
                 it.copy(
@@ -575,7 +665,7 @@ class AcpClient(
                     checkpoints = AcpCheckpointUiState(),
                 )
             }
-            pendingWireContext = null
+            clearCurrentWirePointers()
             AcpTimelineStore.clear(context, sessionKey)
             openSession()
         }
@@ -644,13 +734,31 @@ class AcpClient(
     }
 
     /**
-     * Opens [sessionId] with `session/load` (the agent replays the conversation, which renders
-     * as it arrives) or, when the agent can only resume, `session/resume` (no history). Returns
-     * false if the agent refused, leaving the current state as it was.
+     * Attaches an ACP wire session without replacing TermFold's timeline or checkpoint maps.
+     * Cursor may replay history on `session/load`; that replay is dropped and [snapshot] is reapplied.
+     */
+    private fun attachWireKeepingTimeline(wireId: String, snapshot: AcpPersistedTimeline): Boolean {
+        adoptTimeline(snapshot)
+        suppressReplayForMcpReload = true
+        suppressReplayForWireId = wireId
+        return try {
+            val opened = reopen(wireId, replay = false)
+            adoptTimeline(snapshot)
+            opened
+        } finally {
+            suppressReplayForMcpReload = false
+            suppressReplayForWireId = null
+        }
+    }
+
+    /**
+     * Opens [sessionId] with `session/load` (or `session/resume`). [replay] true clears the
+     * timeline so the agent can fill it; false keeps TermFold's items.
      */
     private fun reopen(sessionId: String, replay: Boolean): Boolean {
         val method = if (canLoad) "session/load" else if (canResume) "session/resume" else return false
         val previousItems = _state.value.items
+        val previousCheckpoints = _state.value.checkpoints
         val previousId = agentSessionId
         // Replayed updates are addressed to this session; accept them from the start.
         agentSessionId = sessionId
@@ -667,13 +775,12 @@ class AcpClient(
         }.getOrNull()
         if (response == null || response.has("error")) {
             agentSessionId = previousId
-            _state.update { it.copy(items = previousItems, restoring = false) }
+            _state.update { it.copy(items = previousItems, checkpoints = previousCheckpoints, restoring = false) }
             Log.w(TAG, "$method failed: ${response?.optJSONObject("error")}")
             return false
         }
         val result = response.optJSONObject("result")
         val settings = parseSettings(result)
-        rememberSession(sessionId)
         _state.update { state ->
             state.copy(
                 phase = AcpPhase.READY,
@@ -699,7 +806,7 @@ class AcpClient(
     private fun mcpServers(): JSONArray =
         com.termfold.app.acp.mcp.McpCatalog.acpServers(context, agent.id, workspaceGuestDir)
 
-    private suspend fun openSession() {
+    private suspend fun openSession(updateListed: Boolean = true) {
         val cwd = workspaceGuestDir
         val response = try {
             request(
@@ -731,7 +838,12 @@ class AcpClient(
             return
         }
         agentSessionId = sessionId
-        rememberSession(sessionId)
+        if (updateListed) {
+            bindConversation(sessionId, sessionId)
+        } else {
+            val listed = rememberedSessionId() ?: sessionId
+            bindConversation(listed, sessionId)
+        }
         val settings = parseSettings(response.optJSONObject("result"))
         _state.update { it.copy(phase = AcpPhase.READY, statusText = "", settings = settings) }
     }
@@ -771,6 +883,10 @@ class AcpClient(
         files: List<AcpBlock.TextFile>,
     ) {
         if (agentSessionId == null) return
+        if (_state.value.checkpoints.wireResyncing) {
+            enqueue(text, images, files)
+            return
+        }
         val messageId = beginUserTurn(text, images, files) ?: return
         completeUserTurn(messageId, text, images, files)
     }
@@ -784,6 +900,7 @@ class AcpClient(
         images: List<AcpBlock.Image>,
         files: List<AcpBlock.TextFile>,
     ): Long? {
+        suppressReplayForWireId = null
         if (_state.value.checkpoints.ghostFromItemId != null) {
             commitGhostBranch(clearRedo = true)
         }
@@ -843,28 +960,39 @@ class AcpClient(
             abortInFlightUserTurn()
             return
         }
+        var compressAfterSummarize = false
         try {
             val response = request(
                 "session/prompt",
                 JSONObject().put("sessionId", sessionId).put("prompt", content),
                 timeoutMs = PROMPT_TIMEOUT_MS,
             )
+            val hadError = response.optJSONObject("error") != null
             response.optJSONObject("error")?.let { error ->
                 appendSystemError(
                     error.optJSONObject("data")?.optString("message")?.ifBlank { null }
                         ?: error.optString("message").ifBlank { "The agent could not answer." },
                 )
             }
-            when (response.optJSONObject("result")?.optString("stopReason")) {
+            val stopReason = response.optJSONObject("result")?.optString("stopReason")
+            when (stopReason) {
                 "max_tokens" -> appendSystemError("The reply was cut off at the model's length limit.")
                 "max_turn_requests" -> appendSystemError("The agent stopped after too many steps.")
                 "refusal" -> appendSystemError("The agent declined to continue.")
             }
+            compressAfterSummarize = !hadError &&
+                stopReason != "refusal" &&
+                !stoppedByUser &&
+                agent.id == "cursor" &&
+                AcpContextCompress.isSummarizePrompt(text)
         } catch (failure: Throwable) {
             Log.w(TAG, "prompt failed", failure)
             appendSystemError(failure.message ?: "prompt failed")
         } finally {
             finalizeUndoableForTurn(messageId)
+            if (compressAfterSummarize) {
+                maybeCompressContextAfterSummarize(messageId)
+            }
             _state.update { it.copy(agentBusy = false) }
             turnInFlight = false
             sendNextQueued()
@@ -1388,19 +1516,64 @@ class AcpClient(
         }
     }
 
+    /** Stops a wire session without removing it from session/list (listed conversation stays). */
+    private suspend fun detachActiveWire(sessionId: String?) {
+        if (sessionId.isNullOrBlank()) return
+        runCatching { notify("session/cancel", JSONObject().put("sessionId", sessionId)) }
+    }
+
     private fun hideFromPastList(sessionId: String) {
         deletedPrefs.edit().putStringSet(deletedKey(), deletedIds() + sessionId).apply()
     }
 
-    private suspend fun wireResync(ghostFromItemId: Long?) {
-        _state.update { it.copy(checkpoints = it.checkpoints.copy(wireResyncing = true)) }
+    private suspend fun maybeCompressContextAfterSummarize(userMessageId: Long) {
+        val checkpoints = _state.value.checkpoints
+        if (checkpoints.compressedForUserMessageId == userMessageId) return
+        val items = _state.value.items
+        val body = AcpContextCompress.agentSummaryAfterUser(items, userMessageId)
+            ?: ConversationSummary.fromItems(items, null)
+        compressContextAfterSummarize(body, userMessageId)
+    }
+
+    private suspend fun compressContextAfterSummarize(summaryBody: String, anchorUserMessageId: Long) {
+        val formatted = AcpContextCompress.formatWireContext(summaryBody)
+        _state.update {
+            it.copy(
+                checkpoints = it.checkpoints.copy(compressedForUserMessageId = anchorUserMessageId),
+            )
+        }
+        wireResync(
+            ghostFromItemId = null,
+            summaryOverride = formatted,
+            keepListedSessionVisible = true,
+        )
+        persistTimeline()
+    }
+
+    private suspend fun wireResync(
+        ghostFromItemId: Long?,
+        summaryOverride: String? = null,
+        keepListedSessionVisible: Boolean = false,
+    ) {
+        val timelineBefore = AcpPersistedTimeline(
+            items = _state.value.items,
+            checkpoints = _state.value.checkpoints,
+            pendingWireContext = pendingWireContext,
+        )
+        _state.update { it.copy(checkpoints = timelineBefore.checkpoints.copy(wireResyncing = true)) }
+        suppressReplayForMcpReload = true
         try {
-            val items = _state.value.items
-            val summary = ConversationSummary.fromItems(items, ghostFromItemId)
-            val oldSession = agentSessionId
-            retireWireSession(oldSession)
+            val items = timelineBefore.items
+            val summary = ConversationSummary.resolveWireSummary(items, ghostFromItemId, summaryOverride)
+            val listed = rememberedSessionId()
+            val oldActive = agentSessionId
+            when {
+                keepListedSessionVisible && !oldActive.isNullOrBlank() && oldActive == listed ->
+                    detachActiveWire(oldActive)
+                else -> retireWireSession(oldActive)
+            }
             agentSessionId = null
-            openSession()
+            openSession(updateListed = false)
             val newSession = agentSessionId
             if (newSession == null) {
                 pendingWireContext = null
@@ -1408,14 +1581,34 @@ class AcpClient(
                 return
             }
             hideFromPastList(newSession)
+            val listedAfter = rememberedSessionId()
+            if (listedAfter != null) bindConversation(listedAfter, newSession)
+            suppressReplayForWireId = newSession
             pendingWireContext = summary
+            adoptTimeline(
+                timelineBefore.copy(
+                    checkpoints = timelineBefore.checkpoints.copy(
+                        wireResyncing = false,
+                        compressedForUserMessageId = _state.value.checkpoints.compressedForUserMessageId,
+                    ),
+                    pendingWireContext = summary,
+                ),
+            )
             persistTimeline()
         } catch (failure: Throwable) {
             Log.w(TAG, "wire resync failed", failure)
             pendingWireContext = null
             appendSystemError("Agent session could not be refreshed after restore.")
         } finally {
-            _state.update { it.copy(checkpoints = it.checkpoints.copy(wireResyncing = false)) }
+            suppressReplayForMcpReload = false
+            _state.update { state ->
+                state.copy(
+                    checkpoints = timelineBefore.checkpoints.copy(
+                        wireResyncing = false,
+                        compressedForUserMessageId = state.checkpoints.compressedForUserMessageId,
+                    ),
+                )
+            }
         }
     }
 
@@ -1583,7 +1776,10 @@ class AcpClient(
             return
         }
         val update = params?.optJSONObject("update") ?: return
-        if (suppressReplayForMcpReload) {
+        val suppressWire = suppressReplayForWireId
+        val dropPassiveReplay = suppressReplayForMcpReload ||
+            (suppressWire != null && (wireSession == null || wireSession == suppressWire))
+        if (dropPassiveReplay) {
             when (update.optString("sessionUpdate")) {
                 "agent_message_chunk",
                 "user_message_chunk",
@@ -1617,16 +1813,37 @@ class AcpClient(
             }
 
             "tool_call" -> {
+                val content = update.optJSONArray("content")
+                val parsed = AcpToolContentParser.parseContent(content)
                 val item = AcpItem.ToolCall(
                     id = nextItemId(),
                     toolCallId = update.optString("toolCallId"),
                     title = update.optString("title").ifBlank { "Tool call" },
                     kind = update.optString("kind").ifBlank { "other" },
                     status = update.optString("status").ifBlank { "in_progress" },
-                    detail = toolContentText(update.optJSONArray("content")),
+                    detail = parsed.detail,
                     paths = toolPaths(update),
+                    fileDiffs = parsed.fileDiffs,
                 )
-                _state.update { it.copy(items = it.items + item) }
+                _state.update { state ->
+                    val dupIdx = state.items.indexOfLast {
+                        it is AcpItem.ToolCall && it.toolCallId == item.toolCallId
+                    }
+                    if (dupIdx < 0) {
+                        state.copy(items = state.items + item)
+                    } else {
+                        val prev = state.items[dupIdx] as AcpItem.ToolCall
+                        val merged = item.copy(
+                            id = prev.id,
+                            detail = item.detail.ifBlank { prev.detail },
+                            paths = item.paths.ifEmpty { prev.paths },
+                            fileDiffs = mergeToolFileDiffUpdates(prev.fileDiffs, item.fileDiffs),
+                        )
+                        state.copy(
+                            items = state.items.toMutableList().also { it[dupIdx] = merged },
+                        )
+                    }
+                }
             }
 
             "tool_call_update" -> {
@@ -1637,14 +1854,24 @@ class AcpClient(
                             if (item !is AcpItem.ToolCall || item.toolCallId != toolCallId) {
                                 item
                             } else {
+                                val content = update.optJSONArray("content")
+                                val parsed = if (content != null && content.length() > 0) {
+                                    AcpToolContentParser.parseContent(content)
+                                } else {
+                                    null
+                                }
                                 item.copy(
                                     title = update.optString("title").ifBlank { item.title },
                                     status = update.optString("status").ifBlank { item.status },
                                     // Updates carry the tool's content so far, so it replaces
                                     // rather than appends; an update without content keeps it.
-                                    detail = toolContentText(update.optJSONArray("content"))
-                                        .ifBlank { item.detail },
+                                    detail = parsed?.detail?.ifBlank { item.detail } ?: item.detail,
                                     paths = toolPaths(update).ifEmpty { item.paths },
+                                    fileDiffs = if (parsed?.fileDiffs?.isNotEmpty() == true) {
+                                        mergeToolFileDiffUpdates(item.fileDiffs, parsed.fileDiffs)
+                                    } else {
+                                        item.fileDiffs
+                                    },
                                 )
                             }
                         },
@@ -1805,10 +2032,7 @@ class AcpClient(
             }
         }
         update.optJSONArray("content")?.let { content ->
-            for (i in 0 until content.length()) {
-                val entry = content.optJSONObject(i) ?: continue
-                if (entry.optString("type") == "diff") entry.optString("path").takeIf { it.isNotBlank() }?.let(paths::add)
-            }
+            AcpToolContentParser.pathsFromContent(content).forEach(paths::add)
         }
         // A replayed session (session/load) often has no input at all: agents such as pi-acp
         // replay only the tool's result. The path can still be recovered from that result,
@@ -1818,7 +2042,8 @@ class AcpClient(
             update.opt("rawOutput")?.let { collectPathFields(it, paths, depth = 0) }
         }
         if (paths.isEmpty()) {
-            val text = toolContentText(update.optJSONArray("content")) + "\n" + rawOutputText(update.opt("rawOutput"))
+            val text = AcpToolContentParser.parseContent(update.optJSONArray("content")).detail +
+                "\n" + rawOutputText(update.opt("rawOutput"))
             RESULT_PATH.find(text)?.groupValues?.get(1)?.trimEnd('.', ',', ':', ')', '\'', '"')
                 ?.takeIf { it.isNotBlank() && it.length < 300 }
                 ?.let(paths::add)
@@ -1846,24 +2071,6 @@ class AcpClient(
         else -> ""
     }
 
-    /**
-     * Readable text of a tool call's content. Each entry is wrapped: `{type:"content",
-     * content:{...}}` for ordinary output, `{type:"diff", path, ...}` for edits, and
-     * `{type:"terminal"}` for terminals this client does not host.
-     */
-    private fun toolContentText(array: JSONArray?): String {
-        array ?: return ""
-        return List(array.length()) { array.optJSONObject(it) }.filterNotNull().mapNotNull { entry ->
-            when (entry.optString("type")) {
-                "content" -> blocks(entry.opt("content"))
-                    .filterIsInstance<AcpBlock.Text>().joinToString("\n") { it.text }
-                "diff" -> "Edited " + entry.optString("path")
-                "text" -> entry.optString("text")
-                else -> null
-            }
-        }.filter { it.isNotBlank() }.joinToString("\n").trim()
-    }
-
     private fun appendSystemError(message: String) {
         _state.update { state ->
             state.copy(
@@ -1877,6 +2084,7 @@ class AcpClient(
     private fun adoptTimeline(snapshot: AcpPersistedTimeline) {
         val maxId = snapshot.items.maxOfOrNull { it.id } ?: return
         nextId.set(AcpTimelineCodec.nextCounter(maxId))
+        pendingWireContext = snapshot.pendingWireContext
         _state.update {
             it.copy(
                 items = snapshot.items,
@@ -1887,15 +2095,16 @@ class AcpClient(
 
     private fun persistTimeline() {
         val state = _state.value
+        val snapshot = AcpPersistedTimeline(
+            items = state.items,
+            checkpoints = AcpTimelineCodec.durableCheckpoints(state.checkpoints),
+            pendingWireContext = pendingWireContext,
+        )
         runCatching {
-            AcpTimelineStore.save(
-                context,
-                sessionKey,
-                AcpPersistedTimeline(
-                    items = state.items,
-                    checkpoints = AcpTimelineCodec.durableCheckpoints(state.checkpoints),
-                ),
-            )
+            AcpTimelineStore.save(context, sessionKey, snapshot)
+            rememberedSessionId()?.let { listed ->
+                AcpTimelineStore.save(context, sessionKey, snapshot, listed)
+            }
         }
     }
 

@@ -68,6 +68,36 @@ object AcpPastSessions {
         return emptySet<String>() to globalMigrationDone
     }
 
-    fun wireSessionToHideBeforeNew(previousWireSessionId: String?): String? =
-        previousWireSessionId?.takeIf { it.isNotBlank() }
+}
+
+/**
+ * Maps a user-visible (listed) Cursor wire id to the wire that currently receives prompts.
+ * Compress and checkpoint resync rotate the prompt wire without changing the listed conversation.
+ */
+object AcpConversationWires {
+    fun parse(json: String?): Map<String, String> {
+        if (json.isNullOrBlank()) return emptyMap()
+        val obj = runCatching { org.json.JSONObject(json) }.getOrNull() ?: return emptyMap()
+        val out = mutableMapOf<String, String>()
+        obj.keys().forEach { listed ->
+            val active = obj.optString(listed)
+            if (listed.isNotBlank() && active.isNotBlank()) out[listed] = active
+        }
+        return out
+    }
+
+    fun encode(map: Map<String, String>): String {
+        val obj = org.json.JSONObject()
+        map.forEach { (listed, active) ->
+            if (listed.isNotBlank() && active.isNotBlank()) obj.put(listed, active)
+        }
+        return obj.toString()
+    }
+
+    fun bind(map: Map<String, String>, listed: String, active: String): Map<String, String> =
+        map + (listed to active)
+
+    fun activeFor(map: Map<String, String>, listed: String): String = map[listed] ?: listed
+
+    fun without(map: Map<String, String>, listed: String): Map<String, String> = map - listed
 }

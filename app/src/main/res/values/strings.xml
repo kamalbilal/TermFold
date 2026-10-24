@@ -19,6 +19,7 @@
     <string name="acp_thinking">Thinking</string>
     <string name="acp_auth_required">Authentication required</string>
     <string name="acp_auth_body">Open a Shell session in this folder and sign in to the agent there (for example run claude, codex login, or pi), then come back and tap Retry. The sign-in is shared with this session.</string>
+    <string name="acp_auth_body_cursor">Open a Shell session in this folder and run agent login, then come back and tap Retry. The sign-in is shared with this Cursor session.</string>
     <string name="acp_auth_methods">Supported: %1$s</string>
     <string name="acp_agent_unavailable">Agent details unavailable</string>
     <string name="acp_restart">Restart agent</string>
@@ -51,7 +52,7 @@
     <string name="action_continue">Continue</string>
     <string name="acp_cmd_resume">Reopen an earlier session</string>
     <string name="acp_cmd_new">New session</string>
-    <string name="acp_cmd_summarize">Summarize the conversation to reduce context</string>
+    <string name="acp_cmd_summarize">Summarize and compress agent context; chat history stays on screen</string>
     <string name="acp_checkpoint_restore">Undo changes</string>
     <string name="acp_checkpoint_redo">Redo changes</string>
     <string name="acp_checkpoint_undo_title">Undo changes?</string>
@@ -205,6 +206,14 @@
     <string name="share_nothing">Nothing to save: the other app did not send a file.</string>
     <string name="share_not_ready">Open TermFold once to finish setting up Linux, then share again.</string>
     <string name="terminal_find">Search the terminal</string>
+    <string name="settings_agent_chat">Agent chat</string>
+    <string name="settings_agent_chat_live_diffs">Show live file diffs</string>
+    <string name="settings_agent_chat_live_diffs_desc">Update line-level diffs while a tool call is still running. When off, diffs appear after each tool finishes.</string>
+    <string name="acp_tool_diff_binary">Binary file (no text diff)</string>
+    <string name="acp_tool_diff_added">New file</string>
+    <string name="acp_tool_diff_deleted">Deleted</string>
+    <string name="acp_tool_diff_moved">Moved</string>
+    <string name="acp_tool_diff_copied">Copied</string>
     <string name="settings_cursor">Cursor agent</string>
     <string name="settings_cursor_allow_everything">Allow everything</string>
     <string name="settings_cursor_allow_everything_desc">Auto-approve tool and command prompts in Cursor sessions. Reopen the session after changing this.</string>
@@ -435,7 +444,6 @@
     <string name="acp_history_search">Search sessions</string>
     <string name="acp_history_no_match">No session matches “%1$s”</string>
     <string name="acp_history_delete_confirm">Delete this session?</string>
-    <string name="acp_history_explainer">This tab keeps chat on your device. The list below is other agent threads you can reopen for this project.</string>
     <string name="acp_agent_unsupported_title">Not available as a chat on Android</string>
     <string name="acp_antigravity_unsupported">Google Antigravity\'s chat server cannot run on Android. Use the agy command in a Shell session instead. You can delete this chat session.</string>
 

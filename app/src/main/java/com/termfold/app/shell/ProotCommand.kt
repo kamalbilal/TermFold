@@ -218,7 +218,10 @@ object ProotCommand {
     fun guestEnvironment(rootfs: File? = null): Map<String, String> = buildMap {
         // /opt/node/bin first: Node and every `npm install -g` CLI (claude, codex, ...) live there,
         // ahead of the on-demand installer shims in /usr/local/bin that stand in until then.
-        put("PATH", "/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        put(
+            "PATH",
+            "${ShellConfig.GUEST_HOME}/.local/bin:/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
         put("HOME", ShellConfig.GUEST_HOME)
         put("PWD", ShellConfig.GUEST_HOME)
 

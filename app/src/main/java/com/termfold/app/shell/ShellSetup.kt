@@ -126,7 +126,11 @@ object ShellSetup {
     }
 
     private val PROFILE_PATH = """
-        |# TermFold: keep Node.js and the agent CLIs ahead of the system ones.
+        |# TermFold: Cursor agent CLI (~/.local/bin) and Node-based tools (/opt/node/bin).
+        |case ":${'$'}PATH:" in
+        |  *:${'$'}HOME/.local/bin:*) ;;
+        |  *) PATH="${'$'}HOME/.local/bin:${'$'}PATH" ;;
+        |esac
         |case ":${'$'}PATH:" in
         |  *:/opt/node/bin:*) ;;
         |  *) PATH="/opt/node/bin:${'$'}PATH" ;;

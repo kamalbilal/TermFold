@@ -7,6 +7,12 @@ object ConversationSummary {
 
     private const val MAX_CHARS = 12_000
 
+    fun resolveWireSummary(
+        items: List<AcpItem>,
+        ghostFromItemId: Long?,
+        summaryOverride: String?,
+    ): String = summaryOverride ?: fromItems(items, ghostFromItemId)
+
     fun fromItems(items: List<AcpItem>, ghostFromItemId: Long?): String {
         val kept = if (ghostFromItemId == null) items else items.filter { it.id < ghostFromItemId }
         if (kept.isEmpty()) return "No prior conversation in this session."

@@ -38,6 +38,8 @@ data class AcpCheckpointUiState(
     val ghostFromItemId: Long? = null,
     val wireResyncing: Boolean = false,
     val busy: CheckpointBusy? = null,
+    /** User message id for which context compress already ran (idempotent across restore). */
+    val compressedForUserMessageId: Long? = null,
 ) {
     val canRedo: Boolean get() = redoStack.isNotEmpty()
 }

@@ -1,6 +1,7 @@
 package com.termfold.app.acp
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -101,10 +102,13 @@ class AcpPastSessionVisibilityTest {
     }
 
     @Test
-    fun wireSessionToHideBeforeNewSession() {
-        assertEquals("wire-1", AcpPastSessions.wireSessionToHideBeforeNew("wire-1"))
-        assertEquals(null, AcpPastSessions.wireSessionToHideBeforeNew(null))
-        assertEquals(null, AcpPastSessions.wireSessionToHideBeforeNew(""))
+    fun priorWireStaysVisibleAfterNewSessionWhenNotHidden() {
+        val listed = listOf(
+            AcpPastSession("wire-old", "Code spacing", "2026-01-01"),
+            AcpPastSession("wire-new", "New chat", "2026-01-02"),
+        )
+        val visible = AcpPastSessions.visible(listed, hiddenIds = emptySet())
+        assertEquals(listOf("wire-old", "wire-new"), visible.map { it.sessionId })
     }
 
     @Test
@@ -117,6 +121,29 @@ class AcpPastSessionVisibilityTest {
         val tabBHidden = emptySet<String>()
         assertEquals(listOf("only-b"), AcpPastSessions.visible(sessions, tabAHidden).map { it.sessionId })
         assertEquals(listOf("shared", "only-b"), AcpPastSessions.visible(sessions, tabBHidden).map { it.sessionId })
+    }
+}
+
+class AcpConversationWiresTest {
+
+    @Test
+    fun bindKeepsListedIdAndRotatesActiveWire() {
+        val map = AcpConversationWires.bind(emptyMap(), listed = "listed-1", active = "listed-1")
+        val afterCompress = AcpConversationWires.bind(map, listed = "listed-1", active = "hidden-2")
+        assertEquals("hidden-2", AcpConversationWires.activeFor(afterCompress, "listed-1"))
+        assertEquals("listed-2", AcpConversationWires.activeFor(afterCompress, "listed-2"))
+        val encoded = AcpConversationWires.encode(afterCompress)
+        assertEquals(afterCompress, AcpConversationWires.parse(encoded))
+    }
+
+    @Test
+    fun withoutRemovesOneConversation() {
+        val map = AcpConversationWires.bind(
+            AcpConversationWires.bind(emptyMap(), "a", "a-active"),
+            "b",
+            "b",
+        )
+        assertEquals(mapOf("b" to "b"), AcpConversationWires.without(map, "a"))
     }
 }
 
@@ -179,6 +206,30 @@ class AcpTimelineCodecTest {
     }
 
     @Test
+    fun roundTripPreservesCompressedForUserMessageIdAndCheckpointMaps() {
+        val items = listOf(
+            AcpItem.UserMessage(1_000_001, "first", emptyList()),
+            AcpItem.UserMessage(1_000_002, "/summarize", emptyList()),
+            AcpItem.AgentText(1_000_003, "summary body"),
+        )
+        val snapshot = AcpPersistedTimeline(
+            items = items,
+            checkpoints = com.termfold.app.acp.checkpoints.AcpCheckpointUiState(
+                preTurnByMessageId = mapOf(1_000_001L to "abc123abc123abc123abc123abc123abc123abc1"),
+                undoableMessageIds = setOf(1_000_001L),
+                compressedForUserMessageId = 1_000_002L,
+            ),
+            pendingWireContext = "Session context (compressed from /summarize):\n\nsummary body",
+        )
+        val restored = AcpTimelineCodec.decode(AcpTimelineCodec.encode(snapshot))
+        assertEquals(items, restored.items)
+        assertEquals(1_000_002L, restored.checkpoints.compressedForUserMessageId)
+        assertEquals(mapOf(1_000_001L to "abc123abc123abc123abc123abc123abc123abc1"), restored.checkpoints.preTurnByMessageId)
+        assertEquals(setOf(1_000_001L), restored.checkpoints.undoableMessageIds)
+        assertEquals("Session context (compressed from /summarize):\n\nsummary body", restored.pendingWireContext)
+    }
+
+    @Test
     fun itemsOnlyJsonDecodesEmptyCheckpoints() {
         val json = """{"items":[{"type":"user","id":1000001,"text":"hi","images":[],"files":[]}]}"""
         val restored = AcpTimelineCodec.decode(json)
@@ -191,5 +242,37 @@ class AcpTimelineCodecTest {
     @Test
     fun nextIdContinuesAfterRestoredTimeline() {
         assertEquals(43L, AcpTimelineCodec.nextCounter(maxItemId = 1_000_042))
+    }
+
+    @Test
+    fun roundTripToolCallFileDiffs() {
+        val items = listOf(
+            AcpItem.ToolCall(
+                id = 1_000_001,
+                toolCallId = "tc-1",
+                title = "Write",
+                kind = "edit",
+                status = "completed",
+                detail = "",
+                paths = listOf("/proj/a.kt"),
+                fileDiffs = listOf(
+                    AcpToolFileDiff(
+                        path = "/proj/a.kt",
+                        operation = AcpToolFileDiff.Operation.MODIFY,
+                        patchText = "--- /proj/a.kt\n+++ /proj/a.kt\n@@ -1 +1 @@\n-x\n+y",
+                    ),
+                ),
+            ),
+        )
+        val restored = AcpTimelineCodec.decode(AcpTimelineCodec.encode(items))
+        assertEquals(items, restored.items)
+    }
+
+    @Test
+    fun legacyToolWithoutFileDiffsDecodes() {
+        val json = """{"items":[{"type":"tool","id":1000001,"toolCallId":"x","title":"Read","kind":"read","status":"completed","detail":"ok","paths":[]}]}"""
+        val item = AcpTimelineCodec.decode(json).items.single() as AcpItem.ToolCall
+        assertEquals("ok", item.detail)
+        assertTrue(item.fileDiffs.isEmpty())
     }
 }

@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -52,6 +53,7 @@ import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -70,7 +72,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
@@ -124,6 +128,9 @@ import com.termfold.app.ui.theme.Palette
 import com.termfold.app.ui.theme.TermFoldIcons
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.termfold.app.ui.theme.Motion
@@ -361,7 +368,11 @@ fun AgentSessionScreen(
                     Spacer(Modifier.height(18.dp))
                     PanelTitle(stringResource(R.string.acp_auth_required))
                     Spacer(Modifier.height(8.dp))
-                    PanelBody(stringResource(R.string.acp_auth_body))
+                    PanelBody(
+                        stringResource(
+                            if (isCursor) R.string.acp_auth_body_cursor else R.string.acp_auth_body,
+                        ),
+                    )
                     if (state.authMethods.isNotEmpty()) {
                         Spacer(Modifier.height(10.dp))
                         PanelBody(stringResource(R.string.acp_auth_methods, state.authMethods.joinToString(", ")))
@@ -514,7 +525,7 @@ fun AgentSessionScreen(
     }
 
     if (showHistory) {
-        PastSessionsDialog(client = client, currentId = client.currentSessionId, onDismiss = { showHistory = false })
+        PastSessionsDialog(client = client, currentId = client.listedSessionId, onDismiss = { showHistory = false })
     }
 
     if (showMcp) {
@@ -969,6 +980,41 @@ private fun PillButton(label: String, icon: ImageVector, onClick: () -> Unit) {
 
 // --- Timeline ---------------------------------------------------------------------------------
 
+/** Pulls tool file chrome toward the row above (list spacing is 12.dp). */
+private val AgentChatToolFilePullUp = (-6).dp
+
+/** Cancels [LazyColumn] spacedBy gap between a sticky file header and its diff body. */
+private val AgentChatStickyDiffBodyPullUp = (-12).dp
+
+/** Pinned file header while its diff body is on screen but the in-list header has scrolled away. */
+private fun pinnedToolFileSection(
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    entries: List<AgentChatLazyEntry>,
+): AgentChatLazyEntry.ToolFileSection? {
+    val visible = listState.layoutInfo.visibleItemsInfo
+    if (visible.isEmpty()) return null
+    val linesInfo = visible
+        .filter { (it.key as? String)?.endsWith("-lines") == true }
+        .minByOrNull { it.index }
+        ?: return null
+    val sectionKey = (linesInfo.key as String).removeSuffix("-lines")
+    val headerVisible = visible.any { it.key == sectionKey }
+    if (headerVisible) {
+        val header = visible.first { it.key == sectionKey }
+        if (header.offset >= -header.size / 4) return null
+    }
+    return entries.filterIsInstance<AgentChatLazyEntry.ToolFileSection>().find { it.key == sectionKey }
+}
+
+private suspend fun androidx.compose.foundation.lazy.LazyListState.scrollAgentChatToBottom(animate: Boolean) {
+    val count = layoutInfo.totalItemsCount
+    if (count > 0) {
+        if (animate) animateScrollToItem(count - 1) else scrollToItem(count - 1)
+        scrollBy(100_000f)
+    }
+}
+
+@OptIn(FlowPreview::class)
 @Composable
 private fun Timeline(
     state: AcpUiState,
@@ -982,17 +1028,54 @@ private fun Timeline(
     val checkpointBusy = state.checkpoints.busy
     var undoConfirmId by remember { mutableStateOf<Long?>(null) }
     val listState = rememberLazyListState()
+    val toolDiffPresentationCache = remember { androidx.compose.runtime.mutableStateMapOf<String, com.termfold.app.acp.ToolCallFilePresentation>() }
+    val toolDiffPresentationLoading = remember { androidx.compose.runtime.mutableStateMapOf<String, Boolean>() }
+    val toolCalls = remember(items) { items.filterIsInstance<AcpItem.ToolCall>() }
+    ToolCallDiffCacheCoordinator(
+        toolCalls = toolCalls,
+        cache = toolDiffPresentationCache,
+        loading = toolDiffPresentationLoading,
+    )
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
+    var showLiveToolDiffs by remember {
+        mutableStateOf(com.termfold.app.acp.AcpChatPrefs.showLiveToolDiffs(context))
+    }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                showLiveToolDiffs = com.termfold.app.acp.AcpChatPrefs.showLiveToolDiffs(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     val openWorkspaceFile = LocalWorkspaceFileOpener.current
     val onOpenPath: (String) -> Unit = { path ->
         WorkspacePathResolver.resolve(context, path, workspaceDir)?.let { openWorkspaceFile(it) }
     }
 
-    // Follow the conversation while the user is at the bottom; someone who scrolled up to read
-    // is left alone until they come back down (or tap the button). Following reacts to the
-    // laid-out list, not to the data, so it also keeps up with a reply or a tool's output
-    // growing in place, and with rows that only reach their full height after layout.
+    val collapsedTools = remember { mutableStateMapOf<Long, Boolean>() }
+    val expandedToolFiles = remember { mutableStateMapOf<String, Boolean>() }
+    val toolContextFolds = remember { mutableStateMapOf<String, Set<String>>() }
+    LaunchedEffect(items) {
+        syncCompletedToolCollapse(items, collapsedTools)
+    }
+    // Rebuild when timeline or tool UI state changes. Do not wrap in derivedStateOf with a plain
+    // `items` list — that is not snapshot-tracked and new messages would not appear.
+    val lazyEntries = buildAgentChatTimelineEntries(
+        items = items,
+        collapsedTools = collapsedTools,
+        expandedToolFiles = expandedToolFiles,
+        contextFolds = toolContextFolds,
+        workspaceDir = workspaceDir,
+        showLiveToolDiffs = showLiveToolDiffs,
+        presentationCache = toolDiffPresentationCache,
+    )
+
+    // Follow the conversation while the user is at the bottom; debounce scroll-to-bottom so
+    // streaming diffs do not fight the UI thread on every layout tick.
     var following by remember { mutableStateOf(true) }
     var userDragging by remember { mutableStateOf(false) }
     LaunchedEffect(listState) {
@@ -1008,21 +1091,36 @@ private fun Timeline(
         }
     }
     LaunchedEffect(listState) {
-        androidx.compose.runtime.snapshotFlow { listState.canScrollForward to listState.isScrollInProgress }
-            .collect { (canScrollForward, scrolling) ->
-                // A fling that ends at the bottom picks following back up.
+        androidx.compose.runtime.snapshotFlow { listState.canScrollForward }
+            .distinctUntilChanged()
+            .collect { canScrollForward ->
                 if (!canScrollForward && !userDragging) following = true
-                if (following && canScrollForward && !scrolling) {
-                    runCatching {
-                        val count = listState.layoutInfo.totalItemsCount
-                        if (count > 0) listState.scrollToItem(count - 1)
-                        // Show the end of a long reply, not its first line.
-                        listState.scrollBy(100_000f)
-                    }
+            }
+    }
+    LaunchedEffect(lazyEntries.size, following) {
+        if (!following) return@LaunchedEffect
+        runCatching { listState.scrollAgentChatToBottom(animate = false) }
+    }
+    LaunchedEffect(listState, following) {
+        if (!following) return@LaunchedEffect
+        androidx.compose.runtime.snapshotFlow {
+            listState.layoutInfo.totalItemsCount
+        }
+            .debounce(80)
+            .distinctUntilChanged()
+            .collect {
+                if (following && !listState.isScrollInProgress) {
+                    runCatching { listState.scrollAgentChatToBottom(animate = false) }
                 }
             }
     }
 
+    val diffTextStyle = agentChatDiffLineTextStyle()
+    val pinnedToolFile by remember(lazyEntries) {
+        derivedStateOf {
+            pinnedToolFileSection(listState, lazyEntries)
+        }
+    }
     Box(modifier.fillMaxSize()) {
     LazyColumn(
         state = listState,
@@ -1040,46 +1138,135 @@ private fun Timeline(
                 )
             }
         }
-        items(items, key = { it.id }) { item ->
-            val isLast = item === items.last()
-            val dimmed = ghostFrom != null && item.id >= ghostFrom
-            val rowModifier = if (dimmed) Modifier.alpha(0.7f) else Modifier
-            Box(rowModifier) {
-                when (item) {
-                    is AcpItem.UserMessage -> {
-                        val lastUserId = items.filterIsInstance<AcpItem.UserMessage>().lastOrNull()?.id
-                        val showRedo = ghostFrom != null &&
-                            item.id == ghostFrom &&
-                            state.checkpoints.canRedo &&
-                            !state.checkpoints.wireResyncing
-                        val canUndo = state.checkpoints.undoableMessageIds.contains(item.id) &&
-                            !(state.agentBusy && item.id == lastUserId) &&
-                            (ghostFrom == null || item.id < ghostFrom) &&
-                            !showRedo
-                        val undoBusy = checkpointBusy is CheckpointBusy.Undo && checkpointBusy.messageId == item.id
-                        val redoBusy = checkpointBusy is CheckpointBusy.Redo && checkpointBusy.messageId == item.id
-                        val actionsLocked = checkpointBusy != null && !undoBusy && !redoBusy
-                        val actionsEnabled = !actionsLocked || undoBusy || redoBusy
-                        val showEdit = !(state.agentBusy && item.id == lastUserId) &&
-                            (ghostFrom == null || item.id <= ghostFrom)
-                        UserMessageRow(
+        val lastTimelineItemId = items.lastOrNull()?.id
+        val lastUserId = items.filterIsInstance<AcpItem.UserMessage>().lastOrNull()?.id
+        lazyEntries.forEach { entry ->
+            fun dimModifier(itemId: Long): Modifier =
+                if (ghostFrom != null && itemId >= ghostFrom) Modifier.alpha(0.7f) else Modifier
+            when (entry) {
+                is AgentChatLazyEntry.Standard -> item(key = entry.key) {
+                    val item = entry.item
+                    val isLast = item.id == lastTimelineItemId
+                    Box(dimModifier(item.id)) {
+                        when (item) {
+                            is AcpItem.UserMessage -> {
+                                val showRedo = ghostFrom != null &&
+                                    item.id == ghostFrom &&
+                                    state.checkpoints.canRedo &&
+                                    !state.checkpoints.wireResyncing
+                                val canUndo = state.checkpoints.undoableMessageIds.contains(item.id) &&
+                                    !(state.agentBusy && item.id == lastUserId) &&
+                                    (ghostFrom == null || item.id < ghostFrom) &&
+                                    !showRedo
+                                val undoBusy = checkpointBusy is CheckpointBusy.Undo && checkpointBusy.messageId == item.id
+                                val redoBusy = checkpointBusy is CheckpointBusy.Redo && checkpointBusy.messageId == item.id
+                                val actionsLocked = checkpointBusy != null && !undoBusy && !redoBusy
+                                val actionsEnabled = !actionsLocked || undoBusy || redoBusy
+                                val showEdit = !(state.agentBusy && item.id == lastUserId) &&
+                                    (ghostFrom == null || item.id <= ghostFrom)
+                                UserMessageRow(
+                                    item = item,
+                                    showEdit = showEdit,
+                                    onEdit = { if (!actionsLocked) onEditMessage(item) },
+                                    showUndo = canUndo || undoBusy,
+                                    undoLoading = undoBusy,
+                                    onUndo = { if (actionsEnabled && !undoBusy) undoConfirmId = item.id },
+                                    showRedo = showRedo || redoBusy,
+                                    redoLoading = redoBusy,
+                                    onRedo = { if (actionsEnabled && !redoBusy) client.redoCheckpoint(item.id) },
+                                    actionsEnabled = !actionsLocked || undoBusy || redoBusy,
+                                )
+                            }
+                            is AcpItem.AgentText -> Markdown(item.text, Modifier.fillMaxWidth(), onOpenPath = onOpenPath)
+                            is AcpItem.Thought -> ThoughtRow(item, live = isLast && state.agentBusy, onOpenPath = onOpenPath)
+                            is AcpItem.Plan -> PlanCard(item)
+                            is AcpItem.Notice -> NoticeRow(item.text)
+                            is AcpItem.ToolCall -> Unit
+                        }
+                    }
+                }
+                is AgentChatLazyEntry.ToolHeader -> item(key = entry.key) {
+                    val item = entry.item
+                    val collapsed = collapsedTools[item.id] == true
+                    Box(dimModifier(item.id)) {
+                        ToolCallHeaderRow(
                             item = item,
-                            showEdit = showEdit,
-                            onEdit = { if (!actionsLocked) onEditMessage(item) },
-                            showUndo = canUndo || undoBusy,
-                            undoLoading = undoBusy,
-                            onUndo = { if (actionsEnabled && !undoBusy) undoConfirmId = item.id },
-                            showRedo = showRedo || redoBusy,
-                            redoLoading = redoBusy,
-                            onRedo = { if (actionsEnabled && !redoBusy) client.redoCheckpoint(item.id) },
-                            actionsEnabled = !actionsLocked || undoBusy || redoBusy,
+                            workspaceDir = workspaceDir,
+                            collapsed = collapsed,
+                            onToggle = {
+                                collapsedTools[item.id] = !collapsed
+                            },
                         )
                     }
-                    is AcpItem.AgentText -> Markdown(item.text, Modifier.fillMaxWidth(), onOpenPath = onOpenPath)
-                    is AcpItem.Thought -> ThoughtRow(item, live = isLast && state.agentBusy, onOpenPath = onOpenPath)
-                    is AcpItem.ToolCall -> ToolCallRow(item, workspaceDir)
-                    is AcpItem.Plan -> PlanCard(item)
-                    is AcpItem.Notice -> NoticeRow(item.text)
+                }
+                is AgentChatLazyEntry.ToolFileSection -> {
+                    val fileUiKey = "${entry.item.id}:${entry.fileIndex}"
+                    val onFileHeaderClick = {
+                        expandedToolFiles[fileUiKey] = !entry.fileExpanded
+                    }
+                    val headerModifier = dimModifier(entry.item.id)
+                        .fillMaxWidth()
+                        .background(Palette.Bg)
+                        .offset(y = AgentChatToolFilePullUp)
+                    val body = entry.body
+                    val splitDiff = entry.fileExpanded &&
+                        body is AgentChatLazyEntry.ToolFileDiffBody.Lines &&
+                        body.rows.isNotEmpty()
+                    if (splitDiff) {
+                        item(key = entry.key) {
+                            ToolCallFileDiffHeader(
+                                path = entry.relPath,
+                                operationLabel = toolDiffOperationLabel(entry.diff.operation),
+                                added = entry.added,
+                                removed = entry.removed,
+                                expanded = entry.fileExpanded,
+                                onClick = onFileHeaderClick,
+                                modifier = headerModifier,
+                            )
+                        }
+                        item(key = "${entry.key}-lines") {
+                            Column(
+                                modifier = dimModifier(entry.item.id)
+                                    .fillMaxWidth()
+                                    .offset(y = AgentChatStickyDiffBodyPullUp),
+                                verticalArrangement = Arrangement.spacedBy(0.dp),
+                            ) {
+                                AgentChatToolFileDiffLines(
+                                    lines = body as AgentChatLazyEntry.ToolFileDiffBody.Lines,
+                                    textStyle = diffTextStyle,
+                                    toolContextFolds = toolContextFolds,
+                                )
+                            }
+                        }
+                    } else {
+                        item(key = entry.key) {
+                            Column(
+                                modifier = headerModifier,
+                                verticalArrangement = Arrangement.spacedBy(0.dp),
+                            ) {
+                                ToolCallFileDiffHeader(
+                                    path = entry.relPath,
+                                    operationLabel = toolDiffOperationLabel(entry.diff.operation),
+                                    added = entry.added,
+                                    removed = entry.removed,
+                                    expanded = entry.fileExpanded,
+                                    onClick = onFileHeaderClick,
+                                )
+                                AgentChatToolFileDiffBody(
+                                    body = body,
+                                    textStyle = diffTextStyle,
+                                    toolContextFolds = toolContextFolds,
+                                )
+                            }
+                        }
+                    }
+                }
+                is AgentChatLazyEntry.ToolDetail -> item(key = entry.key) {
+                    Box(
+                        dimModifier(entry.item.id).offset(y = (-4).dp),
+                    ) {
+                        ToolCallDetailBlock(entry.item)
+                    }
                 }
             }
         }
@@ -1090,6 +1277,23 @@ private fun Timeline(
             item(key = "working-$turn") { WorkingRow() }
         }
     }
+
+        pinnedToolFile?.let { section ->
+            val fileUiKey = "${section.item.id}:${section.fileIndex}"
+            ToolCallFileDiffHeader(
+                path = section.relPath,
+                operationLabel = toolDiffOperationLabel(section.diff.operation),
+                added = section.added,
+                removed = section.removed,
+                expanded = section.fileExpanded,
+                onClick = { expandedToolFiles[fileUiKey] = !section.fileExpanded },
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .background(Palette.Bg)
+                    .padding(start = 16.dp, end = 16.dp, top = 14.dp),
+            )
+        }
 
         // Back to the newest message after scrolling up to read.
         androidx.compose.animation.AnimatedVisibility(
@@ -1106,11 +1310,7 @@ private fun Timeline(
                     .clickable {
                         following = true
                         scope.launch {
-                            runCatching {
-                                val count = listState.layoutInfo.totalItemsCount
-                                if (count > 0) listState.animateScrollToItem(count - 1)
-                                listState.scrollBy(100_000f)
-                            }
+                            runCatching { listState.scrollAgentChatToBottom(animate = true) }
                         }
                     }
                     .padding(start = 12.dp, end = 14.dp, top = 8.dp, bottom = 8.dp),
@@ -1410,25 +1610,19 @@ private fun tickerText(line: String): String =
         .replace(Regex("""^(#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s*|```\S*\s*)"""), "")
         .trim()
 
-/** One line of the thinking ticker; [index] changes only when a new line begins. */
-private data class TickerLine(val index: Int, val text: String)
-
 /**
- * The agent's reasoning. Collapsed, it is a one-line ticker: the newest line slides in each time
- * the agent starts a new one. Expanded, the whole text shows and, while the agent is still
- * thinking, keeps the newest part in view as it streams.
+ * The agent's reasoning. Shown expanded by default; tap the header to collapse to a one-line preview.
+ * While the agent is still thinking, the expanded view follows the stream.
  */
 @OptIn(androidx.compose.animation.ExperimentalAnimationApi::class)
 @Composable
 private fun ThoughtRow(item: AcpItem.Thought, live: Boolean, onOpenPath: (String) -> Unit) {
-    var expanded by remember(item.id) { mutableStateOf(false) }
+    var collapsed by remember(item.id) { mutableStateOf(false) }
     val text = item.text.trim()
-    val lines = text.lines().filter { it.isNotBlank() }
-    val ticker = TickerLine(lines.size, lines.lastOrNull()?.trim().orEmpty())
     val scroll = rememberScrollState()
 
-    LaunchedEffect(expanded, live) {
-        if (expanded && live) {
+    LaunchedEffect(collapsed, live, text) {
+        if (!collapsed && live) {
             androidx.compose.runtime.snapshotFlow { scroll.maxValue }.collect { scroll.scrollTo(it) }
         }
     }
@@ -1437,8 +1631,8 @@ private fun ThoughtRow(item: AcpItem.Thought, live: Boolean, onOpenPath: (String
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .clickable { expanded = !expanded }
-            .padding(vertical = 4.dp),
+            .clickable { collapsed = !collapsed }
+            .padding(vertical = 2.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (live) {
@@ -1450,54 +1644,38 @@ private fun ThoughtRow(item: AcpItem.Thought, live: Boolean, onOpenPath: (String
                     color = Palette.TextFaint,
                 )
             }
-            Spacer(Modifier.width(10.dp))
-            if (!expanded) {
-                androidx.compose.animation.AnimatedContent(
-                    targetState = ticker,
-                    contentKey = { it.index },
-                    transitionSpec = {
-                        (
-                            androidx.compose.animation.slideInVertically(Motion.standard()) { it / 2 } +
-                                androidx.compose.animation.fadeIn(Motion.standard())
-                            ) togetherWith (
-                            androidx.compose.animation.slideOutVertically(Motion.quick()) { -it / 2 } +
-                                androidx.compose.animation.fadeOut(Motion.quick())
-                            )
-                    },
+            if (collapsed) {
+                Spacer(Modifier.width(10.dp))
+                val preview = text.lines().firstOrNull { it.isNotBlank() }?.let(::tickerText)?.trim() ?: ""
+                Text(
+                    text = com.termfold.app.ui.components.inline(preview),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.TextFaint,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
-                    label = "thoughtTicker",
-                ) { line ->
-                    Text(
-                        text = com.termfold.app.ui.components.inline(tickerText(line.text)),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Palette.TextFaint,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                )
             } else {
                 Spacer(Modifier.weight(1f))
             }
             Spacer(Modifier.width(6.dp))
             Icon(
-                imageVector = if (expanded) TermFoldIcons.ChevronDown else TermFoldIcons.ChevronRight,
+                imageVector = if (collapsed) TermFoldIcons.ChevronRight else TermFoldIcons.ChevronDown,
                 contentDescription = null,
                 tint = Palette.TextFaint,
                 modifier = Modifier.size(14.dp),
             )
         }
-        if (expanded) {
-            Spacer(Modifier.height(8.dp))
+        if (!collapsed) {
+            Spacer(Modifier.height(4.dp))
             Row(Modifier.fillMaxWidth().height(androidx.compose.foundation.layout.IntrinsicSize.Min)) {
                 Box(Modifier.width(2.dp).fillMaxHeight().background(Palette.Border))
-                Spacer(Modifier.width(12.dp))
-                // Reasoning is Markdown like the reply, rendered a step quieter so the answer
-                // still reads as the main thing.
+                Spacer(Modifier.width(10.dp))
                 Markdown(
                     text = text,
                     color = Palette.TextDim,
                     secondary = Palette.TextFaint,
-                    bodyStyle = MaterialTheme.typography.bodySmall.copy(lineHeight = 19.sp),
+                    bodyStyle = MaterialTheme.typography.bodySmall.copy(lineHeight = 17.sp),
                     modifier = Modifier.heightIn(max = 360.dp).verticalScroll(scroll),
                     onOpenPath = onOpenPath,
                 )
@@ -1506,73 +1684,130 @@ private fun ThoughtRow(item: AcpItem.Thought, live: Boolean, onOpenPath: (String
     }
 }
 
-/**
- * A tool call: what ran and how it went, with its output one tap away. Deliberately frameless;
- * a run of tool calls reads as a list of steps rather than a stack of boxes.
- */
 @Composable
-private fun ToolCallRow(item: AcpItem.ToolCall, workspaceDir: String) {
-    var open by remember(item.id) { mutableStateOf(false) }
-    val hasDetail = item.detail.isNotBlank()
-    val failed = item.status == "failed"
+private fun AgentChatToolFileDiffLines(
+    lines: AgentChatLazyEntry.ToolFileDiffBody.Lines,
+    textStyle: TextStyle,
+    toolContextFolds: androidx.compose.runtime.snapshots.SnapshotStateMap<String, Set<String>>,
+) {
+    lines.rows.forEach { row ->
+        GitDiffDisplayRow(
+            row = row,
+            textStyle = textStyle,
+            compact = true,
+            onExpandContextFold = { foldKey ->
+                val current = toolContextFolds[lines.foldKeyPrefix] ?: emptySet()
+                toolContextFolds[lines.foldKeyPrefix] = current + foldKey
+            },
+        )
+    }
+}
 
-    Column(
+@Composable
+private fun AgentChatToolFileDiffBody(
+    body: AgentChatLazyEntry.ToolFileDiffBody?,
+    textStyle: TextStyle,
+    toolContextFolds: androidx.compose.runtime.snapshots.SnapshotStateMap<String, Set<String>>,
+) {
+    when (body) {
+        null -> Unit
+        AgentChatLazyEntry.ToolFileDiffBody.Loading -> {
+            Box(
+                Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Palette.Accent)
+            }
+        }
+        AgentChatLazyEntry.ToolFileDiffBody.Binary -> {
+            Text(
+                stringResource(R.string.acp_tool_diff_binary),
+                style = MaterialTheme.typography.bodySmall,
+                color = Palette.TextFaint,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            )
+        }
+        is AgentChatLazyEntry.ToolFileDiffBody.Lines -> {
+            AgentChatToolFileDiffLines(body, textStyle, toolContextFolds)
+        }
+    }
+}
+
+@Composable
+private fun ToolCallHeaderRow(
+    item: AcpItem.ToolCall,
+    workspaceDir: String,
+    collapsed: Boolean,
+    onToggle: () -> Unit,
+) {
+    val label = toolLabel(item, workspaceDir)
+    val preview = label.lines().firstOrNull { it.isNotBlank() }?.trim() ?: label.trim()
+    val headerText = if (collapsed) preview else label.lineSequence().joinToString(" ").trim()
+    val failed = item.status == "failed"
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .clickable(enabled = hasDetail) { open = !open }
-            .padding(vertical = 4.dp),
+            .clickable(onClick = onToggle)
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = toolIcon(item.kind),
-                contentDescription = null,
-                tint = if (failed) Palette.Pink else Palette.TextFaint,
-                modifier = Modifier.size(15.dp),
-            )
-            Spacer(Modifier.width(10.dp))
-            Text(
-                text = toolLabel(item, workspaceDir),
-                style = MaterialTheme.typography.bodySmall.copy(fontFamily = Mono, fontSize = 12.5.sp),
-                color = if (failed) Palette.Pink else Palette.TextDim,
-                maxLines = if (open) 4 else 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            // A finished call needs no mark; a failed one is already red, a running one spins.
-            if (item.status != "completed" && item.status != "failed") {
-                Spacer(Modifier.width(10.dp))
-                CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = Palette.Accent)
-            }
-            if (hasDetail) {
-                Spacer(Modifier.width(6.dp))
-                Icon(
-                    imageVector = if (open) TermFoldIcons.ChevronDown else TermFoldIcons.ChevronRight,
-                    contentDescription = null,
-                    tint = Palette.TextFaint,
-                    modifier = Modifier.size(14.dp),
-                )
-            }
+        Icon(
+            imageVector = toolIcon(item.kind),
+            contentDescription = null,
+            tint = if (failed) Palette.Pink else Palette.TextFaint,
+            modifier = Modifier.size(15.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = headerText,
+            style = MaterialTheme.typography.bodySmall.copy(
+                fontFamily = Mono,
+                fontSize = 12.5.sp,
+                lineHeight = 17.sp,
+            ),
+            color = when {
+                failed -> Palette.Pink
+                collapsed -> Palette.TextFaint
+                else -> Palette.TextDim
+            },
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (item.status != "completed" && item.status != "failed") {
+            Spacer(Modifier.width(8.dp))
+            CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = Palette.Accent)
         }
-        if (open && hasDetail) {
-            Spacer(Modifier.height(8.dp))
-            SelectionContainer {
-                Text(
-                    text = item.detail.trim(),
-                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = Mono, fontSize = 12.sp, lineHeight = 17.sp),
-                    color = Palette.TermOut,
-                    softWrap = false,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Palette.Card)
-                        .heightIn(max = 280.dp)
-                        .verticalScroll(rememberScrollState())
-                        .horizontalScroll(rememberScrollState())
-                        .padding(10.dp),
-                )
-            }
-        }
+        Spacer(Modifier.width(6.dp))
+        Icon(
+            imageVector = if (collapsed) TermFoldIcons.ChevronRight else TermFoldIcons.ChevronDown,
+            contentDescription = null,
+            tint = Palette.TextFaint,
+            modifier = Modifier.size(14.dp),
+        )
+    }
+}
+
+@Composable
+private fun ToolCallDetailBlock(item: AcpItem.ToolCall) {
+    val hasFileDiffs = item.fileDiffs.isNotEmpty()
+    Spacer(Modifier.height(if (hasFileDiffs) 6.dp else 0.dp))
+    SelectionContainer {
+        Text(
+            text = item.detail.trim(),
+            style = MaterialTheme.typography.bodySmall.copy(fontFamily = Mono, fontSize = 12.sp, lineHeight = 17.sp),
+            color = Palette.TermOut,
+            softWrap = false,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(Palette.Card)
+                .heightIn(max = 200.dp)
+                .verticalScroll(rememberScrollState())
+                .horizontalScroll(rememberScrollState())
+                .padding(10.dp),
+        )
     }
 }
 
@@ -2941,7 +3176,7 @@ private fun PastSessionsDialog(
     var sessions by remember { mutableStateOf<List<com.termfold.app.acp.AcpPastSession>?>(null) }
     var query by remember { mutableStateOf("") }
     var confirming by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(Unit) { sessions = client.listPastSessions() }
+    LaunchedEffect(currentId) { sessions = client.listPastSessions() }
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = Palette.Card,
@@ -2963,13 +3198,6 @@ private fun PastSessionsDialog(
                     Text(stringResource(R.string.acp_cmd_new), style = MaterialTheme.typography.labelLarge, color = Palette.Text)
                 }
                 Spacer(Modifier.height(10.dp))
-                Text(
-                    stringResource(R.string.acp_history_explainer),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Palette.TextFaint,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
-                )
-                Spacer(Modifier.height(6.dp))
                 val list = sessions
                 if (!list.isNullOrEmpty()) {
                     SessionSearch(query, onQuery = { query = it })

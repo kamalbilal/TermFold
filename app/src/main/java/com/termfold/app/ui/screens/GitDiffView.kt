@@ -15,6 +15,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -34,13 +36,28 @@ fun gitDiffLineTextStyle(): TextStyle =
         lineHeight = 14.sp,
     )
 
+/** Same size as [gitDiffLineTextStyle], with trimmed line metrics for dense agent-chat diffs. */
+@Composable
+fun agentChatDiffLineTextStyle(): TextStyle =
+    gitDiffLineTextStyle().copy(
+        lineHeight = 12.sp,
+        lineHeightStyle = LineHeightStyle(
+            alignment = LineHeightStyle.Alignment.Center,
+            trim = LineHeightStyle.Trim.Both,
+        ),
+        platformStyle = PlatformTextStyle(includeFontPadding = false),
+    )
+
 @Composable
 fun GitDiffDisplayRow(
     row: DiffDisplayRow,
     textStyle: TextStyle,
     modifier: Modifier = Modifier,
     onExpandContextFold: ((String) -> Unit)? = null,
+    compact: Boolean = false,
 ) {
+    val contextVPad = if (compact) 0.dp else 6.dp
+    val hunkVPad = if (compact) 0.dp else 4.dp
     when (row) {
         is DiffDisplayRow.ContextFold -> {
             val label = stringResource(R.string.git_changes_expand_context, row.omittedLineCount)
@@ -54,7 +71,7 @@ fun GitDiffDisplayRow(
                     .clickable(enabled = onExpandContextFold != null) {
                         onExpandContextFold?.invoke(row.foldKey)
                     }
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                    .padding(horizontal = 12.dp, vertical = contextVPad),
             )
         }
         is DiffDisplayRow.HunkHeader -> Text(
@@ -64,9 +81,9 @@ fun GitDiffDisplayRow(
             modifier = modifier
                 .fillMaxWidth()
                 .background(GitDiffColors.hunkHeaderBg)
-                .padding(horizontal = 8.dp, vertical = 4.dp),
+                .padding(horizontal = 8.dp, vertical = hunkVPad),
         )
-        is DiffDisplayRow.Unified -> DiffUnifiedLine(row.prefix, row.cell, textStyle, modifier)
+        is DiffDisplayRow.Unified -> DiffUnifiedLine(row.prefix, row.cell, textStyle, modifier, compact)
         is DiffDisplayRow.Split -> SideBySideDiffRow(row.row, textStyle, modifier)
     }
 }
@@ -100,21 +117,26 @@ private fun DiffUnifiedLine(
     cell: SideBySideCell,
     textStyle: TextStyle,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
 ) {
     val (bg, fg) = cellColors(cell.kind)
+    val lineVPad = if (compact) 0.dp else 1.dp
+    val gutterWidth = if (compact) 28.dp else 36.dp
+    val prefixWidth = if (compact) 10.dp else 12.dp
     Row(
         modifier
             .fillMaxWidth()
             .background(bg)
-            .padding(vertical = 1.dp),
+            .padding(vertical = lineVPad),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             cell.lineNumber?.toString() ?: "",
             style = textStyle,
             color = GitDiffColors.gutterFg,
-            modifier = Modifier.width(36.dp).padding(start = 4.dp),
+            modifier = Modifier.width(gutterWidth).padding(start = if (compact) 2.dp else 4.dp),
         )
-        Text(prefix.toString(), style = textStyle, color = fg, modifier = Modifier.width(12.dp))
+        Text(prefix.toString(), style = textStyle, color = fg, modifier = Modifier.width(prefixWidth))
         Text(
             cell.text.ifEmpty { " " },
             style = textStyle,
