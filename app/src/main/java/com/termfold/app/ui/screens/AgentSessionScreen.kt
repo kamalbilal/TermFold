@@ -105,6 +105,7 @@ import com.termfold.app.ui.components.LaunchedWhileVisible
 import com.termfold.app.acp.AcpAgent
 import com.termfold.app.acp.AcpDrafts
 import com.termfold.app.acp.AcpBlock
+import com.termfold.app.acp.AcpImageBitmaps
 import com.termfold.app.acp.AcpClient
 import com.termfold.app.acp.AcpCommand
 import com.termfold.app.acp.AcpSetting
@@ -162,6 +163,7 @@ fun AgentSessionScreen(
     onToggleFiles: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val key = com.termfold.app.gitworkspace.SessionKeys.compose(folder.id, workspaceId, sessionId)
     val guestDir = com.termfold.app.gitworkspace.WorkspaceStore.guestPath(context, folder, workspaceId)
     if (guestDir == null) {
@@ -177,14 +179,24 @@ fun AgentSessionScreen(
         return
     }
     var branchLabel by remember(workspaceId, guestDir) { mutableStateOf<String?>(null) }
+    var branchDirty by remember(guestDir) { mutableStateOf(false) }
     var isGitWorkspace by remember(guestDir) { mutableStateOf(false) }
     var showBranchPicker by remember { mutableStateOf(false) }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     LaunchedEffect(guestDir) {
-        branchLabel = com.termfold.app.gitworkspace.GitWorkspace.readBranchFromHost(context, guestDir)
-            ?: com.termfold.app.gitworkspace.GitWorkspace.currentBranch(context, guestDir)
-        isGitWorkspace = com.termfold.app.gitworkspace.GitWorkspace.isGitRepository(context, guestDir)
+        val git = com.termfold.app.gitworkspace.GitWorkspace
+        branchLabel = git.readBranchFromHost(context, guestDir) ?: git.currentBranch(context, guestDir)
+        isGitWorkspace = git.isGitRepository(context, guestDir)
         if (isGitWorkspace) {
-            com.termfold.app.gitworkspace.GitWorkspace.ensureSessionCopyGitUpstream(context, guestDir)
+            git.ensureSessionCopyGitUpstream(context, guestDir)
+            syncWorkspaceGit(
+                context,
+                guestDir,
+                onBranch = { branchLabel = it },
+                onDirty = { branchDirty = it },
+            )
+        } else {
+            branchDirty = false
         }
     }
 
@@ -257,23 +269,48 @@ fun AgentSessionScreen(
     val openWorkspaceFile = LocalWorkspaceFileOpener.current
     val isCursor = resolved.id == "cursor"
 
-    LaunchedEffect(state.agentBusy, guestDir, isCursor) {
-        if (!isCursor) return@LaunchedEffect
-        if (agentWasBusy && !state.agentBusy) {
-            val hostBranch = com.termfold.app.gitworkspace.GitWorkspace.readBranchFromHost(context, guestDir)
-            if (hostBranch != null) branchLabel = hostBranch
+    LaunchedEffect(state.agentBusy, guestDir, isCursor, isGitWorkspace) {
+        if (!isCursor) {
+            agentWasBusy = state.agentBusy
+            return@LaunchedEffect
+        }
+        if (agentWasBusy && !state.agentBusy && isGitWorkspace) {
+            syncWorkspaceGit(
+                context,
+                guestDir,
+                onBranch = { branchLabel = it },
+                onDirty = { branchDirty = it },
+            )
         }
         agentWasBusy = state.agentBusy
     }
-    LaunchedEffect(guestDir, isCursor) {
-        if (!isCursor) return@LaunchedEffect
+    LaunchedEffect(guestDir, isCursor, isGitWorkspace) {
+        if (!isCursor || !isGitWorkspace) return@LaunchedEffect
         while (true) {
             delay(3_000)
-            val hostBranch = com.termfold.app.gitworkspace.GitWorkspace.readBranchFromHost(context, guestDir)
-            if (hostBranch != null && hostBranch != branchLabel) {
-                branchLabel = hostBranch
+            syncWorkspaceGit(
+                context,
+                guestDir,
+                onBranch = { branchLabel = it },
+                onDirty = { branchDirty = it },
+            )
+        }
+    }
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner, guestDir, isCursor, isGitWorkspace) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && isCursor && isGitWorkspace) {
+                scope.launch {
+                    syncWorkspaceGit(
+                context,
+                guestDir,
+                onBranch = { branchLabel = it },
+                onDirty = { branchDirty = it },
+            )
+                }
             }
         }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     Column(
@@ -436,6 +473,7 @@ fun AgentSessionScreen(
                 onRemoveQueued = { client.removeQueued(it) },
                 onCancel = { client.cancel() },
                 branchName = if (isCursor) branchLabel else null,
+                branchUncommitted = isCursor && isGitWorkspace && branchDirty,
                 onBranchClick = if (isCursor) { { showBranchPicker = true } } else null,
                 editMessage = editingMessage,
                 onCancelEdit = { editingMessage = null },
@@ -520,7 +558,17 @@ fun AgentSessionScreen(
                 com.termfold.app.gitworkspace.WorkspaceStore.goldenGuestPath(context, folder)
             },
             onDismiss = { showBranchPicker = false },
-            onSwitched = { branchLabel = it },
+            onSwitched = { branch ->
+                branchLabel = branch
+                scope.launch {
+                    syncWorkspaceGit(
+                context,
+                guestDir,
+                onBranch = { branchLabel = it },
+                onDirty = { branchDirty = it },
+            )
+                }
+            },
         )
     }
 
@@ -1530,17 +1578,7 @@ private fun ImageThumb(
     val targetPx = with(androidx.compose.ui.platform.LocalDensity.current) { size.dp.roundToPx() }
     val bitmap by androidx.compose.runtime.produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, image.base64, targetPx) {
         value = withContext(Dispatchers.Default) {
-            runCatching {
-                val bytes = Base64.decode(image.base64, Base64.DEFAULT)
-                val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-                var sample = 1
-                while (minOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= targetPx) sample *= 2
-                android.graphics.BitmapFactory.decodeByteArray(
-                    bytes, 0, bytes.size,
-                    android.graphics.BitmapFactory.Options().apply { inSampleSize = sample },
-                )?.asImageBitmap()
-            }.getOrNull()
+            AcpImageBitmaps.decodeThumbnail(image, targetPx)
         }
     }
     Box(
@@ -2070,6 +2108,7 @@ private fun Composer(
     onRemoveQueued: (Long) -> Unit,
     onCancel: () -> Unit,
     branchName: String? = null,
+    branchUncommitted: Boolean = false,
     onBranchClick: (() -> Unit)? = null,
     editMessage: AcpItem.UserMessage? = null,
     onCancelEdit: () -> Unit = {},
@@ -2470,6 +2509,7 @@ private fun Composer(
                         onClick = onBranchClick,
                         modifier = Modifier.weight(1f, fill = false),
                         truncate = true,
+                        uncommittedChanges = branchUncommitted,
                     )
                 } else {
                     Spacer(Modifier.weight(1f))
@@ -3022,6 +3062,17 @@ private fun SettingRow(label: String, description: String, selected: Boolean, on
 
 /** Commands the app handles itself rather than sending to the agent. */
 private const val MAX_COMPOSER_IMAGES = 20
+
+private suspend fun syncWorkspaceGit(
+    context: android.content.Context,
+    guestPath: String,
+    onBranch: (String) -> Unit,
+    onDirty: (Boolean) -> Unit,
+) {
+    val git = com.termfold.app.gitworkspace.GitWorkspace
+    git.readBranchFromHost(context, guestPath)?.let(onBranch)
+    onDirty(git.isDirty(context, guestPath))
+}
 
 private const val BUILTIN_RESUME = "resume"
 private const val BUILTIN_NEW = "new"

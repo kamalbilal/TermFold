@@ -11,7 +11,6 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.termfold.new"
         minSdk = 26
         // Pinned to 28 deliberately. Android only lets an app execute binaries from its own
         // nativeLibraryDir/data directory when the app targets API 28 or lower; at 29+ the process
@@ -51,6 +50,28 @@ android {
                 storePassword = storePass
                 keyAlias = "termfold"
                 keyPassword = secret("termfold.keyPassword", "TERMFOLD_KEY_PASSWORD") ?: storePass
+            }
+        }
+    }
+
+    val releaseSigning = signingConfigs.getByName("release")
+    val appReleaseKeyPresent = releaseSigning.storeFile != null
+
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("new") {
+            dimension = "distribution"
+            applicationId = "com.termfold.new"
+            resValue("string", "app_name", "TermFold Dev")
+        }
+        create("app") {
+            dimension = "distribution"
+            applicationId = "com.termfold.app"
+            resValue("string", "app_name", "TermFold")
+            // Same cert as release so `appDebug` / `appRelease` update the installed store app
+            // in place (data kept). Requires termfold-release.jks + passwords locally.
+            if (appReleaseKeyPresent) {
+                signingConfig = releaseSigning
             }
         }
     }

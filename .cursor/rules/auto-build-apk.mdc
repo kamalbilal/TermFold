@@ -9,6 +9,6 @@ After changing Android app code under `app/` (Kotlin, resources, manifest) that 
 
 1. Run `./gradlew :app:assembleDebug -Pandroid.aapt2FromMavenOverride=/root/projects/Termfold/.tools/aapt2` before finishing the turn.
 2. If the build fails, fix compile errors and rebuild.
-3. Mention the APK path in the response: `app/build/outputs/apk/debug/TermFold-debug.apk`.
+3. Mention both debug APK paths: `app/build/outputs/apk/new/debug/TermFold-new-debug.apk` (`com.termfold.new`) and `app/build/outputs/apk/app/debug/TermFold-app-debug.apk` (`com.termfold.app`, release-signed when `termfold-release.jks` is present).
 
 Skip the build for question-only replies, docs-only edits, or when the user explicitly says not to build.

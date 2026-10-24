@@ -147,15 +147,9 @@ fun FileManagerScreen(wide: Boolean, modifier: Modifier = Modifier, startGuestPa
     val scope = rememberCoroutineScope()
     val focus = LocalFocusManager.current
     val rootfs = remember { ShellPaths.rootfsDir(context) }
-    fun restoreCwd(): String {
-        val default = startGuestPath
-        if (!FileManagerPrefs.persistLocation(app)) return default
-        val saved = FileManagerPrefs.lastGuestPath(app) ?: return default
-        val guest = saved.ifBlank { "/" }
-        val folder = File(rootfs, guest.trimStart('/'))
-        return if (folder.isDirectory) guest else default
+    var cwd by remember {
+        mutableStateOf(FileManagerPrefs.resolveInitialGuestPath(app, rootfs, startGuestPath))
     }
-    var cwd by remember { mutableStateOf(restoreCwd()) }
     var showHidden by remember { mutableStateOf(FileManagerPrefs.showHidden(app)) }
     var sort by remember { mutableStateOf(FileManagerPrefs.sort(app)) }
     var grid by remember { mutableStateOf(FileManagerPrefs.gridView(app)) }

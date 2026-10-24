@@ -1,7 +1,5 @@
 package com.termfold.app.ui.screens
 
-import android.graphics.BitmapFactory
-import android.util.Base64
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
@@ -10,22 +8,17 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.Icon
-import androidx.compose.foundation.clickable
-import androidx.compose.ui.draw.clip
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -37,11 +30,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -53,7 +45,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.termfold.app.R
 import com.termfold.app.acp.AcpBlock
-import com.termfold.app.ui.components.BareIconButton
+import com.termfold.app.acp.AcpImageBitmaps
 import com.termfold.app.ui.theme.Motion
 import com.termfold.app.ui.theme.Palette
 import com.termfold.app.ui.theme.TermFoldIcons
@@ -62,11 +54,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val MAX_SCALE = 6f
-private const val PREVIEW_MAX_LONG_SIDE = 2560
 
 private sealed interface PreviewPicture {
     data object Loading : PreviewPicture
-    data class Ready(val bitmap: ImageBitmap, val width: Int, val height: Int) : PreviewPicture
+    data class Ready(val decoded: AcpImageBitmaps.Decoded) : PreviewPicture
     data object Failed : PreviewPicture
 }
 
@@ -82,7 +73,9 @@ internal fun AcpImagePreviewDialog(
     var box by remember { mutableStateOf(IntSize.Zero) }
 
     LaunchedEffect(image) {
-        picture = withContext(Dispatchers.Default) { decodeAcpImage(image) }
+        picture = withContext(Dispatchers.Default) {
+            AcpImageBitmaps.decodePreview(image)?.let { PreviewPicture.Ready(it) } ?: PreviewPicture.Failed
+        }
     }
 
     fun clamp(o: Offset, s: Float): Offset {
@@ -105,29 +98,18 @@ internal fun AcpImagePreviewDialog(
                 .fillMaxSize()
                 .background(Color(0xE6000000)),
         ) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(start = 6.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                BareIconButton(
-                    icon = TermFoldIcons.Close,
-                    contentDescription = stringResource(R.string.action_close),
-                    onClick = onDismiss,
-                )
-                Spacer(Modifier.width(4.dp))
-                Text(
-                    text = image.mimeType,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = Palette.Text,
-                )
-            }
+            Text(
+                text = image.mimeType,
+                style = MaterialTheme.typography.labelSmall,
+                color = Palette.TextFaint,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 12.dp),
+            )
 
             Box(
                 Modifier
                     .fillMaxSize()
-                    .padding(top = 48.dp)
                     .clipToBounds()
                     .onSizeChanged { box = it }
                     .pointerInput(image) {
@@ -172,7 +154,7 @@ internal fun AcpImagePreviewDialog(
                         enter = fadeIn(Motion.standard()) + scaleIn(Motion.slow(), initialScale = 0.96f),
                     ) {
                         Image(
-                            bitmap = p.bitmap,
+                            bitmap = p.decoded.bitmap,
                             contentDescription = stringResource(R.string.acp_attach_image),
                             contentScale = ContentScale.Fit,
                             modifier = Modifier
@@ -209,23 +191,4 @@ internal fun AcpImagePreviewDialog(
             }
         }
     }
-}
-
-private fun decodeAcpImage(image: AcpBlock.Image): PreviewPicture {
-    val bytes = runCatching { Base64.decode(image.base64, Base64.DEFAULT) }.getOrNull()
-        ?: return PreviewPicture.Failed
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return PreviewPicture.Failed
-    var sample = 1
-    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > PREVIEW_MAX_LONG_SIDE) sample *= 2
-    val bitmap = runCatching {
-        BitmapFactory.decodeByteArray(
-            bytes,
-            0,
-            bytes.size,
-            BitmapFactory.Options().apply { inSampleSize = sample },
-        )
-    }.getOrNull() ?: return PreviewPicture.Failed
-    return PreviewPicture.Ready(bitmap.asImageBitmap(), bounds.outWidth, bounds.outHeight)
 }

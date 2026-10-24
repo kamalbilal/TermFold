@@ -1,6 +1,7 @@
 package com.termfold.app.files
 
 import android.content.Context
+import java.io.File
 
 /** User choices for the built-in file manager (sort, layout, hidden files, last folder). */
 enum class FileSortBy {
@@ -57,6 +58,15 @@ object FileManagerPrefs {
 
     fun setLastGuestPath(context: Context, guestPath: String) {
         prefs(context).edit().putString(KEY_LAST_GUEST_PATH, guestPath).apply()
+    }
+
+    /** Opening the Files tab: home, or the last folder when [persistLocation] is on. */
+    fun resolveInitialGuestPath(context: Context, rootfs: File, default: String): String {
+        if (!persistLocation(context)) return default
+        val saved = lastGuestPath(context) ?: return default
+        val guest = saved.ifBlank { "/" }
+        val folder = File(rootfs, guest.trimStart('/'))
+        return if (folder.isDirectory) guest else default
     }
 
     private fun prefs(context: Context) =

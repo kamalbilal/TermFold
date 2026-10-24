@@ -899,17 +899,30 @@ fun BranchChip(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     truncate: Boolean = false,
+    uncommittedChanges: Boolean = false,
 ) {
-    Text(
-        text = label,
-        style = MaterialTheme.typography.labelSmall,
-        color = Palette.Accent,
-        maxLines = if (truncate) 1 else Int.MAX_VALUE,
-        overflow = if (truncate) TextOverflow.Ellipsis else TextOverflow.Clip,
+    Row(
         modifier = modifier
             .padding(end = 4.dp)
             .clickable(onClick = onClick),
-    )
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = Palette.Accent,
+            maxLines = if (truncate) 1 else Int.MAX_VALUE,
+            overflow = if (truncate) TextOverflow.Ellipsis else TextOverflow.Clip,
+            modifier = if (truncate) Modifier.weight(1f, fill = false) else Modifier,
+        )
+        if (uncommittedChanges) {
+            Text(
+                text = "*",
+                style = MaterialTheme.typography.labelSmall,
+                color = Palette.Accent,
+            )
+        }
+    }
 }
 
 /** Read-only branch label for session list rows (worktree copies). */
