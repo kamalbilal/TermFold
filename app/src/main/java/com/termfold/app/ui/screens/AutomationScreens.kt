@@ -105,6 +105,7 @@ fun WorkflowsSectionScreen(
     codingFolders: List<Folder>,
     onBack: () -> Unit,
     onOpenProject: (String) -> Unit,
+    onOpenProjectOptions: (String) -> Unit,
     onAddProject: () -> Unit,
     useGrid: Boolean,
     modifier: Modifier = Modifier,
@@ -115,6 +116,7 @@ fun WorkflowsSectionScreen(
             codingFolders = codingFolders,
             onBack = onBack,
             onOpenProject = onOpenProject,
+            onOpenProjectOptions = onOpenProjectOptions,
             onAddProject = onAddProject,
             useGrid = useGrid,
             modifier = modifier,
@@ -151,6 +153,7 @@ private fun WorkflowsAutomationListScreen(
     codingFolders: List<Folder>,
     onBack: () -> Unit,
     onOpenProject: (String) -> Unit,
+    onOpenProjectOptions: (String) -> Unit,
     onAddProject: () -> Unit,
     useGrid: Boolean,
     modifier: Modifier = Modifier,
@@ -186,7 +189,18 @@ private fun WorkflowsAutomationListScreen(
                         leading = {
                             LeadingTile(tint = folderTint(project.tint), icon = TermFoldIcons.Sparkle)
                         },
-                        trailing = { CountChevron(project.sessions.size) },
+                        trailing = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                CountChevron(project.sessions.size)
+                                BareIconButton(
+                                    icon = TermFoldIcons.More,
+                                    contentDescription = stringResource(R.string.cd_more),
+                                    onClick = { onOpenProjectOptions(project.id) },
+                                    size = 34,
+                                    tint = Palette.TextFaint,
+                                )
+                            }
+                        },
                         onClick = { onOpenProject(project.id) },
                     )
                     RowSpacer()
@@ -203,6 +217,8 @@ fun AutomationProjectDetailScreen(
     codingFolders: List<Folder>,
     onBack: () -> Unit,
     onOpenSession: (String) -> Unit,
+    onOpenSessionOptions: (String) -> Unit,
+    onOpenProjectOptions: () -> Unit,
     onAddSession: () -> Unit,
     onLinkFolder: (String?) -> Unit,
     modifier: Modifier = Modifier,
@@ -231,6 +247,11 @@ fun AutomationProjectDetailScreen(
                 label = stringResource(R.string.automation_new_session),
                 onClick = onAddSession,
                 compact = true,
+            )
+            BareIconButton(
+                icon = TermFoldIcons.More,
+                contentDescription = stringResource(R.string.cd_more),
+                onClick = onOpenProjectOptions,
             )
         }
         SectionTitle(
@@ -285,12 +306,21 @@ fun AutomationProjectDetailScreen(
                             LeadingTile(tint = folderTint(session.tint), icon = TermFoldIcons.Terminal)
                         },
                         trailing = {
-                            Icon(
-                                TermFoldIcons.ChevronRight,
-                                contentDescription = null,
-                                tint = Palette.TextFaint,
-                                modifier = Modifier.size(20.dp),
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                BareIconButton(
+                                    icon = TermFoldIcons.More,
+                                    contentDescription = stringResource(R.string.cd_more),
+                                    onClick = { onOpenSessionOptions(session.id) },
+                                    size = 34,
+                                    tint = Palette.TextFaint,
+                                )
+                                Icon(
+                                    TermFoldIcons.ChevronRight,
+                                    contentDescription = null,
+                                    tint = Palette.TextFaint,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
                         },
                         onClick = { onOpenSession(session.id) },
                     )

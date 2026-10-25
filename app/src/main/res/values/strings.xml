@@ -285,6 +285,16 @@
     <string name="settings_cursor_api_key_saved_hint">Key saved — paste a new key to replace</string>
     <string name="settings_cursor_api_key_clear">Remove key</string>
     <string name="settings_terminal">Terminal colours</string>
+    <string name="settings_device_storage">Device storage in terminal</string>
+    <string name="settings_device_storage_desc">With storage access, the whole phone shared storage tree is at /mnt/android (Downloads, Documents, and any folder you created there). Without it, use Link a folder — copies appear under /mnt/android/linked/. Copy into ~/projects with cp; do not run git or builds on these mounts.</string>
+    <string name="settings_device_storage_grant">Allow storage access</string>
+    <string name="settings_device_storage_link">Link a folder</string>
+    <string name="settings_device_storage_refresh">Refresh linked folders</string>
+    <string name="settings_device_storage_live">Live folders: %1$s</string>
+    <string name="settings_device_storage_live_none">Grant storage access for live Downloads/Documents, or link a folder below.</string>
+    <string name="settings_device_storage_linked">Linked: %1$s → %2$s</string>
+    <string name="settings_device_storage_remove">Remove</string>
+    <string name="settings_device_storage_syncing">Refreshing…</string>
     <string name="terminal_find_hint">Find in terminal</string>
     <string name="terminal_find_none">No matches</string>
     <string name="terminal_find_count">%1$d of %2$d</string>

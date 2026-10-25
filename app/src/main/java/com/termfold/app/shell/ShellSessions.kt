@@ -4,6 +4,10 @@ import android.content.Context
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Creates the PTY-backed shell sessions that [TerminalHost] owns.
@@ -14,6 +18,8 @@ import java.io.File
  * controlling tty, its own job control, and full-screen curses output.
  */
 object ShellSessions {
+
+    private val syncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Starts an interactive Debian shell rooted at [workspace], optionally running
@@ -36,6 +42,10 @@ object ShellSessions {
         // A session opened right after launch can beat the background refresh that installs the
         // script; installing here too (a few small files, skipped when unchanged) closes that gap.
         if (needsSetup) ShellSetup.install(context, ShellPaths.rootfsDir(context))
+
+        syncScope.launch {
+            runCatching { DeviceStorageMounts.syncAllMirrors(context) }
+        }
 
         val argv = buildList {
             add(ShellConfig.GUEST_SHELL)

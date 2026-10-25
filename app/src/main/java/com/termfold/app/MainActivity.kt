@@ -232,6 +232,13 @@ private sealed interface OptionsTarget {
     data class Session(override val folderId: String, val sessionId: String) : OptionsTarget
 }
 
+private sealed interface AutomationOptionsTarget {
+    val projectId: String
+
+    data class Project(override val projectId: String) : AutomationOptionsTarget
+    data class Session(override val projectId: String, val sessionId: String) : AutomationOptionsTarget
+}
+
 @Composable
 internal fun TermFoldRoot(viewModel: AppViewModel) {
     val data by viewModel.folders.collectAsStateWithLifecycle()
@@ -293,6 +300,8 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
     var optionsFor by remember { mutableStateOf<OptionsTarget?>(null) }
     var renameFolderId by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf<OptionsTarget?>(null) }
+    var automationOptionsFor by remember { mutableStateOf<AutomationOptionsTarget?>(null) }
+    var automationConfirmDelete by remember { mutableStateOf<AutomationOptionsTarget?>(null) }
     var addSessionFor by remember { mutableStateOf<String?>(null) }
     var pendingCursorAdd by remember { mutableStateOf<PendingCursorAdd?>(null) }
     var cursorBranchPick by remember { mutableStateOf(false) }
@@ -604,6 +613,9 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                             destination = Destination.Tabs
                         },
                         onOpenProject = { destination = Destination.AutomationProject(it) },
+                        onOpenProjectOptions = { projectId ->
+                            automationOptionsFor = AutomationOptionsTarget.Project(projectId)
+                        },
                         onAddProject = { newAutomationProject = true },
                         useGrid = windowWidth.isWide,
                         modifier = Modifier.windowInsetsPadding(
@@ -634,6 +646,12 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                             },
                             onOpenSession = { sessionId ->
                                 destination = Destination.AutomationSession(project.id, sessionId)
+                            },
+                            onOpenSessionOptions = { sessionId ->
+                                automationOptionsFor = AutomationOptionsTarget.Session(project.id, sessionId)
+                            },
+                            onOpenProjectOptions = {
+                                automationOptionsFor = AutomationOptionsTarget.Project(project.id)
                             },
                             onAddSession = { newAutomationSessionFor = project.id },
                             onLinkFolder = { folderId -> viewModel.linkAutomationFolder(project.id, folderId) },
@@ -937,6 +955,47 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
         sessionIdsFor = { id -> data.folder(id)?.sessions?.map { it.id }.orEmpty() },
     )
 
+    AutomationOptionsLayer(
+        optionsFor = automationOptionsFor,
+        onDismissOptions = { automationOptionsFor = null },
+        onRequestDelete = { automationConfirmDelete = it },
+        confirmDelete = automationConfirmDelete,
+        onDismissDelete = { automationConfirmDelete = null },
+        projectNameFor = { id -> automationData.project(id)?.name.orEmpty() },
+        sessionNameFor = { projectId, sessionId ->
+            automationData.session(projectId, sessionId)?.second?.name.orEmpty()
+        },
+        onConfirmDelete = { target ->
+            when (target) {
+                is AutomationOptionsTarget.Project -> {
+                    com.termfold.app.shell.SessionRegistry.closeAll(target.projectId)
+                    viewModel.removeAutomationProject(target.projectId)
+                    when (val d = destination) {
+                        is Destination.AutomationProject if d.projectId == target.projectId ->
+                            destination = Destination.WorkflowsSection(WorkflowsSection.AUTOMATION)
+                        is Destination.AutomationSession if d.projectId == target.projectId ->
+                            destination = Destination.WorkflowsSection(WorkflowsSection.AUTOMATION)
+                        else -> Unit
+                    }
+                }
+                is AutomationOptionsTarget.Session -> {
+                    com.termfold.app.shell.SessionRegistry.closeAll(target.projectId, target.sessionId)
+                    viewModel.removeAutomationSession(target.projectId, target.sessionId)
+                    val d = destination
+                    if (
+                        d is Destination.AutomationSession &&
+                        d.projectId == target.projectId &&
+                        d.sessionId == target.sessionId
+                    ) {
+                        destination = Destination.AutomationProject(target.projectId)
+                    }
+                }
+            }
+            automationConfirmDelete = null
+            automationOptionsFor = null
+        },
+    )
+
     pendingCursorAdd?.let { pending ->
         val folder = data.folder(pending.folderId)
         if (folder == null) {
@@ -1020,6 +1079,51 @@ private data class PendingCursorProvision(
     val workspaceId: String,
     val sessionId: String,
 )
+
+@Composable
+private fun AutomationOptionsLayer(
+    optionsFor: AutomationOptionsTarget?,
+    onDismissOptions: () -> Unit,
+    onRequestDelete: (AutomationOptionsTarget) -> Unit,
+    confirmDelete: AutomationOptionsTarget?,
+    onDismissDelete: () -> Unit,
+    projectNameFor: (String) -> String,
+    sessionNameFor: (String, String) -> String,
+    onConfirmDelete: (AutomationOptionsTarget) -> Unit,
+) {
+    optionsFor?.let { target ->
+        val title = when (target) {
+            is AutomationOptionsTarget.Project -> projectNameFor(target.projectId)
+            is AutomationOptionsTarget.Session -> sessionNameFor(target.projectId, target.sessionId)
+        }
+        OptionsSheet(
+            title = title,
+            actions = listOf(stringResource(R.string.action_remove) to { onRequestDelete(target) }),
+            onDismiss = onDismissOptions,
+        )
+    }
+
+    confirmDelete?.let { target ->
+        val isProject = target is AutomationOptionsTarget.Project
+        val title = when (target) {
+            is AutomationOptionsTarget.Project ->
+                stringResource(R.string.project_delete_title, projectNameFor(target.projectId))
+            is AutomationOptionsTarget.Session -> stringResource(R.string.action_remove)
+        }
+        val body = when (target) {
+            is AutomationOptionsTarget.Project -> stringResource(R.string.project_delete_body)
+            is AutomationOptionsTarget.Session ->
+                sessionNameFor(target.projectId, target.sessionId)
+        }
+        ConfirmDialog(
+            title = title,
+            body = body,
+            confirmLabel = if (isProject) stringResource(R.string.files_delete) else stringResource(R.string.action_remove),
+            onConfirm = { onConfirmDelete(target) },
+            onDismiss = onDismissDelete,
+        )
+    }
+}
 
 @Composable
 private fun OptionsLayer(

@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -47,6 +48,14 @@ import com.termfold.app.ui.components.GroupLabel
 import com.termfold.app.ui.theme.Mono
 import com.termfold.app.ui.theme.Palette
 import com.termfold.app.ui.theme.TermFoldIcons
+import android.Manifest
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import com.termfold.app.shell.DeviceStorageMirrorStore
+import com.termfold.app.shell.DeviceStorageMounts
+import kotlinx.coroutines.launch
 
 /** Settings tab: the state of the bundled Linux environment and app information. */
 @Composable
@@ -129,6 +138,8 @@ fun SettingsScreen(
 
             item { Spacer(Modifier.height(20.dp)) }
             item { GroupLabel(stringResource(R.string.settings_terminal)) }
+            item { DeviceStorageTerminalCard() }
+            item { Spacer(Modifier.height(12.dp)) }
             item { ThemePicker() }
 
             item { Spacer(Modifier.height(20.dp)) }
@@ -218,6 +229,120 @@ private fun AutomationNavMemoryCard(onOpen: () -> Unit) {
             modifier = Modifier.size(20.dp),
         )
     }
+}
+
+@Composable
+private fun DeviceStorageTerminalCard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var storageGranted by remember {
+        mutableStateOf(DeviceStorageMounts.hasStoragePermission(context))
+    }
+    val mirrors by DeviceStorageMirrorStore.mirrorsFlow(context).collectAsState(initial = emptyList())
+    var syncing by remember { mutableStateOf(false) }
+    val liveSummary = remember(storageGranted) {
+        if (storageGranted) DeviceStorageMounts.directStorageSummary(context) else null
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { ok -> storageGranted = ok }
+    val linkLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        DeviceStorageMounts.takePersistableTreePermission(context, uri)
+        scope.launch {
+            syncing = true
+            val label = DeviceStorageMounts.labelFromTreeUri(uri)
+            val mirror = DeviceStorageMirrorStore.add(context, label, uri)
+            runCatching { DeviceStorageMounts.syncMirror(context, mirror) }
+            syncing = false
+        }
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(Palette.Card)
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+    ) {
+        Text(
+            stringResource(R.string.settings_device_storage),
+            style = MaterialTheme.typography.bodyLarge,
+            color = Palette.Text,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            stringResource(R.string.settings_device_storage_desc),
+            style = MaterialTheme.typography.bodySmall,
+            color = Palette.TextDim,
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = liveSummary?.let {
+                stringResource(R.string.settings_device_storage_live, it)
+            } ?: stringResource(R.string.settings_device_storage_live_none),
+            style = MaterialTheme.typography.bodySmall.copy(fontFamily = Mono),
+            color = Palette.TextDim,
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (!storageGranted) {
+                SettingsTextButton(stringResource(R.string.settings_device_storage_grant)) {
+                    permissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+                }
+                Spacer(Modifier.width(8.dp))
+            }
+            SettingsTextButton(stringResource(R.string.settings_device_storage_link)) {
+                linkLauncher.launch(null)
+            }
+            Spacer(Modifier.width(8.dp))
+            SettingsTextButton(
+                if (syncing) stringResource(R.string.settings_device_storage_syncing)
+                else stringResource(R.string.settings_device_storage_refresh),
+            ) {
+                if (!syncing) {
+                    scope.launch {
+                        syncing = true
+                        runCatching { DeviceStorageMounts.syncAllMirrors(context) }
+                        syncing = false
+                    }
+                }
+            }
+        }
+        mirrors.forEach { mirror ->
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    stringResource(
+                        R.string.settings_device_storage_linked,
+                        mirror.label,
+                        mirror.guestPath(),
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.Text,
+                    modifier = Modifier.weight(1f),
+                )
+                SettingsTextButton(stringResource(R.string.settings_device_storage_remove)) {
+                    scope.launch { DeviceStorageMirrorStore.remove(context, mirror.id) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsTextButton(label: String, onClick: () -> Unit) {
+    Text(
+        label,
+        style = MaterialTheme.typography.labelLarge,
+        color = androidx.compose.ui.graphics.Color.White,
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(Palette.Accent.copy(alpha = 0.22f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+    )
 }
 
 @Composable

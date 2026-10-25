@@ -73,6 +73,7 @@ object ShellSetup {
             // drop /opt/node/bin, where Node and every agent CLI live. /etc/profile.d runs after
             // that reset, so the directory is put back at the front from there.
             writeIfChanged(File(rootfs, "etc/profile.d/00-termfold-path.sh"), PROFILE_PATH)
+            writeIfChanged(File(rootfs, "etc/profile.d/01-termfold-android-storage.sh"), ANDROID_STORAGE_HINT)
             // Replacements for groupadd/useradd, which fail without hard links (see the assets);
             // the setup script swaps them in before installing packages.
             for (tool in listOf("groupadd", "useradd")) {
@@ -129,6 +130,11 @@ object ShellSetup {
             writeIfChanged(file, updated)
         }
     }
+
+    private val ANDROID_STORAGE_HINT = """
+        |# Android shared storage (when enabled in TermFold Settings) appears under /mnt/android.
+        |# Example: ls /mnt/android && cp /mnt/android/Download/file.zip ~/projects/myapp/
+        |""".trimMargin().trimStart('\n')
 
     private val PROFILE_PATH = """
         |# TermFold: Cursor agent CLI (~/.local/bin) and Node-based tools (/opt/node/bin).

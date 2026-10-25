@@ -113,6 +113,9 @@ object ProotCommand {
             "-b", ShellPaths.hostsFile(context).absolutePath + ":/etc/hosts",
         )
 
+        DeviceStorageMounts.prootBindSpecs(context, DeviceStorageMirrorStore.mirrorsBlocking(context))
+            .forEach { (host, guest) -> command += listOf("-b", "$host:$guest") }
+
         // Stand-ins for the /proc files Android hides from apps. Programs that work out when a
         // process started (the native Codex CLI records its background server that way) read the
         // boot time from /proc/stat; others need /proc/version, /proc/uptime or the watch limit.
