@@ -25,4 +25,9 @@ object AcpSessions {
     fun close(key: String) {
         clients.remove(key)?.close()
     }
+
+    /** Background idle policy: kill agent process but keep client and timeline. */
+    fun disconnectIdle(key: String, noticeText: String) {
+        clients[key]?.disconnectIdle(noticeText)
+    }
 }

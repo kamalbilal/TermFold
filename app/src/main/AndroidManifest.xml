@@ -113,6 +113,10 @@
             android:name=".notify.StopSessionsReceiver"
             android:exported="false" />
 
+        <receiver
+            android:name=".notify.ToggleIdleDisconnectReceiver"
+            android:exported="false" />
+
     </application>
 
 </manifest>

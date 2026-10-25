@@ -271,6 +271,16 @@
     <string name="settings_agent_chat">Agent chat</string>
     <string name="settings_agent_chat_live_diffs">Show live file diffs</string>
     <string name="settings_agent_chat_live_diffs_desc">Update line-level diffs while a tool call is still running and keep file edit tools expanded in chat. When off, diffs appear after each tool finishes and completed tools stay collapsed.</string>
+    <string name="acp_sticky_user_message">Sticky user messages</string>
+    <string name="settings_idle_disconnect">Disconnect idle agents</string>
+    <string name="settings_idle_disconnect_desc">When TermFold is in the background and an agent chat is not working, stop its agent process after the timeout below. Your messages stay; reopening reconnects.</string>
+    <string name="settings_idle_disconnect_timeout">Idle timeout (minutes)</string>
+    <string name="settings_idle_disconnect_timeout_desc">Between %1$d and %2$d minutes.</string>
+    <string name="acp_idle_disconnect_notice">Agent stopped in the background to save battery. Send a message to reconnect.</string>
+    <string name="running_idle_disconnect_status_on">Idle agent disconnect: on</string>
+    <string name="running_idle_disconnect_status_off">Idle agent disconnect: off</string>
+    <string name="running_idle_disconnect_action_on">Turn off idle disconnect</string>
+    <string name="running_idle_disconnect_action_off">Turn on idle disconnect</string>
     <string name="acp_tool_diff_binary">Binary file (no text diff)</string>
     <string name="acp_tool_diff_added">New file</string>
     <string name="acp_tool_diff_deleted">Deleted</string>
@@ -337,6 +347,7 @@
     <string name="files_new_file">New file</string>
     <string name="files_new_folder">New folder</string>
     <string name="files_rename">Rename</string>
+    <string name="files_copy_filename">Copy filename</string>
     <string name="files_rename_title">Rename %1$s</string>
     <string name="files_create">Create</string>
     <string name="files_move">Move to…</string>

@@ -325,6 +325,20 @@ fun AgentSessionScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    var stickyUserMessagesEnabled by remember {
+        mutableStateOf(com.termfold.app.acp.AcpChatPrefs.stickyUserMessages(context))
+    }
+    val lifecycleOwnerForSticky = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwnerForSticky) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                stickyUserMessagesEnabled = com.termfold.app.acp.AcpChatPrefs.stickyUserMessages(context)
+            }
+        }
+        lifecycleOwnerForSticky.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwnerForSticky.lifecycle.removeObserver(observer) }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -337,6 +351,11 @@ fun AgentSessionScreen(
             iconUrl = resolved.iconUrl,
             onBack = onBack,
             live = state.agentBusy,
+            stickyUserMessagesEnabled = stickyUserMessagesEnabled,
+            onStickyUserMessagesEnabledChange = { enabled ->
+                stickyUserMessagesEnabled = enabled
+                com.termfold.app.acp.AcpChatPrefs.setStickyUserMessages(context, enabled)
+            },
             previewDir = previewProjectDirOverride ?: guestDir,
             onOpenGitChanges = if (isGitWorkspace) {
                 { com.termfold.app.gitworkspace.GitChanges.open(guestDir) }
@@ -403,6 +422,7 @@ fun AgentSessionScreen(
                         workspaceDir = guestDir,
                         client = client,
                         onEditMessage = { editingMessage = it },
+                        stickyUserMessagesEnabled = stickyUserMessagesEnabled,
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -717,6 +737,8 @@ private fun SessionHeader(
     onQuickOpen: (() -> Unit)? = null,
     previewDir: String? = null,
     onOpenGitChanges: (() -> Unit)? = null,
+    stickyUserMessagesEnabled: Boolean = true,
+    onStickyUserMessagesEnabledChange: (Boolean) -> Unit = {},
 ) {
     Column {
         Row(
@@ -786,6 +808,8 @@ private fun SessionHeader(
                 onRestart = onRestart,
                 onAutomationSessionMemory = onAutomationSessionMemory,
                 onAutomationNavMemory = onAutomationNavMemory,
+                stickyUserMessagesEnabled = stickyUserMessagesEnabled,
+                onStickyUserMessagesEnabledChange = onStickyUserMessagesEnabledChange,
             )
         }
         Box(
@@ -809,13 +833,9 @@ private fun SessionHeaderOverflowMenu(
     onRestart: (() -> Unit)?,
     onAutomationSessionMemory: (() -> Unit)?,
     onAutomationNavMemory: (() -> Unit)?,
+    stickyUserMessagesEnabled: Boolean = true,
+    onStickyUserMessagesEnabledChange: (Boolean) -> Unit = {},
 ) {
-    if (previewDir == null && onOpenGitChanges == null && onOpenTerminal == null && onHistory == null &&
-        onMcp == null && onRestart == null &&
-        onAutomationSessionMemory == null && onAutomationNavMemory == null
-    ) {
-        return
-    }
     var expanded by remember { mutableStateOf(false) }
     val previewState by Preview.state.collectAsStateWithLifecycle()
     Box {
@@ -832,6 +852,28 @@ private fun SessionHeaderOverflowMenu(
             containerColor = Palette.Card,
             shape = RoundedCornerShape(16.dp),
         ) {
+            DropdownMenuItem(
+                text = {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            stringResource(R.string.acp_sticky_user_message),
+                            color = Palette.Text,
+                            modifier = Modifier.weight(1f).padding(end = 12.dp),
+                        )
+                        androidx.compose.material3.Switch(
+                            checked = stickyUserMessagesEnabled,
+                            onCheckedChange = null,
+                        )
+                    }
+                },
+                onClick = {
+                    onStickyUserMessagesEnabledChange(!stickyUserMessagesEnabled)
+                },
+            )
             if (onOpenTerminal != null) {
                 val canCloseTabs = auxTerminalTabs.size > 1
                 if (auxTerminalTabs.isEmpty()) {
@@ -1174,6 +1216,34 @@ private fun pinnedToolFileSection(
     return entries.filterIsInstance<AgentChatLazyEntry.ToolFileSection>().find { it.key == sectionKey }
 }
 
+/**
+ * User message that should stick at the top for the current scroll position: the latest user
+ * prompt at or above the first visible row (each turn while scrolling up or down).
+ */
+private fun stickyUserMessageForViewport(
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    lazyEntries: List<AgentChatLazyEntry>,
+): AcpItem.UserMessage? {
+    val userSlots = lazyEntries.mapIndexedNotNull { index, entry ->
+        if (entry is AgentChatLazyEntry.Standard && entry.item is AcpItem.UserMessage) {
+            index to entry.item
+        } else {
+            null
+        }
+    }
+    if (userSlots.isEmpty()) return null
+    val visible = listState.layoutInfo.visibleItemsInfo
+    if (visible.isEmpty()) return null
+    val firstVisibleIndex = visible.minOf { it.index }
+    val message = userSlots.lastOrNull { it.first <= firstVisibleIndex }?.second ?: return null
+    val entryKey = "item-${message.id}"
+    val inList = visible.find { it.key == entryKey }
+    if (inList != null && inList.offset >= -4) {
+        return null
+    }
+    return message
+}
+
 private suspend fun androidx.compose.foundation.lazy.LazyListState.scrollAgentChatToBottom(animate: Boolean) {
     val count = layoutInfo.totalItemsCount
     if (count > 0) {
@@ -1189,6 +1259,7 @@ private fun Timeline(
     workspaceDir: String,
     client: AcpClient,
     onEditMessage: (AcpItem.UserMessage) -> Unit,
+    stickyUserMessagesEnabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val items = state.items
@@ -1297,6 +1368,13 @@ private fun Timeline(
             pinnedToolFileSection(listState, lazyEntries)
         }
     }
+    val lastUserId = items.filterIsInstance<AcpItem.UserMessage>().lastOrNull()?.id
+    val stickyUserMessage by remember(lazyEntries, stickyUserMessagesEnabled) {
+        derivedStateOf {
+            if (!stickyUserMessagesEnabled) return@derivedStateOf null
+            stickyUserMessageForViewport(listState, lazyEntries)
+        }
+    }
     Box(modifier.fillMaxSize()) {
     LazyColumn(
         state = listState,
@@ -1315,7 +1393,6 @@ private fun Timeline(
             }
         }
         val lastTimelineItemId = items.lastOrNull()?.id
-        val lastUserId = items.filterIsInstance<AcpItem.UserMessage>().lastOrNull()?.id
         lazyEntries.forEach { entry ->
             fun dimModifier(itemId: Long): Modifier =
                 if (ghostFrom != null && itemId >= ghostFrom) Modifier.alpha(0.7f) else Modifier
@@ -1479,6 +1556,59 @@ private fun Timeline(
                     .background(Palette.Bg)
                     .padding(start = 16.dp, end = 16.dp, top = 14.dp),
             )
+        }
+
+        stickyUserMessage?.let { pinnedUser ->
+            if (pinnedToolFile == null) {
+            val showRedo = ghostFrom != null &&
+                pinnedUser.id == ghostFrom &&
+                state.checkpoints.canRedo &&
+                !state.checkpoints.wireResyncing
+            val canUndo = state.checkpoints.undoableMessageIds.contains(pinnedUser.id) &&
+                !(state.agentBusy && pinnedUser.id == lastUserId) &&
+                (ghostFrom == null || pinnedUser.id < ghostFrom) &&
+                !showRedo
+            val undoBusy = checkpointBusy is CheckpointBusy.Undo && checkpointBusy.messageId == pinnedUser.id
+            val redoBusy = checkpointBusy is CheckpointBusy.Redo && checkpointBusy.messageId == pinnedUser.id
+            val actionsLocked = checkpointBusy != null && !undoBusy && !redoBusy
+            val actionsEnabled = !actionsLocked || undoBusy || redoBusy
+            val showEdit = !(state.agentBusy && pinnedUser.id == lastUserId) &&
+                (ghostFrom == null || pinnedUser.id <= ghostFrom)
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .background(Palette.Bg)
+                    .padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 8.dp),
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 168.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    UserMessageRow(
+                        item = pinnedUser,
+                        showEdit = showEdit,
+                        onEdit = { onEditMessage(pinnedUser) },
+                        showUndo = canUndo || undoBusy,
+                        undoLoading = undoBusy,
+                        onUndo = { undoConfirmId = pinnedUser.id },
+                        showRedo = showRedo || redoBusy,
+                        redoLoading = redoBusy,
+                        onRedo = { client.redoCheckpoint(pinnedUser.id) },
+                        actionsEnabled = !actionsLocked || undoBusy || redoBusy,
+                        onImageClick = { previewImage = it },
+                    )
+                }
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(Palette.BorderSoft),
+                )
+            }
+            }
         }
 
         // Back to the newest message after scrolling up to read.
@@ -1820,10 +1950,14 @@ private fun ThoughtRow(item: AcpItem.Thought, live: Boolean, onOpenPath: (String
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .clickable { collapsed = !collapsed }
             .padding(vertical = 2.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { collapsed = !collapsed },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             if (live) {
                 PulsingText(stringResource(R.string.acp_thinking))
             } else {
@@ -2025,28 +2159,32 @@ private fun PlanCard(item: AcpItem.Plan) {
             )
         }
         Spacer(Modifier.height(8.dp))
-        item.entries.forEach { entry ->
-            Row(
-                modifier = Modifier.padding(vertical = 4.dp),
-                verticalAlignment = Alignment.Top,
-            ) {
-                Box(Modifier.padding(top = 3.dp).size(14.dp), contentAlignment = Alignment.Center) {
-                    when (entry.status) {
-                        "completed" -> Icon(TermFoldIcons.Check, null, tint = Palette.Green, modifier = Modifier.size(14.dp))
-                        "in_progress" -> Box(Modifier.size(8.dp).clip(CircleShape).background(Palette.Accent))
-                        else -> Box(Modifier.size(9.dp).clip(CircleShape).border(1.3.dp, Palette.TextFaint, CircleShape))
+        SelectionContainer {
+            Column {
+                item.entries.forEach { entry ->
+                    Row(
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Box(Modifier.padding(top = 3.dp).size(14.dp), contentAlignment = Alignment.Center) {
+                            when (entry.status) {
+                                "completed" -> Icon(TermFoldIcons.Check, null, tint = Palette.Green, modifier = Modifier.size(14.dp))
+                                "in_progress" -> Box(Modifier.size(8.dp).clip(CircleShape).background(Palette.Accent))
+                                else -> Box(Modifier.size(9.dp).clip(CircleShape).border(1.3.dp, Palette.TextFaint, CircleShape))
+                            }
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            text = entry.text,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = when (entry.status) {
+                                "completed" -> Palette.TextFaint
+                                "in_progress" -> Palette.Text
+                                else -> Palette.TextDim
+                            },
+                        )
                     }
                 }
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    text = entry.text,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = when (entry.status) {
-                        "completed" -> Palette.TextFaint
-                        "in_progress" -> Palette.Text
-                        else -> Palette.TextDim
-                    },
-                )
             }
         }
     }

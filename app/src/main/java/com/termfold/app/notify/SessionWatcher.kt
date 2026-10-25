@@ -7,6 +7,8 @@ import android.os.Build
 import com.termfold.app.R
 import com.termfold.app.acp.AcpItem
 import com.termfold.app.acp.AcpSessions
+import com.termfold.app.acp.IdleDisconnectPrefs
+import com.termfold.app.acp.IdleDisconnectTracker
 import com.termfold.app.shell.TerminalHost
 import com.termfold.app.shell.TerminalWakeLock
 import kotlinx.coroutines.CoroutineScope
@@ -37,6 +39,7 @@ object SessionWatcher {
 
     private val acp = HashMap<String, AcpTrack>()
     private val shells = HashMap<String, ShellTrack>()
+    private val idleEligibleSince = HashMap<String, Long>()
     private var keepingAlive = false
 
     /** Ends every agent chat and shell and removes the notification: what its Stop button does. */
@@ -68,7 +71,37 @@ object SessionWatcher {
 
     /** Terminal Wake / Auto changed — refresh locks without waiting for the poll. */
     fun onKeepAliveInputsChanged(context: Context) {
-        runCatching { syncKeepAlive(context) }
+        runCatching {
+            KeepAliveService.invalidateShownSnapshot()
+            syncKeepAlive(context)
+        }
+    }
+
+    private fun maybeDisconnectIdleAgent(context: Context, key: String, client: com.termfold.app.acp.AcpClient, now: Long) {
+        if (!client.countsTowardLiveSessions()) {
+            idleEligibleSince.remove(key)
+            return
+        }
+        val result = IdleDisconnectTracker.tick(
+            IdleDisconnectTracker.TickInput(
+                nowMs = now,
+                policyEnabled = IdleDisconnectPrefs.enabled(context),
+                inForeground = AppPresence.inForeground,
+                agentNeedsWake = client.keepsCpuAwake(),
+                eligibleSinceMs = idleEligibleSince[key],
+                timeoutMs = IdleDisconnectPrefs.timeoutMs(context),
+            ),
+        )
+        if (result.eligibleSinceMs == null) {
+            idleEligibleSince.remove(key)
+        } else {
+            idleEligibleSince[key] = result.eligibleSinceMs
+        }
+        if (result.shouldDisconnect) {
+            AcpSessions.disconnectIdle(key, context.getString(R.string.acp_idle_disconnect_notice))
+            idleEligibleSince.remove(key)
+            acp.remove(key)
+        }
     }
 
     private data class KeepAliveSnapshot(
@@ -99,10 +132,22 @@ object SessionWatcher {
         // opposed to one just sitting at an idle prompt, which needs nothing kept alive.
         var active = 0
 
+        if (AppPresence.inForeground) {
+            idleEligibleSince.clear()
+        }
+
         // ---- Agent chats
         val clients = AcpSessions.all()
         acp.keys.retainAll(clients.keys)
+        idleEligibleSince.keys.retainAll(clients.keys)
         for ((key, client) in clients) {
+            if (!client.countsTowardLiveSessions()) {
+                continue
+            }
+            maybeDisconnectIdleAgent(context, key, client, now)
+            if (!client.countsTowardLiveSessions()) {
+                continue
+            }
             val state = client.state.value
             val track = acp.getOrPut(key) { AcpTrack(busy = state.agentBusy, permissionId = state.pendingPermission?.requestId) }
             live++
@@ -167,7 +212,7 @@ object SessionWatcher {
         }
 
         val terminalWake = TerminalWakeLock.anyTerminalWantsWakeLock(terminals)
-        val agentWake = AcpSessions.all().values.any { it.keepsCpuAwake() }
+        val agentWake = AcpSessions.all().values.any { it.countsTowardLiveSessions() && it.keepsCpuAwake() }
         syncKeepAlive(
             context,
             KeepAliveSnapshot(
@@ -182,10 +227,12 @@ object SessionWatcher {
     }
 
     private fun recomputeKeepAlive(): KeepAliveSnapshot {
-        var live = AcpSessions.all().size
+        var live = 0
         var active = 0
         var working = 0
         for (client in AcpSessions.all().values) {
+            if (!client.countsTowardLiveSessions()) continue
+            live++
             val state = client.state.value
             if (state.agentBusy) working++
             if (state.agentBusy || state.pendingPermission != null) active++
@@ -200,7 +247,7 @@ object SessionWatcher {
             }
         }
         val terminalWake = TerminalWakeLock.anyTerminalWantsWakeLock(terminals)
-        val agentWake = AcpSessions.all().values.any { it.keepsCpuAwake() }
+        val agentWake = AcpSessions.all().values.any { it.countsTowardLiveSessions() && it.keepsCpuAwake() }
         return KeepAliveSnapshot(
             live = live,
             active = active,
@@ -332,9 +379,14 @@ class KeepAliveService : android.app.Service() {
             val holdWakeLock: Boolean,
             val terminalWake: Boolean,
             val agentWake: Boolean,
+            val idleDisconnectEnabled: Boolean,
         )
 
         private var shown: Shown? = null
+
+        fun invalidateShownSnapshot() {
+            shown = null
+        }
 
         fun update(
             context: Context,
@@ -344,7 +396,8 @@ class KeepAliveService : android.app.Service() {
             terminalWake: Boolean,
             agentWake: Boolean,
         ) {
-            val snapshot = Shown(active, working, holdWakeLock, terminalWake, agentWake)
+            val idleDisconnectEnabled = IdleDisconnectPrefs.enabled(context)
+            val snapshot = Shown(active, working, holdWakeLock, terminalWake, agentWake, idleDisconnectEnabled)
             if (shown == snapshot) return
             shown = snapshot
             val intent = Intent(context, KeepAliveService::class.java)
@@ -377,6 +430,16 @@ class KeepAliveService : android.app.Service() {
                 Intent(context, StopSessionsReceiver::class.java).setAction(StopSessionsReceiver.ACTION),
                 android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
             )
+            val idleDisconnectOn = IdleDisconnectPrefs.enabled(context)
+            val toggleIdle = android.app.PendingIntent.getBroadcast(
+                context,
+                Notifier.RUNNING_ID + 2,
+                Intent(context, ToggleIdleDisconnectReceiver::class.java).setAction(ToggleIdleDisconnectReceiver.ACTION),
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+            )
+            val idleLine = context.getString(
+                if (idleDisconnectOn) R.string.running_idle_disconnect_status_on else R.string.running_idle_disconnect_status_off,
+            )
             return androidx.core.app.NotificationCompat.Builder(context, Notifier.CHANNEL_RUNNING)
                 .setSmallIcon(R.drawable.ic_stat_termfold)
                 .setColor(0xFFFF7A2E.toInt())
@@ -391,9 +454,21 @@ class KeepAliveService : android.app.Service() {
                     androidx.core.app.NotificationCompat.BigTextStyle()
                         .bigText(
                             wakeLockStatusLine(context, holdWakeLock, terminalWake, agentWake) + "\n" +
+                                idleLine + "\n" +
                                 if (active > 0) context.getString(R.string.running_active_text)
                                 else context.getString(R.string.running_idle_text),
                         ),
+                )
+                .addAction(
+                    0,
+                    context.getString(
+                        if (idleDisconnectOn) {
+                            R.string.running_idle_disconnect_action_on
+                        } else {
+                            R.string.running_idle_disconnect_action_off
+                        },
+                    ),
+                    toggleIdle,
                 )
                 .addAction(0, context.getString(R.string.running_stop), stop)
                 .setOngoing(true)
@@ -426,5 +501,19 @@ class StopSessionsReceiver : android.content.BroadcastReceiver() {
 
     companion object {
         const val ACTION = "com.termfold.app.action.STOP_SESSIONS"
+    }
+}
+
+/** Toggles whether idle ACP agents disconnect after background timeout. */
+class ToggleIdleDisconnectReceiver : android.content.BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != ACTION) return
+        val app = context.applicationContext
+        IdleDisconnectPrefs.setEnabled(app, !IdleDisconnectPrefs.enabled(app))
+        SessionWatcher.onKeepAliveInputsChanged(app)
+    }
+
+    companion object {
+        const val ACTION = "com.termfold.app.action.TOGGLE_IDLE_DISCONNECT"
     }
 }

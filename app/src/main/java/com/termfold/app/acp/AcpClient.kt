@@ -256,6 +256,15 @@ class AcpClient(
     @Volatile
     private var closedByUser = false
 
+    /** Agent process was torn down for background idle policy; timeline and client entry remain. */
+    @Volatile
+    private var idleDisconnected = false
+
+    fun isIdleDisconnected(): Boolean = idleDisconnected
+
+    /** False after [disconnectIdle]; used so keep-alive does not treat the chat as a live agent. */
+    fun countsTowardLiveSessions(): Boolean = !idleDisconnected
+
     /** True from [start] until the attempt ends in an error, so re-entering the screen is a no-op. */
     private val running = java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -274,6 +283,7 @@ class AcpClient(
         if (running.get() && !retryable) return
         running.set(true)
         closedByUser = false
+        idleDisconnected = false
         runCatching { process?.destroy() }
         process = null
         agentSessionId = null
@@ -428,7 +438,13 @@ class AcpClient(
             val said = recentStderr()
             val code = runCatching { process.waitFor(); process.exitValue() }.getOrNull()
             _state.update {
-                if (!closedByUser && it.phase != AcpPhase.ERROR && it.phase != AcpPhase.AUTH_REQUIRED) {
+                if (
+                    !closedByUser &&
+                    !idleDisconnected &&
+                    it.phase != AcpPhase.ERROR &&
+                    it.phase != AcpPhase.AUTH_REQUIRED &&
+                    it.phase != AcpPhase.CLOSED
+                ) {
                     it.copy(
                         phase = AcpPhase.ERROR,
                         errorDetail = "Agent process exited" + (code?.let { c -> " (code $c)" } ?: "") +
@@ -1061,7 +1077,12 @@ class AcpClient(
             if (compressAfterSummarize) {
                 maybeCompressContextAfterSummarize(messageId)
             }
-            _state.update { it.copy(agentBusy = false) }
+            _state.update { state ->
+                state.copy(
+                    agentBusy = false,
+                    items = finalizeOrphanInProgressTools(state.items, messageId),
+                )
+            }
             turnInFlight = false
             sendNextQueued()
             persistTimeline()
@@ -1141,6 +1162,23 @@ class AcpClient(
         if (optimisticUserMessageId != null) persistTimeline()
     }
 
+    /** Tools left `in_progress` after `session/prompt` returns never finished on the wire. */
+    private fun finalizeOrphanInProgressTools(items: List<AcpItem>, userMessageId: Long?): List<AcpItem> {
+        if (userMessageId == null) return items
+        val userIdx = items.indexOfFirst { it.id == userMessageId }
+        if (userIdx < 0) return items
+        var changed = false
+        val out = items.mapIndexed { idx, item ->
+            if (idx <= userIdx || item !is AcpItem.ToolCall || item.status != "in_progress") {
+                item
+            } else {
+                changed = true
+                item.copy(status = "completed")
+            }
+        }
+        return if (changed) out else items
+    }
+
     private suspend fun awaitPreTurnHash(messageId: Long): String? {
         pendingPreTurnCommits[messageId]?.await()?.let { return it }
         return _state.value.checkpoints.preTurnByMessageId[messageId]
@@ -1183,10 +1221,12 @@ class AcpClient(
      */
     fun keepsCpuAwake(): Boolean {
         val ui = _state.value
-        if (turnInFlight || ui.agentBusy || ui.pendingPermission != null) return true
-        return ui.items.any { item ->
-            item is AcpItem.ToolCall && item.status == "in_progress"
-        }
+        return AcpWakePolicy.keepsCpuAwake(
+            turnInFlight = turnInFlight,
+            agentBusy = ui.agentBusy,
+            pendingPermission = ui.pendingPermission != null,
+            wireResyncing = ui.checkpoints.wireResyncing,
+        )
     }
 
     /** The user pressed Stop: what is queued waits instead of going out on its own. */
@@ -1736,6 +1776,7 @@ class AcpClient(
     /** Ends the agent process. The stored agent install survives; only the process tree dies. */
     fun close() {
         closedByUser = true
+        idleDisconnected = false
         running.set(false)
         failPending("Session closed")
         runCatching { process?.destroy() }
@@ -1743,6 +1784,31 @@ class AcpClient(
         scope.launch {
             _state.update { it.copy(phase = AcpPhase.CLOSED, agentBusy = false) }
         }
+    }
+
+    /**
+     * Stops the agent after background idle timeout. Unlike [close], the session stays in
+     * [AcpSessions] and [start] can reconnect without clearing the timeline.
+     */
+    fun disconnectIdle(noticeText: String) {
+        if (idleDisconnected) return
+        idleDisconnected = true
+        running.set(false)
+        failPending("Idle disconnect")
+        runCatching { process?.destroy() }
+        process = null
+        writer = null
+        _state.update { state ->
+            state.copy(
+                phase = AcpPhase.CLOSED,
+                agentBusy = false,
+                pendingPermission = null,
+                queued = emptyList(),
+                items = state.items + AcpItem.Notice(nextItemId(), noticeText),
+            )
+        }
+        persistTimeline()
+        com.termfold.app.notify.SessionWatcher.onKeepAliveInputsChanged(context)
     }
 
     // --- Wire protocol --------------------------------------------------------------------------

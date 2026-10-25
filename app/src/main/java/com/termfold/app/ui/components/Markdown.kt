@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -75,6 +76,7 @@ fun Markdown(
         cache.getOrPut(s) { inline(s, onOpenPath) }
     }
     val body = bodyStyle ?: MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp)
+    SelectionContainer {
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         blocks.forEach { block ->
             when (block) {
@@ -145,6 +147,7 @@ fun Markdown(
                 )
             }
         }
+    }
     }
 }
 

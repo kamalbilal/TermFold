@@ -40,6 +40,8 @@ import androidx.compose.ui.unit.dp
 import com.termfold.app.BuildConfig
 import com.termfold.app.R
 import com.termfold.app.acp.AcpChatPrefs
+import com.termfold.app.acp.IdleDisconnectPrefs
+import com.termfold.app.notify.SessionWatcher
 import com.termfold.app.acp.CursorAcpPrefs
 import com.termfold.app.core.AppViewModel
 import com.termfold.app.core.ShellState
@@ -349,6 +351,10 @@ private fun SettingsTextButton(label: String, onClick: () -> Unit) {
 private fun AgentChatCard() {
     val context = LocalContext.current
     var liveDiffs by remember { androidx.compose.runtime.mutableStateOf(AcpChatPrefs.showLiveToolDiffs(context)) }
+    var idleDisconnect by remember { androidx.compose.runtime.mutableStateOf(IdleDisconnectPrefs.enabled(context)) }
+    var timeoutDraft by remember {
+        androidx.compose.runtime.mutableStateOf(IdleDisconnectPrefs.timeoutMinutes(context).toString())
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -368,6 +374,56 @@ private fun AgentChatCard() {
             actionLabel = "",
             onAction = {},
         )
+        Spacer(Modifier.height(8.dp))
+        SwitchRow(
+            title = stringResource(R.string.settings_idle_disconnect),
+            body = stringResource(R.string.settings_idle_disconnect_desc),
+            checked = idleDisconnect,
+            onChange = {
+                idleDisconnect = it
+                IdleDisconnectPrefs.setEnabled(context, it)
+                SessionWatcher.onKeepAliveInputsChanged(context.applicationContext)
+            },
+            warning = null,
+            actionLabel = "",
+            onAction = {},
+        )
+        if (idleDisconnect) {
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = stringResource(R.string.settings_idle_disconnect_timeout),
+                style = MaterialTheme.typography.titleSmall,
+                color = Palette.Text,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = stringResource(
+                    R.string.settings_idle_disconnect_timeout_desc,
+                    IdleDisconnectPrefs.MIN_TIMEOUT_MINUTES,
+                    IdleDisconnectPrefs.MAX_TIMEOUT_MINUTES,
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = Palette.TextDim,
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = timeoutDraft,
+                onValueChange = { raw ->
+                    timeoutDraft = raw.filter { it.isDigit() }.take(3)
+                },
+                singleLine = true,
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(8.dp))
+            SettingsTextButton(stringResource(R.string.action_save)) {
+                val minutes = timeoutDraft.toIntOrNull() ?: IdleDisconnectPrefs.DEFAULT_TIMEOUT_MINUTES
+                val clamped = IdleDisconnectPrefs.clampMinutes(minutes)
+                timeoutDraft = clamped.toString()
+                IdleDisconnectPrefs.setTimeoutMinutes(context, clamped)
+                SessionWatcher.onKeepAliveInputsChanged(context.applicationContext)
+            }
+        }
     }
 }
 

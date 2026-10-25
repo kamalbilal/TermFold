@@ -28,6 +28,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.toClipEntry
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
@@ -903,6 +905,8 @@ private fun TreeRowView(
     onOpenWith: () -> Unit,
     onClick: () -> Unit,
 ) {
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
   Box {
     Row(
         modifier = Modifier
@@ -965,6 +969,14 @@ private fun TreeRowView(
         } else {
             MenuEntry(TermFoldIcons.Share, stringResource(R.string.fm_share), onShare)
             MenuEntry(TermFoldIcons.OpenExternal, stringResource(R.string.fm_open_with), onOpenWith)
+        }
+        MenuEntry(TermFoldIcons.Copy, stringResource(R.string.files_copy_filename)) {
+            onDismissMenu()
+            scope.launch {
+                clipboard.setClipEntry(
+                    android.content.ClipData.newPlainText("filename", row.file.name).toClipEntry(),
+                )
+            }
         }
         MenuEntry(TermFoldIcons.FolderExport, stringResource(R.string.fm_export), onExport)
         MenuEntry(TermFoldIcons.FilePlus, stringResource(R.string.files_new_file), onNewFile)
