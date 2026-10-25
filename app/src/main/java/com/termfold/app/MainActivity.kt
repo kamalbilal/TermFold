@@ -91,6 +91,15 @@ import com.termfold.app.ui.screens.FileManagerScreen
 import com.termfold.app.ui.screens.FilesWorkspace
 import com.termfold.app.ui.screens.LocalWorkspaceEditorOpen
 import com.termfold.app.ui.screens.FolderDetailScreen
+import com.termfold.app.automation.AutomationPaths
+import com.termfold.app.core.Folder
+import com.termfold.app.core.Session
+import com.termfold.app.gitworkspace.WorkspaceIds
+import com.termfold.app.ui.screens.AutomationAgentSessionScreen
+import com.termfold.app.ui.screens.AutomationProjectDetailScreen
+import com.termfold.app.ui.screens.WorkflowsScreen
+import com.termfold.app.ui.screens.WorkflowsSection
+import com.termfold.app.ui.screens.WorkflowsSectionScreen
 import com.termfold.app.ui.screens.FoldersScreen
 import com.termfold.app.ui.screens.OptionsSheet
 import com.termfold.app.ui.screens.PresetChips
@@ -175,13 +184,17 @@ open class TermFoldActivity : ComponentActivity() {
 
 
 /** Destinations. Plain state is enough for a graph this shallow. */
-private sealed interface Destination {    data object Tabs : Destination
+private sealed interface Destination {
+    data object Tabs : Destination
     data class Folder(val folderId: String) : Destination
     data class Terminal(
         val folderId: String,
         val sessionId: String,
         val workspaceId: String = com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN,
     ) : Destination
+    data class WorkflowsSection(val section: com.termfold.app.ui.screens.WorkflowsSection) : Destination
+    data class AutomationProject(val projectId: String) : Destination
+    data class AutomationSession(val projectId: String, val sessionId: String) : Destination
 }
 
 /** How deep a destination sits, used to give the transitions a consistent direction. */
@@ -189,6 +202,9 @@ private fun Destination.depth(): Int = when (this) {
     Destination.Tabs -> 0
     is Destination.Folder -> 1
     is Destination.Terminal -> 2
+    is Destination.WorkflowsSection -> 1
+    is Destination.AutomationProject -> 2
+    is Destination.AutomationSession -> 3
 }
 
 /**
@@ -219,6 +235,7 @@ private sealed interface OptionsTarget {
 @Composable
 internal fun TermFoldRoot(viewModel: AppViewModel) {
     val data by viewModel.folders.collectAsStateWithLifecycle()
+    val automationData by viewModel.automation.collectAsStateWithLifecycle()
     val shell by viewModel.shell.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
@@ -267,6 +284,8 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
     var previewMax by rememberSaveable { mutableStateOf(false) }
     var tab by remember { mutableStateOf(NavTab.FOLDERS) }
     var newProject by remember { mutableStateOf(false) }
+    var newAutomationProject by remember { mutableStateOf(false) }
+    var newAutomationSessionFor by remember { mutableStateOf<String?>(null) }
     val job by viewModel.job.collectAsStateWithLifecycle()
     var searchOpen by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
@@ -406,6 +425,26 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
             val workspaceFolder = when (val d = destination) {
                 is Destination.Folder -> data.folder(d.folderId)
                 is Destination.Terminal -> data.folder(d.folderId)
+                is Destination.AutomationSession -> {
+                    automationData.session(d.projectId, d.sessionId)?.let { (project, session) ->
+                        Folder(
+                            id = project.id,
+                            name = project.name,
+                            path = AutomationPaths.hostSessionDir(context, project.id, session.id).absolutePath,
+                            tint = project.tint,
+                            sessions = listOf(
+                                Session(
+                                    id = session.id,
+                                    name = session.name,
+                                    command = "",
+                                    tint = session.tint,
+                                    acpAgentId = session.acpAgentId,
+                                    workspaceId = WorkspaceIds.GOLDEN,
+                                ),
+                            ),
+                        )
+                    }
+                }
                 else -> null
             }
             val filesRootHostPath = when (val d = destination) {
@@ -477,6 +516,15 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                                     searchOpen = searchOpen,
                                     onMore = { tab = NavTab.SETTINGS },
                                     useGrid = windowWidth.isWide,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+
+                                NavTab.WORKFLOWS -> WorkflowsScreen(
+                                    onOpenSection = { section ->
+                                        destination = Destination.WorkflowsSection(section)
+                                    },
+                                    useGrid = windowWidth.isWide,
+                                    modifier = Modifier.fillMaxSize(),
                                 )
 
                                 NavTab.FILES -> FileManagerScreen(wide = windowWidth.isWide)
@@ -500,6 +548,7 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                                 onSelect = { selected ->
                                     tab = selected
                                     if (selected != NavTab.FOLDERS) searchOpen = false
+                                    destination = Destination.Tabs
                                 },
                             )
                         }
@@ -537,6 +586,89 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                                     OptionsTarget.Session(folder.id, sessionId)
                                 }
                             },
+                        )
+                    }
+                }
+
+                is Destination.WorkflowsSection -> {
+                    BackHandler {
+                        tab = NavTab.WORKFLOWS
+                        destination = Destination.Tabs
+                    }
+                    WorkflowsSectionScreen(
+                        section = current.section,
+                        projects = automationData.projects,
+                        codingFolders = data.folders,
+                        onBack = {
+                            tab = NavTab.WORKFLOWS
+                            destination = Destination.Tabs
+                        },
+                        onOpenProject = { destination = Destination.AutomationProject(it) },
+                        onAddProject = { newAutomationProject = true },
+                        useGrid = windowWidth.isWide,
+                        modifier = Modifier.windowInsetsPadding(
+                            WindowInsets.safeDrawing.only(
+                                WindowInsetsSides.Top + WindowInsetsSides.End,
+                            ),
+                        ),
+                    )
+                }
+
+                is Destination.AutomationProject -> {
+                    val project = automationData.project(current.projectId)
+                    if (project == null) {
+                        LaunchedEffect(current.projectId) {
+                            destination = Destination.WorkflowsSection(WorkflowsSection.AUTOMATION)
+                        }
+                    } else {
+                        BackHandler {
+                            tab = NavTab.WORKFLOWS
+                            destination = Destination.WorkflowsSection(WorkflowsSection.AUTOMATION)
+                        }
+                        AutomationProjectDetailScreen(
+                            project = project,
+                            codingFolders = data.folders,
+                            onBack = {
+                                tab = NavTab.WORKFLOWS
+                                destination = Destination.WorkflowsSection(WorkflowsSection.AUTOMATION)
+                            },
+                            onOpenSession = { sessionId ->
+                                destination = Destination.AutomationSession(project.id, sessionId)
+                            },
+                            onAddSession = { newAutomationSessionFor = project.id },
+                            onLinkFolder = { folderId -> viewModel.linkAutomationFolder(project.id, folderId) },
+                            wide = windowWidth.isWide,
+                            modifier = Modifier.windowInsetsPadding(
+                                WindowInsets.safeDrawing.only(
+                                    WindowInsetsSides.Top + WindowInsetsSides.End,
+                                ),
+                            ),
+                        )
+                    }
+                }
+
+                is Destination.AutomationSession -> {
+                    val pair = automationData.session(current.projectId, current.sessionId)
+                    if (pair == null) {
+                        LaunchedEffect(current.projectId, current.sessionId) {
+                            destination = Destination.AutomationProject(current.projectId)
+                        }
+                    } else {
+                        val (project, session) = pair
+                        val linked = project.linkedFolderId?.let { data.folder(it) }
+                        BackHandler { destination = Destination.AutomationProject(project.id) }
+                        AutomationAgentSessionScreen(
+                            project = project,
+                            session = session,
+                            linkedFolder = linked,
+                            onBack = { destination = Destination.AutomationProject(project.id) },
+                            filesOpen = filesOpen,
+                            onToggleFiles = { filesOpen = !filesOpen },
+                            modifier = Modifier.windowInsetsPadding(
+                                WindowInsets.safeDrawing.only(
+                                    WindowInsetsSides.Top + WindowInsetsSides.End,
+                                ),
+                            ),
                         )
                     }
                 }
@@ -717,6 +849,42 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
     }
     }
 
+    if (newAutomationProject) {
+        var name by remember { mutableStateOf("") }
+        TextPromptDialog(
+            title = stringResource(R.string.workflows_new),
+            value = name,
+            onValueChange = { name = it },
+            placeholder = stringResource(R.string.project_name_hint),
+            onConfirm = {
+                if (name.isNotBlank()) {
+                    viewModel.createAutomationProject(name.trim()) { id ->
+                        destination = Destination.AutomationProject(id)
+                    }
+                }
+                newAutomationProject = false
+            },
+            onDismiss = { newAutomationProject = false },
+        )
+    }
+    newAutomationSessionFor?.let { projectId ->
+        var name by remember(projectId) { mutableStateOf("") }
+        TextPromptDialog(
+            title = stringResource(R.string.automation_new_session),
+            value = name,
+            onValueChange = { name = it },
+            placeholder = stringResource(R.string.session_name_hint),
+            onConfirm = {
+                if (name.isNotBlank()) {
+                    viewModel.addAutomationSession(projectId, name.trim()) { sessionId ->
+                        destination = Destination.AutomationSession(projectId, sessionId)
+                    }
+                }
+                newAutomationSessionFor = null
+            },
+            onDismiss = { newAutomationSessionFor = null },
+        )
+    }
     if (newProject) {
         com.termfold.app.ui.screens.NewProjectDialog(
             onCreateEmpty = { name ->

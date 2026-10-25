@@ -6,6 +6,11 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.termfold.app.backup.TermFoldBackup
+import com.termfold.app.automation.AutomationPaths
+import com.termfold.app.automation.AutomationProject
+import com.termfold.app.automation.AutomationSession
+import com.termfold.app.automation.AutomationStorage
+import com.termfold.app.data.AutomationStore
 import com.termfold.app.data.FolderStore
 import com.termfold.app.shell.DistroMigration
 import com.termfold.app.shell.Projects
@@ -61,9 +66,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private val store = FolderStore(application)
+    private val automationStore = AutomationStore(application)
 
     val folders: StateFlow<AppData> = store.data
         .stateIn(viewModelScope, SharingStarted.Eagerly, AppData())
+
+    val automation: StateFlow<com.termfold.app.automation.AutomationData> = automationStore.data
+        .stateIn(viewModelScope, SharingStarted.Eagerly, com.termfold.app.automation.AutomationData())
 
     private val _shell = MutableStateFlow(ShellProgress())
     val shell: StateFlow<ShellProgress> = _shell.asStateFlow()
@@ -472,4 +481,87 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         Session(Ids.new(), "OpenCode", "opencode", tint = 1),
         Session(Ids.new(), "Pi", "pi", tint = 2),
     )
+
+    fun createAutomationProject(name: String, onCreated: (String) -> Unit = {}) {
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val id = Ids.new()
+            withContext(Dispatchers.IO) {
+                AutomationPaths.hostProjectDir(app, id).mkdirs()
+            }
+            val project = AutomationProject(
+                id = id,
+                name = name.trim().ifEmpty { "Automation" },
+                tint = automation.value.projects.size % 6,
+            )
+            automationStore.update { data -> data.copy(projects = data.projects + project) }
+            onCreated(id)
+        }
+    }
+
+    fun addAutomationSession(projectId: String, name: String, onCreated: (String) -> Unit = {}) {
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val sessionId = Ids.new()
+            withContext(Dispatchers.IO) {
+                AutomationStorage.ensureSessionTree(app, projectId, sessionId)
+            }
+            automationStore.update { data ->
+                data.copy(
+                    projects = data.projects.map { project ->
+                        if (project.id != projectId) return@map project
+                        val session = AutomationSession(
+                            id = sessionId,
+                            name = name.trim().ifEmpty { "Session" },
+                            tint = project.sessions.size % 6,
+                        )
+                        project.copy(sessions = project.sessions + session)
+                    },
+                )
+            }
+            onCreated(sessionId)
+        }
+    }
+
+    fun linkAutomationFolder(projectId: String, folderId: String?) {
+        viewModelScope.launch {
+            automationStore.update { data ->
+                data.copy(
+                    projects = data.projects.map { project ->
+                        if (project.id != projectId) project
+                        else project.copy(linkedFolderId = folderId)
+                    },
+                )
+            }
+        }
+    }
+
+    fun removeAutomationProject(projectId: String) {
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            automationStore.update { data ->
+                data.copy(projects = data.projects.filterNot { it.id == projectId })
+            }
+            withContext(Dispatchers.IO) {
+                AutomationPaths.hostProjectDir(app, projectId).deleteRecursively()
+            }
+        }
+    }
+
+    fun removeAutomationSession(projectId: String, sessionId: String) {
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            automationStore.update { data ->
+                data.copy(
+                    projects = data.projects.map { project ->
+                        if (project.id != projectId) return@map project
+                        project.copy(sessions = project.sessions.filterNot { it.id == sessionId })
+                    },
+                )
+            }
+            withContext(Dispatchers.IO) {
+                AutomationPaths.hostSessionDir(app, projectId, sessionId).deleteRecursively()
+            }
+        }
+    }
 }

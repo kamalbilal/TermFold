@@ -91,6 +91,9 @@ val LocalWorkspaceFileOpener = compositionLocalOf<(File) -> Unit> { {} }
 /** True while [FilesWorkspace] is showing the file editor over the session UI. */
 val LocalWorkspaceEditorOpen = compositionLocalOf { false }
 
+/** Guest path prefix of linked coding project; writes under this tree are blocked in automation. */
+val LocalAutomationReadOnlyGuestRoot = compositionLocalOf<String?> { null }
+
 /**
  * The project's files beside whatever is on screen (a chat, a shell or the folder's session
  * list): a file tree in a sidebar, and an editor over the content when a file is opened.
@@ -1138,6 +1141,8 @@ private fun TextEditor(
     modifier: Modifier = Modifier,
     readOnly: Boolean = false,
 ) {
+    val context = LocalContext.current
+    val automationReadOnlyRoot = LocalAutomationReadOnlyGuestRoot.current
     val scope = rememberCoroutineScope()
     var loaded by remember(file) { mutableStateOf<Loaded>(Loaded.Loading) }
     var dirty by remember(file) { mutableStateOf(false) }
@@ -1233,6 +1238,14 @@ private fun TextEditor(
     bridge.onCursor = { line, col -> cursor = line to col }
     bridge.onSave = { text ->
         if (!saving && (loaded as? Loaded.Text)?.writable == true) {
+            val guest = com.termfold.app.shell.Projects.guestPath(context, file.absolutePath)
+            val blocked = automationReadOnlyRoot != null && guest != null && (
+                guest.trimEnd('/') == automationReadOnlyRoot.trimEnd('/') ||
+                    guest.startsWith(automationReadOnlyRoot.trimEnd('/') + "/")
+            )
+            if (blocked) {
+                saveError = context.getString(R.string.automation_read_only_linked)
+            } else {
             saving = true
             scope.launch {
                 val result = withContext(Dispatchers.IO) {
@@ -1248,13 +1261,13 @@ private fun TextEditor(
                     js("tf.markSaved();")
                 }.onFailure { saveError = it.message ?: it.javaClass.simpleName }
             }
+            }
         }
     }
 
     val relative = root?.let { file.relativeToOrNull(it)?.path }?.replace('\\', '/') ?: file.path
     val text = loaded as? Loaded.Text
     val unavailable = loaded as? Loaded.Unavailable
-    val context = androidx.compose.ui.platform.LocalContext.current
 
     Column(modifier) {
         Row(

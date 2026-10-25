@@ -104,6 +104,11 @@ object ShellSetup {
     private fun installBrowserTools(context: Context, rootfs: File) {
         fun asset(name: String) = context.assets.open(name).use { it.readBytes().decodeToString() }.replace("\r\n", "\n")
         writeExecutable(File(rootfs, BROWSER_TOOL.trimStart('/')), asset("termfold-browser.js"))
+        writeExecutable(File(rootfs, AUTOMATION_MEMORY_TOOL.trimStart('/')), asset("termfold-automation-memory.js"))
+        writeIfChanged(
+            File(rootfs, "root/.claude/skills/termfold-automation/SKILL.md"),
+            asset("termfold-automation-skill.md"),
+        )
         val skill = asset("termfold-browser-skill.md")
         writeIfChanged(File(rootfs, "root/.claude/skills/termfold-browser/SKILL.md"), skill)
         // The other agents get the same guide, without the skill header.
@@ -140,6 +145,7 @@ object ShellSetup {
 
     /** Guest path of the browser command; chat sessions start it as an MCP server. */
     const val BROWSER_TOOL = "/usr/local/bin/termfold-browser"
+    const val AUTOMATION_MEMORY_TOOL = "/usr/local/bin/termfold-automation-memory"
 
     private fun writeIfChanged(file: File, content: String) {
         if (file.isFile && file.readText() == content) return

@@ -2,6 +2,9 @@ package com.termfold.app.preview
 
 import android.content.Context
 import android.util.Log
+import com.termfold.app.automation.AutomationSessionContext
+import com.termfold.app.automation.memory.AutomationEpisodeTracker
+import com.termfold.app.automation.memory.AutomationMemoryBridge
 import com.termfold.app.shell.ShellPaths
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -9,6 +12,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -33,6 +39,7 @@ import java.security.SecureRandom
 object BrowserBridge {
 
     private const val TAG = "BrowserBridge"
+    private val memoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private const val CONFIG = "root/.termfold/browser.json"
 
     /** What drives the WebView: the preview pane registers one while it is on screen. */
@@ -42,6 +49,10 @@ object BrowserBridge {
 
     @Volatile
     var controller: Controller? = null
+
+    /** When set, browser commands apply only to this automation session (`projectId:sessionId`). */
+    @Volatile
+    var automationSessionKey: String? = null
 
     /** What the user sees: whether an agent is driving, what it just did, and whether it is paused. */
     data class Activity(val active: Boolean = false, val label: String = "", val paused: Boolean = false)
@@ -73,6 +84,40 @@ object BrowserBridge {
     fun recordAction(label: String, tabId: Int = 0) = synchronized(actionLog) {
         actionLog.addLast(ActionEntry(label, tabId))
         while (actionLog.size > 8) actionLog.removeFirst()
+        val sessionKey = automationSessionKey
+        val ctx = appContext
+        if (sessionKey != null && ctx != null) {
+            memoryScope.launch {
+                runCatching {
+                    com.termfold.app.automation.memory.AutomationMemoryRepository(ctx).appendEvent(
+                        automationSessionId = sessionKey,
+                        type = "browser",
+                        url = lastBrowserUrl,
+                        summary = label,
+                        outcome = "ok",
+                    )
+                    AutomationEpisodeTracker.onBrowserEvent(ctx, sessionKey, lastBrowserUrl, label)
+                }
+            }
+        }
+    }
+
+    @Volatile
+    var lastBrowserUrl: String? = null
+
+    fun writeBrowserConfig(context: Context, port: Int? = null) {
+        if (!::token.isInitialized) return
+        val file = File(ShellPaths.rootfsDir(context), CONFIG)
+        file.parentFile?.mkdirs()
+        val body = JSONObject()
+            .put("port", port ?: runCatching {
+                JSONObject(file.readText()).optInt("port")
+            }.getOrDefault(0))
+            .put("token", token)
+            .put("automation_session_key", AutomationSessionContext.activeKey ?: "")
+        file.writeText(body.toString())
+        file.setReadable(false, false)
+        file.setReadable(true, true)
     }
 
     fun bumpNetworkGeneration() {
@@ -80,6 +125,7 @@ object BrowserBridge {
     }
     @Volatile private var started = false
     private lateinit var token: String
+    @Volatile private var appContext: Context? = null
 
     /** The user took the browser back: commands are refused until they let the agent continue. */
     fun pause() = _activity.update { it.copy(paused = true, active = false) }
@@ -93,6 +139,7 @@ object BrowserBridge {
             started = true
         }
         val app = context.applicationContext
+        appContext = app
         Thread({ serve(app) }, "termfold-browser").apply { isDaemon = true }.start()
         // The busy frame fades a few seconds after the agent's last action.
         Thread({
@@ -115,7 +162,8 @@ object BrowserBridge {
         runCatching {
             val file = File(ShellPaths.rootfsDir(context), CONFIG)
             file.parentFile?.mkdirs()
-            file.writeText(JSONObject().put("port", server.localPort).put("token", token).toString())
+            val port = server.localPort
+            writeBrowserConfig(context, port)
             file.setReadable(false, false)
             file.setReadable(true, true)
         }.onFailure { Log.w(TAG, "Could not write the browser config", it) }
@@ -148,6 +196,20 @@ object BrowserBridge {
     }
 
     private suspend fun execute(context: Context, action: String, args: JSONObject): JSONObject {
+        if (action.startsWith("memory_")) {
+            val requiredKey = automationSessionKey
+            if (requiredKey != null && AutomationSessionContext.activeKey != requiredKey) {
+                return JSONObject().put("error", "Browser command is bound to another automation session")
+            }
+            return AutomationMemoryBridge.handle(context, action, args)
+        }
+        val requiredKey = automationSessionKey
+        if (requiredKey != null) {
+            val given = args.optString("session_key")
+            if (given.isNotBlank() && given != requiredKey) {
+                return JSONObject().put("error", "Browser command is bound to another automation session")
+            }
+        }
         if (_activity.value.paused) {
             return JSONObject().put(
                 "error",
@@ -197,6 +259,9 @@ object BrowserBridge {
             lastCommand = System.currentTimeMillis()
             if (!result.has("error")) {
                 bumpNetworkGeneration()
+                if (action == "open") {
+                    lastBrowserUrl = Preview.state.value.url
+                }
                 recordAction(labelFor(action, args))
             }
         }

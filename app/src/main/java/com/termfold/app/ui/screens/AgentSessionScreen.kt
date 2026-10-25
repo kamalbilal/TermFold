@@ -163,6 +163,11 @@ fun AgentSessionScreen(
     modifier: Modifier = Modifier,
     filesOpen: Boolean = false,
     onToggleFiles: () -> Unit = {},
+    automationPromptPrefix: (() -> String)? = null,
+    previewProjectDirOverride: String? = null,
+    automationReadOnlyGuestRoot: String? = null,
+    automationSessionKey: String? = null,
+    automationGuardrails: (() -> com.termfold.app.automation.AutomationGuardrailContext?)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -242,6 +247,9 @@ fun AgentSessionScreen(
                 sessionKey = key,
                 agent = resolved,
                 workspaceGuestDir = guestDir,
+                automationPromptPrefix = automationPromptPrefix,
+                automationReadOnlyGuestRoot = automationReadOnlyGuestRoot,
+                automationGuardrails = automationGuardrails,
             ),
         )
     }
@@ -254,6 +262,8 @@ fun AgentSessionScreen(
     val state by client.state.collectAsStateWithLifecycle()
     var agentWasBusy by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
+    var showAutomationSessionMemory by remember { mutableStateOf(false) }
+    var showAutomationNavMemory by remember { mutableStateOf(false) }
     var showMcp by remember { mutableStateOf(false) }
     var showAuxTerminals by remember { mutableStateOf(false) }
     var auxTerminalInitialTabId by remember { mutableStateOf<String?>(null) }
@@ -327,7 +337,7 @@ fun AgentSessionScreen(
             iconUrl = resolved.iconUrl,
             onBack = onBack,
             live = state.agentBusy,
-            previewDir = guestDir,
+            previewDir = previewProjectDirOverride ?: guestDir,
             onOpenGitChanges = if (isGitWorkspace) {
                 { com.termfold.app.gitworkspace.GitChanges.open(guestDir) }
             } else {
@@ -347,6 +357,16 @@ fun AgentSessionScreen(
             },
             onMcp = if (isCursor && state.phase == AcpPhase.READY) {
                 { showMcp = true }
+            } else {
+                null
+            },
+            onAutomationSessionMemory = if (automationSessionKey != null) {
+                { showAutomationSessionMemory = true }
+            } else {
+                null
+            },
+            onAutomationNavMemory = if (automationSessionKey != null) {
+                { showAutomationNavMemory = true }
             } else {
                 null
             },
@@ -504,6 +524,7 @@ fun AgentSessionScreen(
                     pendingEdit = Triple(target.id, text, images to files)
                     editFileChoice = true
                 },
+                automationComposerCommands = automationPromptPrefix != null,
             )
         }
     }
@@ -598,6 +619,19 @@ fun AgentSessionScreen(
         PastSessionsDialog(client = client, currentId = client.listedSessionId, onDismiss = { showHistory = false })
     }
 
+    if (showAutomationSessionMemory && automationSessionKey != null) {
+        AutomationMemoryManagerDialog(
+            mode = AutomationMemoryManagerMode.SessionPrivate(automationSessionKey),
+            onDismiss = { showAutomationSessionMemory = false },
+        )
+    }
+    if (showAutomationNavMemory) {
+        AutomationMemoryManagerDialog(
+            mode = AutomationMemoryManagerMode.GlobalNav,
+            onDismiss = { showAutomationNavMemory = false },
+        )
+    }
+
     if (showMcp) {
         McpServersDialog(
             workspaceGuestDir = guestDir,
@@ -675,6 +709,8 @@ private fun SessionHeader(
     onHistory: (() -> Unit)? = null,
     onRestart: (() -> Unit)? = null,
     onMcp: (() -> Unit)? = null,
+    onAutomationSessionMemory: (() -> Unit)? = null,
+    onAutomationNavMemory: (() -> Unit)? = null,
     onOpenTerminal: ((tabId: String?) -> Unit)? = null,
     auxTerminalTabs: List<AuxTerminalTab> = emptyList(),
     onRequestCloseAuxTerminalTab: ((tabId: String) -> Unit)? = null,
@@ -748,6 +784,8 @@ private fun SessionHeader(
                 onHistory = onHistory,
                 onMcp = onMcp,
                 onRestart = onRestart,
+                onAutomationSessionMemory = onAutomationSessionMemory,
+                onAutomationNavMemory = onAutomationNavMemory,
             )
         }
         Box(
@@ -769,9 +807,12 @@ private fun SessionHeaderOverflowMenu(
     onHistory: (() -> Unit)?,
     onMcp: (() -> Unit)?,
     onRestart: (() -> Unit)?,
+    onAutomationSessionMemory: (() -> Unit)?,
+    onAutomationNavMemory: (() -> Unit)?,
 ) {
     if (previewDir == null && onOpenGitChanges == null && onOpenTerminal == null && onHistory == null &&
-        onMcp == null && onRestart == null
+        onMcp == null && onRestart == null &&
+        onAutomationSessionMemory == null && onAutomationNavMemory == null
     ) {
         return
     }
@@ -887,6 +928,40 @@ private fun SessionHeaderOverflowMenu(
                     onClick = {
                         expanded = false
                         onOpenGitChanges()
+                    },
+                )
+            }
+            if (onAutomationSessionMemory != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.automation_memory_menu_session), color = Palette.Text) },
+                    leadingIcon = {
+                        Icon(
+                            TermFoldIcons.Sparkle,
+                            contentDescription = null,
+                            tint = Palette.TextDim,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onAutomationSessionMemory()
+                    },
+                )
+            }
+            if (onAutomationNavMemory != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.automation_memory_menu_global), color = Palette.Text) },
+                    leadingIcon = {
+                        Icon(
+                            TermFoldIcons.Globe,
+                            contentDescription = null,
+                            tint = Palette.TextDim,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onAutomationNavMemory()
                     },
                 )
             }
@@ -2160,6 +2235,7 @@ private fun Composer(
     editMessage: AcpItem.UserMessage? = null,
     onCancelEdit: () -> Unit = {},
     onSubmitEdit: (String, List<AcpBlock.Image>, List<AcpBlock.TextFile>) -> Unit = { _, _, _ -> },
+    automationComposerCommands: Boolean = false,
 ) {
     val context = LocalContext.current
     val editing = editMessage != null
@@ -2237,6 +2313,9 @@ private fun Composer(
         add(AcpCommand(BUILTIN_NEW, stringResource(R.string.acp_cmd_new), ""))
         if (agentId == "cursor") {
             add(AcpCommand(BUILTIN_SUMMARIZE, stringResource(R.string.acp_cmd_summarize), ""))
+        }
+        if (automationComposerCommands) {
+            add(AcpCommand(BUILTIN_AUTOMATION_SPEC, stringResource(R.string.acp_cmd_automation_spec), ""))
         }
     }
     val allCommands = builtIns + commands.filter { c -> builtIns.none { it.name == c.name } }
@@ -2338,6 +2417,7 @@ private fun Composer(
                 if (agentBusy || queued.isNotEmpty()) onQueue(text, emptyList(), emptyList())
                 else onSend(text, emptyList(), emptyList())
             }
+            BUILTIN_AUTOMATION_SPEC -> replaceActiveToken("/$BUILTIN_AUTOMATION_SPEC ")
             else -> replaceActiveToken("/${command.name} ")
         }
     }
@@ -3127,6 +3207,7 @@ private suspend fun syncWorkspaceGit(
 private const val BUILTIN_RESUME = "resume"
 private const val BUILTIN_NEW = "new"
 private const val BUILTIN_SUMMARIZE = "summarize"
+private const val BUILTIN_AUTOMATION_SPEC = com.termfold.app.automation.AutomationSpecCommand.SLASH_COMMAND
 
 /**
  * The slash commands matching what is typed. Tapping one picks it; with a keyboard the arrows

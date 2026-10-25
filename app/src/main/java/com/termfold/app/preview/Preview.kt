@@ -25,6 +25,10 @@ import java.net.URLEncoder
  */
 object Preview {
 
+    /** When set, the preview WebView uses an isolated data directory (automation sessions). */
+    @Volatile
+    var webViewDataDirectorySuffix: String? = null
+
     data class State(
         val open: Boolean = false,
         /** Open but out of the way: the page keeps running (an agent can keep using it) under a pill. */

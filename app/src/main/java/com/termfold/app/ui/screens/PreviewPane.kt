@@ -673,6 +673,9 @@ fun PreviewPane(
                     // No page yet: nothing to show, and no white flash behind the start page.
                     update = { view -> view.visibility = if (showStart) android.view.View.INVISIBLE else android.view.View.VISIBLE },
                     factory = { ctx ->
+                        Preview.webViewDataDirectorySuffix?.let { suffix ->
+                            runCatching { WebView.setDataDirectorySuffix(suffix) }
+                        }
                         WebView(ctx).apply {
                             setBackgroundColor(android.graphics.Color.parseColor("#08080A"))
                             settings.javaScriptEnabled = true

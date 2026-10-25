@@ -3,10 +3,16 @@ package com.termfold.app.acp
 import android.content.Context
 import android.util.Log
 import com.termfold.app.R
+import com.termfold.app.automation.AutomationReadOnlyPolicy
+import com.termfold.app.automation.AutomationWebToolPolicy
 import com.termfold.app.acp.checkpoints.AcpCheckpointUiState
 import com.termfold.app.acp.checkpoints.AcpRedoFrame
 import com.termfold.app.acp.checkpoints.CheckpointBusy
 import com.termfold.app.acp.checkpoints.ConversationSummary
+import com.termfold.app.automation.AutomationGuardrailVerdict
+import com.termfold.app.automation.AutomationGuardrails
+import com.termfold.app.automation.AutomationGuardrailContext
+import com.termfold.app.automation.AutomationSpecCommand
 import com.termfold.app.acp.checkpoints.ShadowCheckpointStore
 import com.termfold.app.shell.ProotCommand
 import kotlinx.coroutines.CompletableDeferred
@@ -208,7 +214,12 @@ class AcpClient(
     private val sessionKey: String,
     private val agent: AcpAgent,
     private val workspaceGuestDir: String,
+    private val automationPromptPrefix: (() -> String)? = null,
+    private val automationReadOnlyGuestRoot: String? = null,
+    private val automationGuardrails: (() -> AutomationGuardrailContext?)? = null,
 ) {
+
+    private val automationMode: Boolean = automationPromptPrefix != null
 
     private val _state = MutableStateFlow(AcpUiState())
     val state: StateFlow<AcpUiState> = _state.asStateFlow()
@@ -852,7 +863,12 @@ class AcpClient(
      * an MCP server the agent starts inside the guest. Only offered once Node is installed.
      */
     private fun mcpServers(): JSONArray =
-        com.termfold.app.acp.mcp.McpCatalog.acpServers(context, agent.id, workspaceGuestDir)
+        com.termfold.app.acp.mcp.McpCatalog.acpServers(
+            context,
+            agent.id,
+            workspaceGuestDir,
+            automationMode = automationMode,
+        )
 
     private suspend fun openSession(updateListed: Boolean = true) {
         val cwd = workspaceGuestDir
@@ -933,6 +949,10 @@ class AcpClient(
         if (agentSessionId == null) return
         if (_state.value.checkpoints.wireResyncing) {
             enqueue(text, images, files)
+            return
+        }
+        if (automationMode && AutomationSpecCommand.isBareSpecPrompt(text)) {
+            appendSystemError(context.getString(R.string.automation_spec_need_request))
             return
         }
         val messageId = beginUserTurn(text, images, files) ?: return
@@ -1060,7 +1080,16 @@ class AcpClient(
                 append("\n\n---\n\n")
                 pendingWireContext = null
             }
-            append(text)
+            automationPromptPrefix?.invoke()?.takeIf { it.isNotBlank() }?.let { prefix ->
+                append(prefix)
+                append("\n\n---\n\n")
+            }
+            val body = if (automationMode) {
+                AutomationSpecCommand.requestFromPrompt(text)?.let(AutomationSpecCommand::toWirePrompt) ?: text
+            } else {
+                text
+            }
+            append(body)
         }
         val content = JSONArray()
         if (wireText.isNotBlank()) content.put(JSONObject().put("type", "text").put("text", wireText))
@@ -1805,6 +1834,43 @@ class AcpClient(
     }
 
     private fun handlePermissionRequest(id: Any, params: JSONObject?) {
+        val blocked = AutomationReadOnlyPolicy.firstBlockedPath(
+            automationReadOnlyGuestRoot,
+            AutomationReadOnlyPolicy.pathsFromPermissionParams(params),
+        )
+        if (blocked != null) {
+            appendSystemError(
+                context.getString(
+                    com.termfold.app.R.string.automation_read_only_linked,
+                ) + " ($blocked)",
+            )
+            respondPermission(id, null)
+            return
+        }
+        if (automationMode && AutomationWebToolPolicy.shouldBlockPermission(params)) {
+            appendSystemError(context.getString(R.string.automation_use_browser_not_web))
+            respondPermission(id, null)
+            return
+        }
+        if (automationMode) {
+            val guardCtx = automationGuardrails?.invoke()
+            if (guardCtx != null) {
+                when (
+                    val verdict = AutomationGuardrails.evaluatePermission(
+                        params,
+                        guardCtx.policy,
+                        guardCtx.constraintsFile,
+                    )
+                ) {
+                    is AutomationGuardrailVerdict.Deny -> {
+                        appendSystemError(verdict.reason)
+                        respondPermission(id, null)
+                        return
+                    }
+                    AutomationGuardrailVerdict.Allow -> Unit
+                }
+            }
+        }
         val options = params?.optJSONArray("options") ?: JSONArray()
         val parsed = List(options.length()) { index ->
             val option = options.getJSONObject(index)
@@ -1815,9 +1881,28 @@ class AcpClient(
             )
         }
         if (agent.id == "cursor" && CursorAcpPrefs.allowEverything(context)) {
-            CursorAcpPrefs.preferredAllowOptionId(parsed)?.let { optionId ->
-                respondPermission(id, optionId)
-                return
+            val toolPaths = _state.value.items.filterIsInstance<AcpItem.ToolCall>()
+                .lastOrNull { it.toolCallId == params?.optJSONObject("toolCall")?.optString("toolCallId") }
+                ?.paths
+                ?: emptyList()
+            val blockedTool = AutomationReadOnlyPolicy.firstBlockedPath(automationReadOnlyGuestRoot, toolPaths)
+            val guardBlocked = automationMode && automationGuardrails?.invoke()?.let { guardCtx ->
+                val verdict = AutomationGuardrails.evaluatePermission(
+                    params,
+                    guardCtx.policy,
+                    guardCtx.constraintsFile,
+                )
+                verdict is AutomationGuardrailVerdict.Deny
+            } == true
+            if (
+                blockedTool == null &&
+                !guardBlocked &&
+                !(automationMode && AutomationWebToolPolicy.shouldBlockPermission(params))
+            ) {
+                CursorAcpPrefs.preferredAllowOptionId(parsed)?.let { optionId ->
+                    respondPermission(id, optionId)
+                    return
+                }
             }
         }
         val toolCallId = params?.optJSONObject("toolCall")?.optString("toolCallId")

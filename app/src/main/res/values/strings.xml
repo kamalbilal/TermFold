@@ -3,9 +3,67 @@
     <string name="app_name" translatable="false">TermFold</string>
 
     <string name="folders_title">Projects</string>
+    <string name="home_segment_projects">Projects</string>
+    <string name="home_segment_automation">Automation</string>
+    <string name="workflows_title">Workflows</string>
+    <string name="workflows_new">New workflow</string>
+    <string name="workflows_empty_hint">No workflows yet</string>
+    <string name="workflows_empty_subtitle">Workflows group tools like browser automation, with more item types coming later.</string>
+    <string name="workflows_section_automation">Automation</string>
+    <string name="workflows_tab_automation">Automation</string>
+    <string name="workflows_tab_more">More</string>
+    <string name="workflows_future_title">Coming soon</string>
+    <string name="workflows_future_subtitle">New workflow tools will show up as additional tabs here.</string>
+    <string name="automation_title">Automation</string>
+    <string name="automation_new_project">New workflow</string>
+    <string name="automation_new_session">New session</string>
+    <string name="automation_empty_hint">No workflows yet</string>
+    <string name="automation_empty_subtitle">Create a workflow for browser sessions, memory tools, and optional read-only links to coding folders.</string>
+    <string name="automation_no_sessions">No sessions yet</string>
+    <string name="automation_no_sessions_hint">Tap + to add a session with its own browser profile.</string>
+    <string name="automation_linked_to">Linked to %1$s (read-only)</string>
+    <string name="automation_not_linked">No linked coding project</string>
+    <string name="automation_link_broken">Linked project missing — unlink or choose another</string>
+    <string name="automation_change_link">Link / change project</string>
+    <string name="automation_unlink">Unlink</string>
+    <string name="automation_pick_project">Link coding project</string>
+    <string name="session_name_hint">Session name</string>
+    <string name="automation_run_log">Run log</string>
+    <string name="automation_run_log_filter">Filter URL or error</string>
+    <string name="automation_tab_chat">Chat</string>
+    <string name="automation_read_only_linked">Linked project is read-only in automation</string>
+    <string name="automation_use_browser_not_web">Use termfold-browser for web search and pages (built-in web search is disabled in automation)</string>
+    <string name="automation_memory_global_title">Site navigation memory</string>
+    <string name="automation_memory_global_subtitle">Shared across automation sessions (sites, selectors, notes)</string>
+    <string name="automation_memory_session_title">Session memory</string>
+    <string name="automation_memory_session_subtitle">Private to this automation session</string>
+    <string name="automation_memory_add">Add memory</string>
+    <string name="automation_memory_edit">Edit memory</string>
+    <string name="automation_memory_search">Search title, body, or tags</string>
+    <string name="automation_memory_filter_site">Site filter</string>
+    <string name="automation_memory_filter_kind">Kind filter</string>
+    <string name="automation_memory_semantic">Semantic search</string>
+    <string name="automation_memory_tab_chunks">Memory</string>
+    <string name="automation_memory_field_site">Site key</string>
+    <string name="automation_memory_field_kind">Kind</string>
+    <string name="automation_memory_field_title">Title</string>
+    <string name="automation_memory_field_search">Search text</string>
+    <string name="automation_memory_field_body">Body</string>
+    <string name="automation_memory_global_hint">Global chunks use an empty session id and are visible in every automation session.</string>
+    <string name="automation_memory_menu_session">Session memory</string>
+    <string name="automation_memory_menu_global">Site navigation memory</string>
+    <string name="automation_memory_empty_chunks">No memory chunks match your filters.</string>
+    <string name="automation_memory_empty_events">No run log events yet.</string>
+    <string name="automation_memory_saving">Saving…</string>
+    <string name="automation_run_log_delete_title">Delete event?</string>
+    <string name="automation_run_log_delete_body">This removes the event from the session run log.</string>
+    <string name="settings_automation">Automation</string>
+    <string name="settings_automation_nav_memory">Site navigation memory</string>
+    <string name="settings_automation_nav_memory_desc">Browse, search, and edit shared navigation memory used by automation agents.</string>
     <string name="settings_title">Settings</string>
     <string name="new_session_title">New session</string>
 
+    <string name="action_save">Save</string>
     <string name="action_cancel">Cancel</string>
     <string name="action_add">Add</string>
     <string name="action_remove">Remove</string>
@@ -54,6 +112,8 @@
     <string name="acp_cmd_resume">Reopen an earlier session</string>
     <string name="acp_cmd_new">New session</string>
     <string name="acp_cmd_summarize">Summarize and compress agent context; chat history stays on screen</string>
+    <string name="acp_cmd_automation_spec">Turn your request into requirements, PRD, and constraints docs</string>
+    <string name="automation_spec_need_request">Add what you want after /spec, then send.</string>
     <string name="acp_checkpoint_restore">Undo changes</string>
     <string name="acp_checkpoint_redo">Redo changes</string>
     <string name="acp_checkpoint_undo_title">Undo changes?</string>
@@ -303,6 +363,7 @@
     <string name="cd_add_session">Add session</string>
     <string name="cd_send">Send</string>
     <string name="cd_home">Projects</string>
+    <string name="cd_workflows">Workflows</string>
     <string name="cd_settings">Settings</string>
 
     <!-- First-run setup of the bundled Linux environment. -->

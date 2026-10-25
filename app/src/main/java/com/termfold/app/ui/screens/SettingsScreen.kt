@@ -7,6 +7,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -25,6 +26,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,6 +46,7 @@ import com.termfold.app.ui.components.BottomNavSpacer
 import com.termfold.app.ui.components.GroupLabel
 import com.termfold.app.ui.theme.Mono
 import com.termfold.app.ui.theme.Palette
+import com.termfold.app.ui.theme.TermFoldIcons
 
 /** Settings tab: the state of the bundled Linux environment and app information. */
 @Composable
@@ -67,6 +70,14 @@ fun SettingsScreen(
     }
     val status = remember(shellState, sizeText) { shellStatus(context, sizeText) }
     val edge = if (wide) 30.dp else 22.dp
+    var showAutomationNavMemory by remember { mutableStateOf(false) }
+
+    if (showAutomationNavMemory) {
+        AutomationMemoryManagerDialog(
+            mode = AutomationMemoryManagerMode.GlobalNav,
+            onDismiss = { showAutomationNavMemory = false },
+        )
+    }
 
     Column(modifier = modifier.fillMaxSize()) {
         Text(
@@ -103,6 +114,10 @@ fun SettingsScreen(
             item { Spacer(Modifier.height(20.dp)) }
             item { GroupLabel(stringResource(R.string.update_title)) }
             item { UpdatesCard() }
+
+            item { Spacer(Modifier.height(20.dp)) }
+            item { GroupLabel(stringResource(R.string.settings_automation)) }
+            item { AutomationNavMemoryCard(onOpen = { showAutomationNavMemory = true }) }
 
             item { Spacer(Modifier.height(20.dp)) }
             item { GroupLabel(stringResource(R.string.settings_agent_chat)) }
@@ -169,6 +184,39 @@ fun SettingsScreen(
 
             item { BottomNavSpacer() }
         }
+    }
+}
+
+@Composable
+private fun AutomationNavMemoryCard(onOpen: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(Palette.Card)
+            .clickable(onClick = onOpen)
+            .padding(horizontal = 18.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                stringResource(R.string.settings_automation_nav_memory),
+                style = MaterialTheme.typography.bodyLarge,
+                color = Palette.Text,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                stringResource(R.string.settings_automation_nav_memory_desc),
+                style = MaterialTheme.typography.bodySmall,
+                color = Palette.TextDim,
+            )
+        }
+        Icon(
+            TermFoldIcons.ChevronRight,
+            contentDescription = null,
+            tint = Palette.TextFaint,
+            modifier = Modifier.size(20.dp),
+        )
     }
 }
 

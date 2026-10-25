@@ -5,6 +5,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+apply(plugin = "io.objectbox")
 
 android {
     namespace = "com.termfold.app"
@@ -166,6 +167,7 @@ dependencies {
     implementation("com.github.termux.termux-app:terminal-view:0.118.3")
 
     implementation("androidx.datastore:datastore-preferences:1.1.7")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("androidx.documentfile:documentfile:1.0.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("io.coil-kt:coil-svg:2.7.0")
@@ -180,6 +182,9 @@ dependencies {
 
     // Fuzzy ranking for composer @ and / menus (partial + token-set ratios).
     implementation("me.xdrop:fuzzywuzzy:1.4.0")
+
+    implementation("io.objectbox:objectbox-kotlin:4.0.3")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
 
     // A real org.json for the JVM tests, whose classpath otherwise only has the Android
     // stubs that throw on every call.

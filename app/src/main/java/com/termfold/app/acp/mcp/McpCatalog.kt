@@ -32,37 +32,28 @@ object McpCatalog {
 
 
 
-    fun list(context: Context, workspaceGuestDir: String, cursorAgent: Boolean): List<McpServerEntry> {
+    fun list(context: Context, workspaceGuestDir: String, cursorAgent: Boolean, automationMode: Boolean = false): List<McpServerEntry> {
 
         val merged = linkedMapOf<String, McpServerEntry>()
 
-        if (cursorAgent) {
-
+        if (cursorAgent && !automationMode) {
             val userFile = Projects.hostPath(context, USER_CONFIG)
-
             McpJson.parseFile(userFile).forEach { (name, raw) ->
-
                 McpJson.entryFromJson(name, McpSource.USER, USER_CONFIG, raw, context, workspaceGuestDir)
-
                     ?.let { merged[it.name] = it }
-
             }
-
             val projectConfig = "$workspaceGuestDir/.cursor/mcp.json"
-
             val projectFile = Projects.hostPath(context, projectConfig)
-
             McpJson.parseFile(projectFile).forEach { (name, raw) ->
-
                 McpJson.entryFromJson(name, McpSource.PROJECT, projectConfig, raw, context, workspaceGuestDir)
-
                     ?.let { merged[it.name] = it }
-
             }
-
         }
 
         builtinBrowser(context)?.let { merged[it.name] = it }
+        if (automationMode) {
+            builtinAutomationMemory(context)?.let { merged[it.name] = it }
+        }
 
         return merged.values.toList().sortedWith(compareBy({ it.source.ordinal }, { it.name.lowercase() }))
 
@@ -70,7 +61,7 @@ object McpCatalog {
 
 
 
-    fun acpServers(context: Context, agentId: String, workspaceGuestDir: String): JSONArray {
+    fun acpServers(context: Context, agentId: String, workspaceGuestDir: String, automationMode: Boolean = false): JSONArray {
 
         val cursorAgent = agentId == "cursor"
 
@@ -78,7 +69,7 @@ object McpCatalog {
 
         val array = JSONArray()
 
-        list(context, workspaceGuestDir, cursorAgent).forEach { entry ->
+        list(context, workspaceGuestDir, cursorAgent, automationMode).forEach { entry ->
 
             val configDefault = !entry.configDisabled
 
@@ -136,6 +127,27 @@ object McpCatalog {
 
         )
 
+    }
+
+    private fun builtinAutomationMemory(context: Context): McpServerEntry? {
+        val rootfs = ShellPaths.rootfsDir(context)
+        val node = "/opt/node/bin/node"
+        val tool = ShellSetup.AUTOMATION_MEMORY_TOOL
+        if (!File(rootfs, node.trimStart('/')).exists() || !File(rootfs, tool.trimStart('/')).isFile) return null
+        BrowserBridge.start(context)
+        return McpServerEntry(
+            key = McpJson.keyFor(McpSource.BUILTIN, "termfold-automation-memory"),
+            name = "termfold-automation-memory",
+            source = McpSource.BUILTIN,
+            transport = McpTransport.Stdio(
+                command = node,
+                args = listOf(tool, "mcp"),
+                env = emptyMap(),
+            ),
+            configPath = null,
+            authHints = emptyList(),
+            configDisabled = false,
+        )
     }
 
 }

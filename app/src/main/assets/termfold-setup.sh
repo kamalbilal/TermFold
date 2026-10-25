@@ -120,4 +120,5 @@ printf '\n%sReady.%s node %s · npm %s · python %s · git %s\n' "$green" "$rese
   "$(node --version)" "$(npm --version)" "$(python3 --version | cut -d' ' -f2)" "$(git --version | cut -d' ' -f3)"
 printf '%sAgent CLIs install themselves the first time you run them: claude, codex, gemini, opencode, pi, qwen.%s\n' "$dim" "$reset"
 printf '%sPhone speed: run termfold-bench; use ESLint --cache in npm run lint; split type-aware lint to lint:ci; try turbo --concurrency=1 on device.%s\n' "$dim" "$reset"
-printf '%sWeb apps: open the in-app preview browser (termfold-browser / MCP) to test localhost dev servers while you watch.%s\n\n' "$dim" "$reset"
+printf '%sWeb apps: open the in-app preview browser (termfold-browser / MCP) to test localhost dev servers while you watch.%s\n' "$dim" "$reset"
+printf '%sAutomation: use the Automation tab for persistent browser sessions, memory tools (termfold-automation-memory), and optional read-only links to coding projects.%s\n\n' "$dim" "$reset"
