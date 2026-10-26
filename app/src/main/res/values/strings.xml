@@ -11,7 +11,20 @@
     <string name="workflows_empty_subtitle">Workflows group tools like browser automation, with more item types coming later.</string>
     <string name="workflows_section_automation">Automation</string>
     <string name="workflows_tab_automation">Automation</string>
+    <string name="workflows_tab_pr_reviewer">PR Reviewer</string>
     <string name="workflows_tab_more">More</string>
+    <string name="pr_review_empty_hint">No reviews yet</string>
+    <string name="pr_review_empty_subtitle">Paste a GitHub pull request link. TermFold matches the local project and copies the PR branch automatically.</string>
+    <string name="pr_review_url_hint">https://github.com/owner/repo/pull/123</string>
+    <string name="pr_review_start">Review</string>
+    <string name="pr_review_paste_another">New PR</string>
+    <string name="pr_review_paste_another_title">Review another PR in this chat</string>
+    <string name="pr_review_done">Done</string>
+    <string name="pr_review_done_confirm_title">Delete temp copy?</string>
+    <string name="pr_review_done_confirm_body">This copy has uncommitted or unpushed work. Delete it anyway? The chat stays.</string>
+    <string name="pr_review_done_delete">Delete copy</string>
+    <string name="pr_review_copy_gone">Temp copy removed. Chat is kept. Paste a PR to create a new copy.</string>
+    <string name="pr_review_job_cancel">Cancel copy</string>
     <string name="workflows_future_title">Coming soon</string>
     <string name="workflows_future_subtitle">New workflow tools will show up as additional tabs here.</string>
     <string name="automation_title">Automation</string>
@@ -65,6 +78,7 @@
 
     <string name="action_save">Save</string>
     <string name="action_cancel">Cancel</string>
+    <string name="action_ok">OK</string>
     <string name="action_add">Add</string>
     <string name="action_remove">Remove</string>
     <string name="action_copy">Copy</string>

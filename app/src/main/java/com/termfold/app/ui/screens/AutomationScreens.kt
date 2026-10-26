@@ -16,6 +16,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -47,6 +49,7 @@ import com.termfold.app.ui.theme.folderTint
 
 enum class WorkflowsSection(@param:StringRes val labelRes: Int) {
     AUTOMATION(R.string.workflows_tab_automation),
+    PR_REVIEWER(R.string.workflows_tab_pr_reviewer),
     MORE(R.string.workflows_tab_more),
 }
 
@@ -74,9 +77,16 @@ fun WorkflowsScreen(
                     title = stringResource(section.labelRes),
                     leading = {
                         LeadingTile(
-                            tint = folderTint(if (section == WorkflowsSection.AUTOMATION) 0 else 3),
+                            tint = folderTint(
+                                when (section) {
+                                    WorkflowsSection.AUTOMATION -> 0
+                                    WorkflowsSection.PR_REVIEWER -> 1
+                                    WorkflowsSection.MORE -> 3
+                                },
+                            ),
                             icon = when (section) {
                                 WorkflowsSection.AUTOMATION -> TermFoldIcons.Sparkle
+                                WorkflowsSection.PR_REVIEWER -> TermFoldIcons.GitBranch
                                 WorkflowsSection.MORE -> TermFoldIcons.More
                             },
                         )
@@ -103,10 +113,14 @@ fun WorkflowsSectionScreen(
     section: WorkflowsSection,
     projects: List<AutomationProject>,
     codingFolders: List<Folder>,
+    prReviews: List<com.termfold.app.prreview.PrReviewSession> = emptyList(),
+    prReviewError: String? = null,
     onBack: () -> Unit,
     onOpenProject: (String) -> Unit,
     onOpenProjectOptions: (String) -> Unit,
     onAddProject: () -> Unit,
+    onOpenPrReview: (String) -> Unit,
+    onStartPrReview: (String) -> Unit,
     useGrid: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -118,6 +132,15 @@ fun WorkflowsSectionScreen(
             onOpenProject = onOpenProject,
             onOpenProjectOptions = onOpenProjectOptions,
             onAddProject = onAddProject,
+            useGrid = useGrid,
+            modifier = modifier,
+        )
+        WorkflowsSection.PR_REVIEWER -> PrReviewerListScreen(
+            sessions = prReviews,
+            error = prReviewError,
+            onBack = onBack,
+            onOpenSession = onOpenPrReview,
+            onStart = onStartPrReview,
             useGrid = useGrid,
             modifier = modifier,
         )
@@ -389,6 +412,88 @@ private fun WorkflowsSubscreenHeader(
                 onClick = onAdd,
                 compact = true,
             )
+        }
+    }
+}
+
+@Composable
+fun PrReviewerListScreen(
+    sessions: List<com.termfold.app.prreview.PrReviewSession>,
+    error: String?,
+    onBack: () -> Unit,
+    onOpenSession: (String) -> Unit,
+    onStart: (String) -> Unit,
+    useGrid: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    var url by remember { mutableStateOf("") }
+    Column(modifier = modifier.fillMaxSize()) {
+        WorkflowsSubscreenHeader(
+            onBack = onBack,
+            title = stringResource(R.string.workflows_tab_pr_reviewer),
+        )
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+            OutlinedTextField(
+                value = url,
+                onValueChange = { url = it },
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text(stringResource(R.string.pr_review_url_hint), color = Palette.TextFaint) },
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Palette.Text,
+                    unfocusedTextColor = Palette.Text,
+                    cursorColor = Palette.Accent,
+                    focusedBorderColor = Palette.Accent,
+                    unfocusedBorderColor = Palette.Border,
+                ),
+            )
+            Spacer(Modifier.height(8.dp))
+            PrimaryButton(
+                icon = TermFoldIcons.GitBranch,
+                label = stringResource(R.string.pr_review_start),
+                onClick = { if (url.isNotBlank()) onStart(url.trim()) },
+                compact = true,
+            )
+            if (!error.isNullOrBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(error, color = Palette.Accent, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        when {
+            sessions.isEmpty() -> EmptyState(
+                title = stringResource(R.string.pr_review_empty_hint),
+                hint = stringResource(R.string.pr_review_empty_subtitle),
+            )
+            else -> LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 16.dp),
+            ) {
+                items(sessions, key = { it.id }) { session ->
+                    ListRow(
+                        title = session.name,
+                        subtitle = {
+                            Text(
+                                "${session.owner}/${session.repo}#${session.number}",
+                                color = Palette.TextDim,
+                            )
+                        },
+                        leading = {
+                            LeadingTile(tint = folderTint(session.tint), icon = TermFoldIcons.GitBranch)
+                        },
+                        trailing = {
+                            Icon(
+                                TermFoldIcons.ChevronRight,
+                                contentDescription = null,
+                                tint = Palette.TextFaint,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        },
+                        onClick = { onOpenSession(session.id) },
+                    )
+                    RowSpacer()
+                }
+                item { BottomNavSpacer() }
+            }
         }
     }
 }

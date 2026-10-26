@@ -53,6 +53,22 @@ object GitWorkspace {
 
     }
 
+    suspend fun originUrl(context: Context, guestPath: String): String? = withContext(Dispatchers.IO) {
+        val (code, out) = runGit(context, guestPath, "remote get-url origin")
+        if (code == 0) out.trim().takeIf { it.isNotBlank() } else null
+    }
+
+    suspend fun fetchOrigin(context: Context, guestPath: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val (code, out) = runGit(context, guestPath, "fetch origin --prune")
+        if (code == 0) Result.success(Unit) else Result.failure(IllegalStateException(out.takeLast(400)))
+    }
+
+    suspend fun hasUnpushedCommits(context: Context, guestPath: String): Boolean {
+        val outgoing = loadChangeSummary(context, guestPath)?.outgoingCommits ?: 0
+        return outgoing > 0
+    }
+
+
     /** Reads the current branch from the host `.git/HEAD` file (no PRoot). */
     fun readBranchFromHost(context: Context, guestPath: String): String? {
         val headFile = Projects.hostPath(context, guestPath).resolve(".git/HEAD")

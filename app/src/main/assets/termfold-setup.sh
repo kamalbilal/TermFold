@@ -99,6 +99,14 @@ export PATH="/opt/node/bin:$PATH"
 npm config set fund false >/dev/null 2>&1
 npm config set update-notifier false >/dev/null 2>&1
 
+step "Installing GitHub CLI"
+if command -v gh >/dev/null 2>&1; then
+  printf '%salready installed%s\n' "$dim" "$reset"
+else
+  apt-get "${APT_OPTS[@]}" install --no-install-recommends gh \
+    || fail "Installing GitHub CLI failed."
+fi
+
 # fd-find installs as `fdfind` on Debian; agents and people both expect `fd`.
 [ -e /usr/local/bin/fd ] || ln -s "$(command -v fdfind)" /usr/local/bin/fd 2>/dev/null
 
@@ -116,8 +124,16 @@ if [ -s "$LIST" ]; then
 fi
 
 touch "$MARK"
-printf '\n%sReady.%s node %s · npm %s · python %s · git %s\n' "$green" "$reset" \
+gh_ver=""
+if command -v gh >/dev/null 2>&1; then
+  gh_ver="$(gh --version | head -n1 | awk '{print $3}')"
+fi
+printf '\n%sReady.%s node %s · npm %s · python %s · git %s' "$green" "$reset" \
   "$(node --version)" "$(npm --version)" "$(python3 --version | cut -d' ' -f2)" "$(git --version | cut -d' ' -f3)"
+if [ -n "$gh_ver" ]; then
+  printf ' · gh %s' "$gh_ver"
+fi
+printf '\n'
 printf '%sAgent CLIs install themselves the first time you run them: claude, codex, gemini, opencode, pi, qwen.%s\n' "$dim" "$reset"
 printf '%sPhone speed: run termfold-bench; use ESLint --cache in npm run lint; split type-aware lint to lint:ci; try turbo --concurrency=1 on device.%s\n' "$dim" "$reset"
 printf '%sWeb apps: open the in-app preview browser (termfold-browser / MCP) to test localhost dev servers while you watch.%s\n' "$dim" "$reset"

@@ -664,6 +664,27 @@ object AcpInstaller {
         ensureNode(context) { step -> Log.i(TAG, "Node repair: $step") }
     }
 
+    /** Installs `gh` from Debian when missing (same packages as [termfold-setup.sh]). */
+    fun ensureGh(context: Context, onProgress: (String) -> Unit = {}) {
+        val probe = runCapture(context, "command -v gh", timeoutSeconds = 30)
+        if (probe.first == 0 && probe.second.trim().isNotEmpty()) return
+        onProgress("Installing GitHub CLI")
+        val install = runCapture(
+            context,
+            """
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq && apt-get -y \
+              -o Dpkg::Options::=--force-confdef \
+              -o Dpkg::Options::=--force-confold \
+              install --no-install-recommends gh
+            """.trimIndent(),
+            timeoutSeconds = 600,
+        )
+        if (install.first != 0) {
+            Log.w(TAG, "gh install failed: ${install.second.takeLast(800)}")
+        }
+    }
+
     private fun ensureNode(context: Context, onProgress: (String) -> Unit) {
         val nodeDir = File(ShellPaths.rootfsDir(context), NODE_ROOT.trimStart('/'))
         // Installs made before the version marker existed have no marker, so they upgrade too.

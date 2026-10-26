@@ -12,10 +12,28 @@ import com.termfold.app.automation.AutomationSession
 import com.termfold.app.automation.AutomationStorage
 import com.termfold.app.data.AutomationStore
 import com.termfold.app.data.FolderStore
+import com.termfold.app.data.PrReviewStore
+import com.termfold.app.gitworkspace.CheckoutMode
+import com.termfold.app.gitworkspace.GitWorkspace
+import com.termfold.app.gitworkspace.ProjectWorkspaces
+import com.termfold.app.gitworkspace.WorkspaceRecord
+import com.termfold.app.gitworkspace.WorkspaceStore
+import com.termfold.app.prreview.BindAction
+import com.termfold.app.prreview.DoneKind
+import com.termfold.app.prreview.GitHubOrigin
+import com.termfold.app.prreview.GitHubPrApi
+import com.termfold.app.prreview.GitHubPrFetch
+import com.termfold.app.prreview.GitHubPrUrl
+import com.termfold.app.prreview.PrReviewBind
+import com.termfold.app.prreview.PrReviewData
+import com.termfold.app.prreview.PrReviewPaths
+import com.termfold.app.prreview.PrReviewSession
 import com.termfold.app.shell.DistroMigration
 import com.termfold.app.shell.Projects
 import com.termfold.app.shell.ShellRuntime
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -32,6 +50,14 @@ data class BackupJob(
     val fraction: Float = 0f,
     val error: String? = null,
     val done: Boolean = false,
+)
+
+data class PrReviewJob(
+    val title: String,
+    val step: String = "",
+    val percent: Int = 0,
+    val error: String? = null,
+    val doneSessionId: String? = null,
 )
 
 /** A project being created in the background (a git clone or a device-folder import). */
@@ -67,12 +93,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val store = FolderStore(application)
     private val automationStore = AutomationStore(application)
+    private val prReviewStore = PrReviewStore(application)
 
     val folders: StateFlow<AppData> = store.data
         .stateIn(viewModelScope, SharingStarted.Eagerly, AppData())
 
     val automation: StateFlow<com.termfold.app.automation.AutomationData> = automationStore.data
         .stateIn(viewModelScope, SharingStarted.Eagerly, com.termfold.app.automation.AutomationData())
+
+    val prReviews: StateFlow<PrReviewData> = prReviewStore.data
+        .stateIn(viewModelScope, SharingStarted.Eagerly, PrReviewData())
 
     private val _shell = MutableStateFlow(ShellProgress())
     val shell: StateFlow<ShellProgress> = _shell.asStateFlow()
@@ -82,6 +112,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _backupJob = MutableStateFlow<BackupJob?>(null)
     val backupJob: StateFlow<BackupJob?> = _backupJob.asStateFlow()
+
+    private val _prReviewJob = MutableStateFlow<PrReviewJob?>(null)
+    val prReviewJob: StateFlow<PrReviewJob?> = _prReviewJob.asStateFlow()
+    private var prReviewBindJob: Job? = null
 
     fun dismissJob() {
         if (_job.value?.done == true || _job.value?.error != null) _job.value = null
@@ -563,5 +597,248 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 AutomationPaths.hostSessionDir(app, projectId, sessionId).deleteRecursively()
             }
         }
+    }
+
+    fun dismissPrReviewJob() {
+        val job = _prReviewJob.value ?: return
+        if (job.error != null || job.doneSessionId != null) _prReviewJob.value = null
+    }
+
+    fun cancelPrReviewBind() {
+        prReviewBindJob?.cancel()
+    }
+
+    fun bindPrReview(url: String, existingSessionId: String? = null, onReady: (String) -> Unit = {}) {
+        val app = getApplication<Application>()
+        prReviewBindJob?.cancel()
+        prReviewBindJob = viewModelScope.launch {
+            var partialFolderId: String? = null
+            var partialWorkspaceId: String? = null
+            var partialGolden: String? = null
+            var partialGuest: String? = null
+            var createdSessionId: String? = null
+            try {
+                val ref = GitHubPrUrl.parse(url)
+                if (ref == null) {
+                    _prReviewJob.value = PrReviewJob(
+                        title = "PR review",
+                        error = "Paste a GitHub pull request link (github.com/owner/repo/pull/123).",
+                    )
+                    return@launch
+                }
+                _prReviewJob.value = PrReviewJob(title = "PR review", step = "Reading pull request…")
+                val fetch = withContext(Dispatchers.IO) {
+                    GitHubPrApi.fetch(
+                        app,
+                        ref,
+                        onProgress = { step ->
+                            _prReviewJob.value = PrReviewJob(title = "PR review", step = step)
+                        },
+                    )
+                }
+                val info = when (fetch) {
+                    is GitHubPrFetch.Ok -> fetch.info
+                    is GitHubPrFetch.Error -> {
+                        _prReviewJob.value = PrReviewJob(title = "PR review", error = fetch.message)
+                        return@launch
+                    }
+                }
+                val origins = folders.value.folders.map { folder ->
+                    val guest = WorkspaceStore.goldenGuestPath(app, folder)
+                    val origin = GitWorkspace.originUrl(app, guest).orEmpty()
+                    folder.id to origin
+                }
+                val match = GitHubOrigin.match(ref.repoKey, origins)
+                val existing = existingSessionId?.let { prReviews.value.session(it) }
+                val copyId = existing?.workspaceId
+                val copyDirty = if (existing != null && copyId != null) {
+                    val folder = folders.value.folder(existing.folderId)
+                    val guest = folder?.let { WorkspaceStore.guestPath(app, it, copyId) }
+                    guest != null && GitWorkspace.isDirty(app, guest)
+                } else {
+                    false
+                }
+                when (
+                    val action = PrReviewBind.decide(
+                        incoming = ref,
+                        headBranch = info.headRef,
+                        match = match,
+                        session = existing,
+                        copyWorkspaceId = copyId,
+                        copyDirty = copyDirty,
+                    )
+                ) {
+                    is BindAction.Error -> {
+                        _prReviewJob.value = PrReviewJob(title = "PR review", error = action.message)
+                    }
+                    is BindAction.ReuseSwitch -> {
+                        val session = existing ?: return@launch
+                        val folder = folders.value.folder(session.folderId) ?: return@launch
+                        val guest = WorkspaceStore.guestPath(app, folder, action.workspaceId)
+                        if (guest == null) {
+                            _prReviewJob.value = PrReviewJob(
+                                title = "PR review",
+                                error = "The temp copy is missing. Tap Done and paste the PR again.",
+                            )
+                            return@launch
+                        }
+                        _prReviewJob.value = PrReviewJob(title = "PR review", step = "Switching to ${action.branch}…")
+                        GitWorkspace.checkoutBranch(app, guest, action.branch, CheckoutMode.FAIL_IF_DIRTY)
+                            .getOrElse { err ->
+                                _prReviewJob.value = PrReviewJob(
+                                    title = "PR review",
+                                    error = err.message ?: PrReviewBind.ERR_DIRTY_SWITCH,
+                                )
+                                return@launch
+                            }
+                        WorkspaceStore.updateBranch(app, folder.id, action.workspaceId, action.branch)
+                        upsertReviewSession(
+                            (existing).copy(
+                                name = info.title,
+                                url = info.htmlUrl,
+                                owner = ref.owner,
+                                repo = ref.repo,
+                                number = ref.number,
+                                headBranch = action.branch,
+                                workspaceId = action.workspaceId,
+                            ),
+                        )
+                        _prReviewJob.value = PrReviewJob(
+                            title = "PR review",
+                            doneSessionId = session.id,
+                            percent = 100,
+                        )
+                        onReady(session.id)
+                    }
+                    is BindAction.Provision -> {
+                        val folder = folders.value.folder(action.folderId)
+                        if (folder == null) {
+                            _prReviewJob.value = PrReviewJob(title = "PR review", error = PrReviewBind.ERR_NOT_CLONED)
+                            return@launch
+                        }
+                        val sessionId = existing?.id ?: Ids.new()
+                        if (existing == null) createdSessionId = sessionId
+                        withContext(Dispatchers.IO) { PrReviewPaths.ensureStub(app, sessionId) }
+                        val golden = WorkspaceStore.goldenGuestPath(app, folder)
+                        GitWorkspace.fetchOrigin(app, golden)
+                        val workspaceId = ProjectWorkspaces.newSessionId()
+                        val guest = ProjectWorkspaces.sessionGuestPath(golden, workspaceId)
+                        partialFolderId = folder.id
+                        partialWorkspaceId = workspaceId
+                        partialGolden = golden
+                        partialGuest = guest
+                        val record = WorkspaceRecord(
+                            id = workspaceId,
+                            goldenProjectId = folder.id,
+                            guestPath = guest,
+                            createdAt = System.currentTimeMillis(),
+                            sourceBranch = action.branch,
+                            lastKnownBranch = action.branch,
+                            complete = false,
+                            label = "PR #${ref.number}",
+                        )
+                        WorkspaceStore.insert(app, record)
+                        val session = PrReviewSession(
+                            id = sessionId,
+                            name = info.title,
+                            url = info.htmlUrl,
+                            owner = ref.owner,
+                            repo = ref.repo,
+                            number = ref.number,
+                            headBranch = action.branch,
+                            folderId = folder.id,
+                            workspaceId = null,
+                            tint = existing?.tint ?: (prReviews.value.sessions.size % 6),
+                        )
+                        upsertReviewSession(session)
+                        GitWorkspace.provisionWorkspace(
+                            context = app,
+                            goldenGuestPath = golden,
+                            branch = action.branch,
+                            sessionWorkspaceId = workspaceId,
+                            onProgress = { progress ->
+                                _prReviewJob.value = PrReviewJob(
+                                    title = "PR review",
+                                    step = "Copying ${action.branch}…",
+                                    percent = progress.percent,
+                                )
+                            },
+                        )
+                        WorkspaceStore.insert(app, record.copy(complete = true))
+                        upsertReviewSession(session.copy(workspaceId = workspaceId))
+                        _prReviewJob.value = PrReviewJob(
+                            title = "PR review",
+                            doneSessionId = sessionId,
+                            percent = 100,
+                        )
+                        onReady(sessionId)
+                    }
+                }
+            } catch (e: CancellationException) {
+                val golden = partialGolden
+                val guest = partialGuest
+                val folderId = partialFolderId
+                val workspaceId = partialWorkspaceId
+                if (golden != null && guest != null) {
+                    GitWorkspace.deletePartialWorkspace(app, golden, guest)
+                }
+                if (folderId != null && workspaceId != null) {
+                    WorkspaceStore.remove(app, folderId, workspaceId)
+                }
+                createdSessionId?.let { id -> prReviewStore.update { it.without(id) } }
+                _prReviewJob.value = null
+                throw e
+            } catch (e: Throwable) {
+                val golden = partialGolden
+                val guest = partialGuest
+                val folderId = partialFolderId
+                val workspaceId = partialWorkspaceId
+                if (golden != null && guest != null) {
+                    GitWorkspace.deletePartialWorkspace(app, golden, guest)
+                }
+                if (folderId != null && workspaceId != null) {
+                    WorkspaceStore.remove(app, folderId, workspaceId)
+                }
+                createdSessionId?.let { id -> prReviewStore.update { it.without(id) } }
+                _prReviewJob.value = PrReviewJob(
+                    title = "PR review",
+                    error = e.message ?: e.toString(),
+                )
+            }
+        }
+    }
+
+    suspend fun reviewDoneKind(sessionId: String): DoneKind {
+        val app = getApplication<Application>()
+        val session = prReviews.value.session(sessionId) ?: return DoneKind.AlreadyGone
+        val workspaceId = session.workspaceId ?: return DoneKind.AlreadyGone
+        val folder = folders.value.folder(session.folderId) ?: return DoneKind.AlreadyGone
+        val guest = WorkspaceStore.guestPath(app, folder, workspaceId) ?: return DoneKind.AlreadyGone
+        val dirty = GitWorkspace.isDirty(app, guest)
+        val unpushed = GitWorkspace.hasUnpushedCommits(app, guest)
+        return PrReviewBind.decideDone(copyExists = true, dirty = dirty, unpushed = unpushed)
+    }
+
+    fun applyReviewDone(sessionId: String) {
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val session = prReviews.value.session(sessionId) ?: return@launch
+            val workspaceId = session.workspaceId
+            val folder = folders.value.folder(session.folderId)
+            if (workspaceId != null && folder != null) {
+                val golden = WorkspaceStore.goldenGuestPath(app, folder)
+                val guest = WorkspaceStore.guestPath(app, folder, workspaceId)
+                if (guest != null) {
+                    GitWorkspace.deletePartialWorkspace(app, golden, guest)
+                }
+                WorkspaceStore.remove(app, folder.id, workspaceId)
+            }
+            upsertReviewSession(session.copy(workspaceId = null))
+            withContext(Dispatchers.IO) { PrReviewPaths.ensureStub(app, sessionId) }
+        }
+    }
+
+    private suspend fun upsertReviewSession(session: PrReviewSession) {
+        prReviewStore.update { it.upsert(session) }
     }
 }

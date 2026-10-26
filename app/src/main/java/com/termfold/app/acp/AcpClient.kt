@@ -213,8 +213,9 @@ class AcpClient(
     private val context: Context,
     private val sessionKey: String,
     private val agent: AcpAgent,
-    private val workspaceGuestDir: String,
+    val workspaceGuestDir: String,
     private val automationPromptPrefix: (() -> String)? = null,
+    private val extraPromptPrefix: (() -> String)? = null,
     private val automationReadOnlyGuestRoot: String? = null,
     private val automationGuardrails: (() -> AutomationGuardrailContext?)? = null,
 ) {
@@ -1101,8 +1102,10 @@ class AcpClient(
                 append("\n\n---\n\n")
                 pendingWireContext = null
             }
-            automationPromptPrefix?.invoke()?.takeIf { it.isNotBlank() }?.let { prefix ->
-                append(prefix)
+            val prefix = automationPromptPrefix?.invoke()?.takeIf { it.isNotBlank() }
+                ?: extraPromptPrefix?.invoke()?.takeIf { it.isNotBlank() }
+            prefix?.let {
+                append(it)
                 append("\n\n---\n\n")
             }
             val body = if (automationMode) {
@@ -1775,6 +1778,7 @@ class AcpClient(
 
     /** Ends the agent process. The stored agent install survives; only the process tree dies. */
     fun close() {
+        persistTimeline()
         closedByUser = true
         idleDisconnected = false
         running.set(false)

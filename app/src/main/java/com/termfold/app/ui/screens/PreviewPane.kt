@@ -19,6 +19,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.view.View
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -114,6 +115,7 @@ import com.termfold.app.preview.DriverUi
 import com.termfold.app.preview.Preview
 import com.termfold.app.preview.PreviewFiles
 import com.termfold.app.preview.PreviewTabHost
+import com.termfold.app.preview.PreviewWebView
 import org.json.JSONArray
 import android.webkit.WebStorage
 import com.termfold.app.shell.ShellPaths
@@ -148,6 +150,7 @@ private fun markFailed(network: MutableList<NetEntry>, url: String, why: String)
         if (entry != null) entry.failure = why else network.add(NetEntry("GET", url, false, BrowserBridge.networkGeneration).also { it.failure = why })
     }
 }
+
 private const val PHONE_WIDTH = 390
 private const val DESKTOP_WIDTH = 1280
 
@@ -232,7 +235,7 @@ fun PreviewPane(
         }
         currentUrl = url
         tabHost.activeTab().url = url
-        webView?.loadUrl(url)
+        webView?.let { PreviewWebView.loadUrlWhenReady(it, url) }
     }
 
     // A new request from outside (a header button, a file's Preview, a link) loads its page.
@@ -247,7 +250,7 @@ fun PreviewPane(
         val url = state.url
         currentUrl = url
         loadError = null
-        if (url != null && view.url != url) view.loadUrl(url)
+        if (url != null) PreviewWebView.loadUrlWhenReady(view, url)
     }
 
     // A preview of the project's files reloads when anything in its folder changes. Dev servers
@@ -271,25 +274,13 @@ fun PreviewPane(
 
     fun applyViewport(view: WebView) {
         val viewport = Viewport.valueOf(viewportName)
-        val settings = view.settings
-        settings.useWideViewPort = true
-        settings.loadWithOverviewMode = true
-        val base = WebSettings.getDefaultUserAgent(context)
-        settings.userAgentString = if (viewport == Viewport.DESKTOP) {
-            base.replace(Regex("\\(Linux; Android [^)]*\\)"), "(X11; Linux x86_64)").replace(" Mobile", "").replace("; wv", "")
-        } else {
-            base
-        }
+        PreviewWebView.applySettings(context, view.settings, viewport == Viewport.DESKTOP)
+        PreviewWebView.applyRenderingPolicy(view)
     }
 
-    fun desktopScript(view: WebView) {
-        if (Viewport.valueOf(viewportName) != Viewport.DESKTOP) return
-        view.evaluateJavascript(
-            "(function(){var m=document.querySelector('meta[name=viewport]');" +
-                "if(!m){m=document.createElement('meta');m.name='viewport';(document.head||document.documentElement).appendChild(m);}" +
-                "m.content='width=$DESKTOP_WIDTH';})();",
-            null,
-        )
+    fun viewportScript(view: WebView) {
+        val desktop = Viewport.valueOf(viewportName) == Viewport.DESKTOP
+        PreviewWebView.injectViewportMeta(view, DESKTOP_WIDTH, desktop)
     }
 
     fun toast(text: String) = Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
@@ -671,25 +662,25 @@ fun PreviewPane(
                         view.destroy()
                     },
                     // No page yet: nothing to show, and no white flash behind the start page.
-                    update = { view -> view.visibility = if (showStart) android.view.View.INVISIBLE else android.view.View.VISIBLE },
+                    update = { view ->
+                        val showPage = !showStart
+                        if (showPage) {
+                            if (view.visibility != View.VISIBLE) {
+                                view.visibility = View.VISIBLE
+                                view.invalidate()
+                                currentUrl?.let { PreviewWebView.nudgeAfterLoad(view, it) }
+                            }
+                        } else {
+                            view.visibility = View.INVISIBLE
+                        }
+                    },
                     factory = { ctx ->
                         Preview.webViewDataDirectorySuffix?.let { suffix ->
                             runCatching { WebView.setDataDirectorySuffix(suffix) }
                         }
                         WebView(ctx).apply {
                             setBackgroundColor(android.graphics.Color.parseColor("#08080A"))
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            settings.databaseEnabled = true
-                            settings.mediaPlaybackRequiresUserGesture = false
-                            settings.builtInZoomControls = true
-                            settings.displayZoomControls = false
-                            settings.setSupportMultipleWindows(true)
-                            settings.javaScriptCanOpenWindowsAutomatically = true
-                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                            // Pages reach files only through the project server, never file://.
-                            settings.allowFileAccess = false
-                            settings.allowContentAccess = false
+                            setLayerType(View.LAYER_TYPE_HARDWARE, null)
                             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                             applyViewport(this)
                             tabHost.attachWebView(activeTabId, this)
@@ -731,11 +722,15 @@ fun PreviewPane(
                                     console.clear()
                                 }
 
-                                override fun onPageCommitVisible(view: WebView, url: String) = desktopScript(view)
+                                override fun onPageCommitVisible(view: WebView, url: String) {
+                                    viewportScript(view)
+                                    PreviewWebView.nudgeAfterLoad(view, url)
+                                }
 
                                 override fun onPageFinished(view: WebView, url: String) {
                                     progress = 100
-                                    desktopScript(view)
+                                    viewportScript(view)
+                                    PreviewWebView.nudgeAfterLoad(view, url)
                                 }
 
                                 override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
@@ -832,7 +827,9 @@ fun PreviewPane(
                             }
                             setDownloadListener { url, _, _, _, _ -> openOutside(url) }
                             webView = this
-                            tabHost.activeTab().url?.let { u -> if (u != "about:blank") loadUrl(u) }
+                            tabHost.activeTab().url?.let { u ->
+                                if (u != "about:blank") PreviewWebView.loadUrlWhenReady(this, u)
+                            }
                         }
                     },
                 )

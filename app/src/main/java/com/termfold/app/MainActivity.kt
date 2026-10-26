@@ -44,6 +44,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -195,6 +196,7 @@ private sealed interface Destination {
     data class WorkflowsSection(val section: com.termfold.app.ui.screens.WorkflowsSection) : Destination
     data class AutomationProject(val projectId: String) : Destination
     data class AutomationSession(val projectId: String, val sessionId: String) : Destination
+    data class PrReviewSession(val sessionId: String) : Destination
 }
 
 /** How deep a destination sits, used to give the transitions a consistent direction. */
@@ -205,6 +207,7 @@ private fun Destination.depth(): Int = when (this) {
     is Destination.WorkflowsSection -> 1
     is Destination.AutomationProject -> 2
     is Destination.AutomationSession -> 3
+    is Destination.PrReviewSession -> 2
 }
 
 /**
@@ -243,6 +246,8 @@ private sealed interface AutomationOptionsTarget {
 internal fun TermFoldRoot(viewModel: AppViewModel) {
     val data by viewModel.folders.collectAsStateWithLifecycle()
     val automationData by viewModel.automation.collectAsStateWithLifecycle()
+    val prReviewData by viewModel.prReviews.collectAsStateWithLifecycle()
+    val prReviewJob by viewModel.prReviewJob.collectAsStateWithLifecycle()
     val shell by viewModel.shell.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
@@ -454,6 +459,28 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                         )
                     }
                 }
+                is Destination.PrReviewSession -> {
+                    val review = prReviewData.session(d.sessionId)
+                    val coding = review?.folderId?.let { data.folder(it) }
+                    coding ?: review?.let { session ->
+                        Folder(
+                            id = "pr-review-${session.id}",
+                            name = session.name,
+                            path = com.termfold.app.prreview.PrReviewPaths.hostSessionDir(context, session.id).absolutePath,
+                            tint = session.tint,
+                            sessions = listOf(
+                                Session(
+                                    id = session.id,
+                                    name = session.name,
+                                    command = "",
+                                    tint = session.tint,
+                                    acpAgentId = session.acpAgentId,
+                                    workspaceId = session.workspaceId ?: WorkspaceIds.GOLDEN,
+                                ),
+                            ),
+                        )
+                    }
+                }
                 else -> null
             }
             val filesRootHostPath = when (val d = destination) {
@@ -469,11 +496,25 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                         }
                     }
                 }
+                is Destination.PrReviewSession -> {
+                    val review = prReviewData.session(d.sessionId)
+                    val coding = review?.folderId?.let { data.folder(it) }
+                    val copyGuest = if (review?.workspaceId != null && coding != null) {
+                        com.termfold.app.gitworkspace.WorkspaceStore.guestPath(context, coding, review.workspaceId)
+                    } else {
+                        null
+                    }
+                    val guest = copyGuest ?: review?.let {
+                        com.termfold.app.prreview.PrReviewPaths.sessionGuest(it.id)
+                    }
+                    guest?.let { com.termfold.app.shell.Projects.hostPath(context, it).absolutePath }
+                }
                 else -> null
             }
             val sessionWorkspaceFilesScope = when (val d = destination) {
                 is Destination.Terminal ->
                     d.workspaceId != com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN
+                is Destination.PrReviewSession -> true
                 else -> false
             }
             // A phone's drawer closes when the screen changes; a tablet keeps the tree docked.
@@ -608,6 +649,8 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                         section = current.section,
                         projects = automationData.projects,
                         codingFolders = data.folders,
+                        prReviews = prReviewData.sessions,
+                        prReviewError = prReviewJob?.error,
                         onBack = {
                             tab = NavTab.WORKFLOWS
                             destination = Destination.Tabs
@@ -617,6 +660,12 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                             automationOptionsFor = AutomationOptionsTarget.Project(projectId)
                         },
                         onAddProject = { newAutomationProject = true },
+                        onOpenPrReview = { destination = Destination.PrReviewSession(it) },
+                        onStartPrReview = { url ->
+                            viewModel.bindPrReview(url) { id ->
+                                destination = Destination.PrReviewSession(id)
+                            }
+                        },
                         useGrid = windowWidth.isWide,
                         modifier = Modifier.windowInsetsPadding(
                             WindowInsets.safeDrawing.only(
@@ -656,6 +705,43 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                             onAddSession = { newAutomationSessionFor = project.id },
                             onLinkFolder = { folderId -> viewModel.linkAutomationFolder(project.id, folderId) },
                             wide = windowWidth.isWide,
+                            modifier = Modifier.windowInsetsPadding(
+                                WindowInsets.safeDrawing.only(
+                                    WindowInsetsSides.Top + WindowInsetsSides.End,
+                                ),
+                            ),
+                        )
+                    }
+                }
+
+                is Destination.PrReviewSession -> {
+                    val session = prReviewData.session(current.sessionId)
+                    if (session == null) {
+                        LaunchedEffect(current.sessionId) {
+                            destination = Destination.WorkflowsSection(WorkflowsSection.PR_REVIEWER)
+                        }
+                    } else {
+                        val coding = data.folder(session.folderId)
+                        BackHandler {
+                            tab = NavTab.WORKFLOWS
+                            destination = Destination.WorkflowsSection(WorkflowsSection.PR_REVIEWER)
+                        }
+                        com.termfold.app.ui.screens.PrReviewAgentSessionScreen(
+                            session = session,
+                            codingFolder = coding,
+                            onBack = {
+                                tab = NavTab.WORKFLOWS
+                                destination = Destination.WorkflowsSection(WorkflowsSection.PR_REVIEWER)
+                            },
+                            onDoneKind = { viewModel.reviewDoneKind(it) },
+                            onApplyDone = { viewModel.applyReviewDone(it) },
+                            onPasteAnother = { url ->
+                                viewModel.bindPrReview(url, existingSessionId = session.id) { id ->
+                                    destination = Destination.PrReviewSession(id)
+                                }
+                            },
+                            filesOpen = filesOpen,
+                            onToggleFiles = { filesOpen = !filesOpen },
                             modifier = Modifier.windowInsetsPadding(
                                 WindowInsets.safeDrawing.only(
                                     WindowInsetsSides.Top + WindowInsetsSides.End,
@@ -919,6 +1005,44 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
             },
             onDismiss = { newProject = false },
         )
+    }
+    prReviewJob?.let { job ->
+        val error = job.error
+        if (error != null) {
+            AlertDialog(
+                onDismissRequest = { viewModel.dismissPrReviewJob() },
+                title = { Text(job.title, color = Palette.Text) },
+                text = { Text(error, color = Palette.TextDim) },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.dismissPrReviewJob() }) {
+                        Text(stringResource(R.string.action_ok), color = Palette.Accent)
+                    }
+                },
+            )
+        } else if (job.doneSessionId == null) {
+            AlertDialog(
+                onDismissRequest = {},
+                title = { Text(job.title, color = Palette.Text) },
+                text = {
+                    Column {
+                        Text(job.step, color = Palette.TextDim, style = MaterialTheme.typography.bodySmall)
+                        Spacer(Modifier.height(12.dp))
+                        LinearProgressIndicator(
+                            progress = { (job.percent / 100f).coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {
+                    TextButton(
+                        onClick = { viewModel.cancelPrReviewBind() },
+                    ) {
+                        Text(stringResource(R.string.pr_review_job_cancel), color = Palette.TextDim)
+                    }
+                },
+            )
+        }
     }
     job?.let { j ->
         com.termfold.app.ui.screens.ProjectJobDialog(

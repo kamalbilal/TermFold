@@ -63,6 +63,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.animation.fadeOut
@@ -164,15 +165,23 @@ fun AgentSessionScreen(
     filesOpen: Boolean = false,
     onToggleFiles: () -> Unit = {},
     automationPromptPrefix: (() -> String)? = null,
+    promptPrefix: (() -> String)? = null,
     previewProjectDirOverride: String? = null,
     automationReadOnlyGuestRoot: String? = null,
     automationSessionKey: String? = null,
     automationGuardrails: (() -> com.termfold.app.automation.AutomationGuardrailContext?)? = null,
+    sessionKeyOverride: String? = null,
+    guestDirOverride: String? = null,
+    hideBranchPicker: Boolean = false,
+    onReviewDone: (() -> Unit)? = null,
+    onReviewAnother: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val key = com.termfold.app.gitworkspace.SessionKeys.compose(folder.id, workspaceId, sessionId)
-    val guestDir = com.termfold.app.gitworkspace.WorkspaceStore.guestPath(context, folder, workspaceId)
+    val key = sessionKeyOverride
+        ?: com.termfold.app.gitworkspace.SessionKeys.compose(folder.id, workspaceId, sessionId)
+    val guestDir = guestDirOverride
+        ?: com.termfold.app.gitworkspace.WorkspaceStore.guestPath(context, folder, workspaceId)
     if (guestDir == null) {
         Column(modifier = modifier.fillMaxSize()) {
             SessionHeader(title = agentId, subtitle = folder.name, iconUrl = "", onBack = onBack)
@@ -239,22 +248,29 @@ fun AgentSessionScreen(
         return
     }
 
-    val client = remember(key) {
-        AcpSessions.client(key) ?: AcpSessions.put(
-            key,
-            AcpClient(
-                context = context.applicationContext,
-                sessionKey = key,
-                agent = resolved,
-                workspaceGuestDir = guestDir,
-                automationPromptPrefix = automationPromptPrefix,
-                automationReadOnlyGuestRoot = automationReadOnlyGuestRoot,
-                automationGuardrails = automationGuardrails,
-            ),
-        )
+    val client = remember(key, guestDir) {
+        val existing = AcpSessions.client(key)
+        if (existing != null && existing.workspaceGuestDir == guestDir) {
+            existing
+        } else {
+            if (existing != null) AcpSessions.close(key)
+            AcpSessions.put(
+                key,
+                AcpClient(
+                    context = context.applicationContext,
+                    sessionKey = key,
+                    agent = resolved,
+                    workspaceGuestDir = guestDir,
+                    automationPromptPrefix = automationPromptPrefix,
+                    extraPromptPrefix = promptPrefix,
+                    automationReadOnlyGuestRoot = automationReadOnlyGuestRoot,
+                    automationGuardrails = automationGuardrails,
+                ),
+            )
+        }
     }
 
-    LaunchedEffect(key) {
+    LaunchedEffect(key, guestDir) {
         client.start()
         com.termfold.app.notify.SessionWatcher.onSessionStarted(context.applicationContext)
     }
@@ -364,6 +380,8 @@ fun AgentSessionScreen(
             },
             filesOpen = filesOpen,
             onToggleFiles = onToggleFiles,
+            onReviewDone = onReviewDone,
+            onReviewAnother = onReviewAnother,
             onHistory = if (state.canResumeSessions && state.phase == AcpPhase.READY) {
                 { showHistory = true }
             } else {
@@ -534,9 +552,9 @@ fun AgentSessionScreen(
                 onSteer = { client.steer(it) },
                 onRemoveQueued = { client.removeQueued(it) },
                 onCancel = { client.cancel() },
-                branchName = if (isCursor) branchLabel else null,
-                branchUncommitted = isCursor && isGitWorkspace && branchDirty,
-                onBranchClick = if (isCursor) { { showBranchPicker = true } } else null,
+                branchName = if (isCursor && !hideBranchPicker) branchLabel else null,
+                branchUncommitted = isCursor && !hideBranchPicker && isGitWorkspace && branchDirty,
+                onBranchClick = if (isCursor && !hideBranchPicker) { { showBranchPicker = true } } else null,
                 editMessage = editingMessage,
                 onCancelEdit = { editingMessage = null },
                 onSubmitEdit = { text, images, files ->
@@ -726,6 +744,8 @@ private fun SessionHeader(
     live: Boolean = false,
     filesOpen: Boolean = false,
     onToggleFiles: (() -> Unit)? = null,
+    onReviewDone: (() -> Unit)? = null,
+    onReviewAnother: (() -> Unit)? = null,
     onHistory: (() -> Unit)? = null,
     onRestart: (() -> Unit)? = null,
     onMcp: (() -> Unit)? = null,
@@ -796,6 +816,16 @@ private fun SessionHeader(
             }
             if (onToggleFiles != null) {
                 FilesButton(open = filesOpen, onClick = onToggleFiles)
+            }
+            if (onReviewAnother != null) {
+                TextButton(onClick = onReviewAnother) {
+                    Text(stringResource(R.string.pr_review_paste_another), color = Palette.TextDim)
+                }
+            }
+            if (onReviewDone != null) {
+                TextButton(onClick = onReviewDone) {
+                    Text(stringResource(R.string.pr_review_done), color = Palette.Accent)
+                }
             }
             SessionHeaderOverflowMenu(
                 previewDir = previewDir,
