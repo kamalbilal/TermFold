@@ -18,13 +18,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import com.termfold.app.R
+import com.termfold.app.acp.AcpItem
 import com.termfold.app.core.Folder
 import com.termfold.app.core.Session
 import com.termfold.app.gitworkspace.WorkspaceStore
 import com.termfold.app.prreview.DoneKind
 import com.termfold.app.prreview.PrReviewKeys
+import com.termfold.app.prreview.PrReviewParse
 import com.termfold.app.prreview.PrReviewPaths
 import com.termfold.app.prreview.PrReviewPrompt
+import com.termfold.app.prreview.PrReviewReportParser
 import com.termfold.app.prreview.PrReviewSession
 import com.termfold.app.ui.theme.Palette
 import kotlinx.coroutines.launch
@@ -39,6 +42,7 @@ fun PrReviewAgentSessionScreen(
     onDoneKind: suspend (String) -> DoneKind,
     onApplyDone: (String) -> Unit,
     onPasteAnother: (String) -> Unit,
+    onSaveParse: (PrReviewParse) -> Unit = {},
     modifier: Modifier = Modifier,
     filesOpen: Boolean = false,
     onToggleFiles: () -> Unit = {},
@@ -48,6 +52,7 @@ fun PrReviewAgentSessionScreen(
     var confirmDone by remember { mutableStateOf(false) }
     var pasteOpen by remember { mutableStateOf(false) }
     var pasteValue by remember { mutableStateOf("") }
+    var agentWasBusy by remember(session.id) { mutableStateOf(false) }
     LaunchedEffect(session.id) {
         PrReviewPaths.ensureStub(context, session.id)
     }
@@ -84,6 +89,22 @@ fun PrReviewAgentSessionScreen(
         guestDirOverride = guestDir,
         hideBranchPicker = true,
         promptPrefix = { PrReviewPrompt.prefix(session) },
+        reviewChrome = {
+            PrReviewReportChrome(
+                report = prReviewReportFromSessionJson(session.lastReportJson),
+                parseError = session.lastParseError,
+            )
+        },
+        rewriteAgentText = { text ->
+            if (session.lastReportJson.isNullOrBlank()) text
+            else PrReviewReportParser.stripFences(text)
+        },
+        onAcpSnapshot = { items: List<AcpItem>, busy ->
+            if (agentWasBusy && !busy) {
+                onSaveParse(PrReviewReportParser.parseTurn(items))
+            }
+            agentWasBusy = busy
+        },
         onReviewDone = {
             scope.launch {
                 when (onDoneKind(session.id)) {

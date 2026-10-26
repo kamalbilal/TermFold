@@ -26,8 +26,13 @@ import com.termfold.app.prreview.GitHubPrFetch
 import com.termfold.app.prreview.GitHubPrUrl
 import com.termfold.app.prreview.PrReviewBind
 import com.termfold.app.prreview.PrReviewData
+import com.termfold.app.prreview.PrReviewFactsPack
+import com.termfold.app.prreview.GitHubPrInfo
+import com.termfold.app.prreview.GitHubPrRef
+import com.termfold.app.prreview.PrReviewParse
 import com.termfold.app.prreview.PrReviewPaths
 import com.termfold.app.prreview.PrReviewSession
+import com.termfold.app.prreview.PrReviewTurnSync
 import com.termfold.app.shell.DistroMigration
 import com.termfold.app.shell.Projects
 import com.termfold.app.shell.ShellRuntime
@@ -692,13 +697,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                                 return@launch
                             }
                         WorkspaceStore.updateBranch(app, folder.id, action.workspaceId, action.branch)
+                        _prReviewJob.value = PrReviewJob(title = "PR review", step = "Preparing review files…")
+                        withContext(Dispatchers.IO) {
+                            writeReviewFactsPack(app, guest, info, ref)
+                        }
                         upsertReviewSession(
-                            (existing).copy(
-                                name = info.title,
-                                url = info.htmlUrl,
-                                owner = ref.owner,
-                                repo = ref.repo,
-                                number = ref.number,
+                            existing.boundToNewPr(
+                                info = info,
+                                ref = ref,
                                 headBranch = action.branch,
                                 workspaceId = action.workspaceId,
                             ),
@@ -738,7 +744,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             label = "PR #${ref.number}",
                         )
                         WorkspaceStore.insert(app, record)
-                        val session = PrReviewSession(
+                        val session = (existing ?: PrReviewSession(
                             id = sessionId,
                             name = info.title,
                             url = info.htmlUrl,
@@ -747,7 +753,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             number = ref.number,
                             headBranch = action.branch,
                             folderId = folder.id,
+                            tint = prReviews.value.sessions.size % 6,
+                        )).boundToNewPr(
+                            info = info,
+                            ref = ref,
+                            headBranch = action.branch,
+                            folderId = folder.id,
                             workspaceId = null,
+                        ).copy(
+                            id = sessionId,
+                            acpAgentId = existing?.acpAgentId ?: "cursor",
                             tint = existing?.tint ?: (prReviews.value.sessions.size % 6),
                         )
                         upsertReviewSession(session)
@@ -765,6 +780,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             },
                         )
                         WorkspaceStore.insert(app, record.copy(complete = true))
+                        _prReviewJob.value = PrReviewJob(
+                            title = "PR review",
+                            step = "Preparing review files…",
+                            percent = 100,
+                        )
+                        withContext(Dispatchers.IO) {
+                            writeReviewFactsPack(app, guest, info, ref)
+                        }
                         upsertReviewSession(session.copy(workspaceId = workspaceId))
                         _prReviewJob.value = PrReviewJob(
                             title = "PR review",
@@ -836,6 +859,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             upsertReviewSession(session.copy(workspaceId = null))
             withContext(Dispatchers.IO) { PrReviewPaths.ensureStub(app, sessionId) }
         }
+    }
+
+    fun saveReviewParse(sessionId: String, parse: PrReviewParse) {
+        viewModelScope.launch {
+            val session = prReviews.value.session(sessionId) ?: return@launch
+            upsertReviewSession(PrReviewTurnSync.apply(session, parse))
+        }
+    }
+
+    private fun writeReviewFactsPack(
+        app: Application,
+        guest: String,
+        info: GitHubPrInfo,
+        ref: GitHubPrRef,
+    ) {
+        val comments = runCatching { GitHubPrApi.fetchComments(app, ref) }
+            .getOrElse { "No GitHub comments.\n" }
+        runCatching { PrReviewFactsPack.writeOnGuest(app, guest, info, comments) }
     }
 
     private suspend fun upsertReviewSession(session: PrReviewSession) {

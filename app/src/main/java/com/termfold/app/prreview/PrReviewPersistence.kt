@@ -36,6 +36,8 @@ object PrReviewPersistence {
             workspaceId = optString("workspaceId", "").ifBlank { null },
             tint = optInt("tint"),
             acpAgentId = optString("acpAgentId", "cursor").ifBlank { "cursor" },
+            lastReportJson = optString("lastReportJson", "").ifBlank { null },
+            lastParseError = optString("lastParseError", "").ifBlank { null },
         )
 
     private fun PrReviewSession.toJson(): JSONObject =
@@ -51,4 +53,6 @@ object PrReviewPersistence {
             .put("workspaceId", workspaceId ?: "")
             .put("tint", tint)
             .put("acpAgentId", acpAgentId)
+            .put("lastReportJson", lastReportJson ?: "")
+            .put("lastParseError", lastParseError ?: "")
 }

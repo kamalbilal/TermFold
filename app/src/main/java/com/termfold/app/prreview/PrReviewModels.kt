@@ -12,8 +12,29 @@ data class PrReviewSession(
     val workspaceId: String? = null,
     val tint: Int = 0,
     val acpAgentId: String = "cursor",
+    val lastReportJson: String? = null,
+    val lastParseError: String? = null,
 ) {
     val repoKey: String get() = GitHubOrigin.key(owner, repo)
+
+    fun boundToNewPr(
+        info: GitHubPrInfo,
+        ref: GitHubPrRef,
+        headBranch: String,
+        folderId: String = this.folderId,
+        workspaceId: String? = this.workspaceId,
+    ): PrReviewSession = copy(
+        name = info.title,
+        url = info.htmlUrl,
+        owner = ref.owner,
+        repo = ref.repo,
+        number = ref.number,
+        headBranch = headBranch,
+        folderId = folderId,
+        workspaceId = workspaceId,
+        lastReportJson = null,
+        lastParseError = null,
+    )
 }
 
 data class PrReviewData(

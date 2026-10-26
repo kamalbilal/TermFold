@@ -740,6 +740,7 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                                     destination = Destination.PrReviewSession(id)
                                 }
                             },
+                            onSaveParse = { parse -> viewModel.saveReviewParse(session.id, parse) },
                             filesOpen = filesOpen,
                             onToggleFiles = { filesOpen = !filesOpen },
                             modifier = Modifier.windowInsetsPadding(

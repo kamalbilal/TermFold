@@ -80,6 +80,7 @@ import androidx.compose.runtime.mutableStateSetOf
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -177,6 +178,9 @@ fun AgentSessionScreen(
     hideBranchPicker: Boolean = false,
     onReviewDone: (() -> Unit)? = null,
     onReviewAnother: (() -> Unit)? = null,
+    reviewChrome: (@Composable () -> Unit)? = null,
+    rewriteAgentText: (String) -> String = { it },
+    onAcpSnapshot: ((items: List<AcpItem>, agentBusy: Boolean) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -292,6 +296,10 @@ fun AgentSessionScreen(
     }
 
     val state by client.state.collectAsStateWithLifecycle()
+    val acpSnapshot = rememberUpdatedState(onAcpSnapshot)
+    LaunchedEffect(state.items, state.agentBusy) {
+        acpSnapshot.value?.invoke(state.items, state.agentBusy)
+    }
     var agentWasBusy by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
     var showAutomationSessionMemory by remember { mutableStateOf(false) }
@@ -458,6 +466,8 @@ fun AgentSessionScreen(
                         client = client,
                         onEditMessage = { editingMessage = it },
                         stickyUserMessagesEnabled = stickyUserMessagesEnabled,
+                        header = reviewChrome,
+                        rewriteAgentText = rewriteAgentText,
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -1326,6 +1336,8 @@ private fun Timeline(
     client: AcpClient,
     onEditMessage: (AcpItem.UserMessage) -> Unit,
     stickyUserMessagesEnabled: Boolean = true,
+    header: (@Composable () -> Unit)? = null,
+    rewriteAgentText: (String) -> String = { it },
     modifier: Modifier = Modifier,
 ) {
     val items = state.items
@@ -1497,7 +1509,12 @@ private fun Timeline(
                                     onImageClick = { previewImage = it },
                                 )
                             }
-                            is AcpItem.AgentText -> Markdown(item.text, Modifier.fillMaxWidth(), onOpenPath = onOpenPath)
+                            is AcpItem.AgentText -> {
+                                val text = rewriteAgentText(item.text)
+                                if (text.isNotBlank()) {
+                                    Markdown(text, Modifier.fillMaxWidth(), onOpenPath = onOpenPath)
+                                }
+                            }
                             is AcpItem.Thought -> ThoughtRow(item, live = isLast && state.agentBusy, onOpenPath = onOpenPath)
                             is AcpItem.Plan -> PlanCard(item)
                             is AcpItem.Notice -> NoticeRow(item.text)
@@ -1593,6 +1610,12 @@ private fun Timeline(
                         ToolCallDetailBlock(entry.item)
                     }
                 }
+            }
+        }
+
+        if (header != null) {
+            item(key = "pr-review-report") {
+                header()
             }
         }
 
