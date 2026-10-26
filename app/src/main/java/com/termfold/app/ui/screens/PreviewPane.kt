@@ -108,7 +108,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.termfold.app.R
 import com.termfold.app.ui.components.LaunchedWhileVisible
 import com.termfold.app.files.FileActions
+import android.os.Handler
+import android.os.Looper
 import com.termfold.app.preview.BrowserBridge
+import com.termfold.app.preview.GeckoConsoleLog
 import com.termfold.app.preview.BrowserDriver
 import com.termfold.app.preview.DevServers
 import com.termfold.app.preview.DriverUi
@@ -132,6 +135,7 @@ import com.termfold.app.ui.components.BareIconButton
 import com.termfold.app.ui.theme.Mono
 import com.termfold.app.ui.theme.Palette
 import com.termfold.app.ui.theme.TermFoldIcons
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -204,14 +208,22 @@ fun PreviewPane(
     var consoleOpen by remember { mutableStateOf(false) }
     val console = remember { mutableStateListOf<ConsoleLine>() }
     var consoleCounter by remember { mutableIntStateOf(0) }
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
     var servers by remember { mutableStateOf<List<Int>>(emptyList()) }
     var menuOpen by remember { mutableStateOf(false) }
+    var networkRulesOpen by remember { mutableStateOf(false) }
     var fileCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
     val showStart = currentUrl == null
     val storageContextId = BrowserBridge.automationSessionKey
         ?: BrowserBridge.codingSessionKey?.let { PreviewUrlRouter.sessionKeyForCoding(it) }
         ?: Preview.webViewDataDirectorySuffix
         ?: "preview"
+    var networkOpen by remember { mutableStateOf(false) }
+    var networkDetailEntry by remember { mutableStateOf<com.termfold.app.preview.network.NetworkCaptureStore.Entry?>(null) }
+    var networkPreserve by remember(storageContextId) {
+        mutableStateOf(com.termfold.app.preview.network.NetworkCaptureStore.isPreserve(storageContextId))
+    }
+    var networkEntries by remember { mutableStateOf(emptyList<com.termfold.app.preview.network.NetworkCaptureStore.Entry>()) }
     val useGeckoEngine = !showStart
     var geckoHost by remember(storageContextId) { mutableStateOf<GeckoPreviewHost?>(null) }
     var driverStubWebView by remember { mutableStateOf<WebView?>(null) }
@@ -246,6 +258,51 @@ fun PreviewPane(
 
     DisposableEffect(Unit) {
         onDispose { geckoHost?.release() }
+    }
+
+    fun appendPreviewConsole(level: ConsoleMessage.MessageLevel, text: String, where: String) {
+        console.add(ConsoleLine(consoleCounter++.toLong(), level, text, where))
+        if (console.size > CONSOLE_LIMIT) console.removeAt(0)
+    }
+
+    LaunchedEffect(useGeckoEngine, storageContextId) {
+        if (!useGeckoEngine) return@LaunchedEffect
+        val remove = GeckoConsoleLog.addListener(storageContextId) { entry ->
+            mainHandler.post { appendPreviewConsole(entry.level, entry.text, entry.where) }
+        }
+        try {
+            awaitCancellation()
+        } finally {
+            remove()
+        }
+    }
+
+    LaunchedEffect(currentUrl, useGeckoEngine) {
+        if (!useGeckoEngine) return@LaunchedEffect
+        val url = currentUrl ?: return@LaunchedEffect
+        if (url != "about:blank") {
+            console.clear()
+            GeckoConsoleLog.clear(storageContextId)
+            if (!useGeckoEngine) {
+                com.termfold.app.preview.network.NetworkCaptureStore.onMainFrameNavigation(storageContextId)
+                networkEntries = com.termfold.app.preview.network.NetworkCaptureStore.entries(storageContextId)
+            }
+        }
+    }
+
+    LaunchedEffect(networkOpen, storageContextId, useGeckoEngine) {
+        if (!useGeckoEngine) return@LaunchedEffect
+        if (!networkOpen) {
+            com.termfold.app.preview.network.NetworkCaptureHub.setUiSubscribed(storageContextId, false)
+            return@LaunchedEffect
+        }
+        com.termfold.app.preview.network.NetworkCaptureHub.setUiSubscribed(storageContextId, true)
+        networkPreserve = com.termfold.app.preview.network.NetworkCaptureStore.isPreserve(storageContextId)
+        networkEntries = com.termfold.app.preview.network.NetworkCaptureStore.entries(storageContextId)
+        com.termfold.app.preview.network.NetworkCaptureStore.revisionFlow.collect {
+            networkEntries = com.termfold.app.preview.network.NetworkCaptureStore.entries(storageContextId)
+            networkPreserve = com.termfold.app.preview.network.NetworkCaptureStore.isPreserve(storageContextId)
+        }
     }
 
     // What an agent driving the browser needs, and what the user sees while it does.
@@ -507,7 +564,28 @@ fun PreviewPane(
                     }
                 }
                 override fun consoleErrorsSince(since: Int) = console.count { it.id >= since && it.level == ConsoleMessage.MessageLevel.ERROR }
+                override fun appendConsole(level: String, text: String, where: String) {
+                    val mapped = when (level.lowercase()) {
+                        "error" -> ConsoleMessage.MessageLevel.ERROR
+                        "warn", "warning" -> ConsoleMessage.MessageLevel.WARNING
+                        "debug" -> ConsoleMessage.MessageLevel.DEBUG
+                        else -> ConsoleMessage.MessageLevel.LOG
+                    }
+                    mainHandler.post { appendPreviewConsole(mapped, text, where) }
+                }
                 override fun networkText(failedOnly: Boolean, sinceGeneration: Int): String {
+                    if (useGeckoEngine) {
+                        val (text, _) = com.termfold.app.preview.network.NetworkCaptureStore.listText(
+                            storageContextId,
+                            0L,
+                            failedOnly,
+                            false,
+                            null,
+                            com.termfold.app.preview.network.NetworkCaptureStore.LIST_DEFAULT_LIMIT,
+                            sinceGeneration,
+                        )
+                        return text
+                    }
                     val list = synchronized(network) {
                         network.toList().filter { it.gen >= sinceGeneration && (!failedOnly || it.failed) }
                     }
@@ -516,7 +594,9 @@ fun PreviewPane(
                 }
                 override fun networkInFlight(): Int = if (progress < 100) 1 else 0
                 override fun networkGeneration(): Int = BrowserBridge.networkGeneration
-                override fun failedRequestCount() = synchronized(network) { network.count { it.failed } }
+                override fun failedRequestCount() = if (useGeckoEngine) {
+                    com.termfold.app.preview.network.NetworkCaptureStore.failedCount(storageContextId)
+                } else synchronized(network) { network.count { it.failed } }
                 override fun visibleControlCount() = tabHost.activeTab().visibleControls
                 override fun setVisibleControls(count: Int) {
                     tabHost.activeTab().visibleControls = count
@@ -625,10 +705,12 @@ fun PreviewPane(
         onDispose { if (BrowserBridge.controller === driver) BrowserBridge.controller = null }
     }
 
+    BackHandler(enabled = networkRulesOpen) { networkRulesOpen = false }
     // Back steps through the page's history first when the preview has the screen to itself.
-    BackHandler(enabled = !parked && canBack && (!wide || maximized)) { pageGoBack() }
+    BackHandler(enabled = !networkRulesOpen && !parked && canBack && (!wide || maximized)) { pageGoBack() }
 
-    Column(modifier.background(Palette.Bg)) {
+    Box(modifier) {
+    Column(Modifier.fillMaxSize().background(Palette.Bg)) {
         // ---- Toolbar
         Row(
             Modifier.fillMaxWidth().height(52.dp).padding(start = 4.dp, end = 4.dp),
@@ -653,6 +735,11 @@ fun PreviewPane(
             if (wide) ViewportButton(viewport) { applyPreviewViewport(it) }
             Box {
                 ToolIcon(TermFoldIcons.Console, stringResource(R.string.preview_console), active = consoleOpen) { consoleOpen = !consoleOpen }
+                if (useGeckoEngine) {
+                    ToolIcon(TermFoldIcons.Globe, stringResource(R.string.preview_network_inspector), active = networkOpen) {
+                        networkOpen = !networkOpen
+                    }
+                }
                 val errors = console.count { it.level == ConsoleMessage.MessageLevel.ERROR }
                 if (errors > 0) {
                     Box(
@@ -694,6 +781,9 @@ fun PreviewPane(
                         }
                     }
                     HorizontalDivider(color = Palette.Border, modifier = Modifier.padding(vertical = 4.dp))
+                    MenuEntry(TermFoldIcons.Globe, stringResource(R.string.preview_network_rules)) {
+                        act { networkRulesOpen = true }
+                    }
                     MenuEntry(TermFoldIcons.Camera, stringResource(R.string.preview_screenshot_copy)) { act { screenshot(saveToProject = false) } }
                     MenuEntry(TermFoldIcons.SaveToDevice, stringResource(R.string.preview_screenshot_save)) { act { screenshot(saveToProject = true) } }
                     HorizontalDivider(color = Palette.Border, modifier = Modifier.padding(vertical = 4.dp))
@@ -1042,6 +1132,36 @@ fun PreviewPane(
 
             // ---- Console, over the bottom of the page
             androidx.compose.animation.AnimatedVisibility(
+                visible = networkOpen && useGeckoEngine,
+                enter = slideInVertically(Motion.standard()) { it } + fadeIn(Motion.standard()),
+                exit = slideOutVertically(Motion.quick()) { it } + fadeOut(Motion.quick()),
+                modifier = Modifier.align(Alignment.BottomCenter),
+            ) {
+                NetworkInspectorDrawer(
+                    sessionKey = storageContextId,
+                    entries = networkEntries,
+                    height = maxHeight * 0.42f,
+                    preserve = networkPreserve,
+                    onPreserveChange = { on ->
+                        networkPreserve = on
+                        com.termfold.app.preview.network.NetworkCaptureStore.setPreserve(storageContextId, on)
+                    },
+                    onClear = {
+                        com.termfold.app.preview.network.NetworkCaptureStore.clear(storageContextId)
+                        networkEntries = emptyList()
+                    },
+                    onClose = { networkOpen = false },
+                    onSelectEntry = { networkDetailEntry = it },
+                )
+            }
+            networkDetailEntry?.let { entry ->
+                NetworkEntryDetailSheet(
+                    sessionKey = storageContextId,
+                    entry = entry,
+                    onDismiss = { networkDetailEntry = null },
+                )
+            }
+            androidx.compose.animation.AnimatedVisibility(
                 visible = consoleOpen,
                 enter = slideInVertically(Motion.standard()) { it } + fadeIn(Motion.standard()),
                 exit = slideOutVertically(Motion.quick()) { it } + fadeOut(Motion.quick()),
@@ -1065,6 +1185,14 @@ fun PreviewPane(
                     onClose = { consoleOpen = false },
                 )
             }
+        }
+    }
+        if (networkRulesOpen) {
+            NetworkRulesScreen(
+                sessionKey = storageContextId,
+                onClose = { networkRulesOpen = false },
+                modifier = Modifier.fillMaxSize(),
+            )
         }
     }
 

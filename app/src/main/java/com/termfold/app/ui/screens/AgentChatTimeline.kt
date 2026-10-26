@@ -105,27 +105,65 @@ fun buildAgentChatTimelineEntries(
     return out
 }
 
+private fun lastUserMessageIndex(items: List<AcpItem>): Int =
+    items.indexOfLast { it is AcpItem.UserMessage }
+
+private fun toolInLatestTurn(tool: AcpItem.ToolCall, items: List<AcpItem>): Boolean {
+    val userIdx = lastUserMessageIndex(items)
+    if (userIdx < 0) return false
+    val toolIdx = items.indexOfFirst { it is AcpItem.ToolCall && it.id == tool.id }
+    if (toolIdx < 0) return false
+    return toolIdx > userIdx
+}
+
 /** Default collapsed state for a tool row; in-progress tools stay expanded. */
-fun defaultToolCallCollapsed(tool: AcpItem.ToolCall, showLiveToolDiffs: Boolean): Boolean {
+fun defaultToolCallCollapsed(
+    tool: AcpItem.ToolCall,
+    items: List<AcpItem>,
+    showLiveToolDiffs: Boolean,
+    agentBusy: Boolean,
+): Boolean {
     if (tool.status == "in_progress") return false
-    if (showLiveToolDiffs && tool.fileDiffs.isNotEmpty()) return false
-    return true
+    if (!showLiveToolDiffs) return true
+    if (agentBusy) return true
+    if (tool.fileDiffs.isEmpty()) return true
+    return !toolInLatestTurn(tool, items)
 }
 
 fun syncCompletedToolCollapse(
     items: List<AcpItem>,
     collapsedTools: MutableMap<Long, Boolean>,
     showLiveToolDiffs: Boolean,
+    agentBusy: Boolean,
     userToggledToolIds: Set<Long> = emptySet(),
 ) {
     for (item in items) {
         if (item !is AcpItem.ToolCall) continue
         if (item.id in userToggledToolIds) continue
-        val defaultCollapsed = defaultToolCallCollapsed(item, showLiveToolDiffs)
+        val defaultCollapsed = defaultToolCallCollapsed(item, items, showLiveToolDiffs, agentBusy)
         if (!collapsedTools.containsKey(item.id)) {
             collapsedTools[item.id] = defaultCollapsed
         } else if (collapsedTools[item.id] != defaultCollapsed) {
             collapsedTools[item.id] = defaultCollapsed
         }
+    }
+}
+
+/** Collapse map for the chat timeline; recomputed when items or live-diff policy change. */
+fun buildToolCallCollapsedMap(
+    items: List<AcpItem>,
+    showLiveToolDiffs: Boolean,
+    agentBusy: Boolean,
+    userToggledToolIds: Set<Long>,
+    userCollapsedOverrides: Map<Long, Boolean> = emptyMap(),
+): Map<Long, Boolean> = buildMap {
+    for (item in items) {
+        if (item !is AcpItem.ToolCall) continue
+        val collapsed = if (item.id in userToggledToolIds) {
+            userCollapsedOverrides[item.id] ?: defaultToolCallCollapsed(item, items, showLiveToolDiffs, agentBusy)
+        } else {
+            defaultToolCallCollapsed(item, items, showLiveToolDiffs, agentBusy)
+        }
+        put(item.id, collapsed)
     }
 }

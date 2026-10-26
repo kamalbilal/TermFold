@@ -16,7 +16,11 @@
     "nativeMessaging",
     "nativeMessagingFromContent",
     "geckoViewAddons",
-    "tabs"
+    "tabs",
+    "webRequest",
+    "webRequestBlocking",
+    "webRequestFilterResponse",
+    "<all_urls>"
   ],
   "content_scripts": [
     {

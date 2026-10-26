@@ -7,6 +7,9 @@ import org.json.JSONObject
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
+import com.termfold.app.preview.GeckoConsoleLog
+import com.termfold.app.preview.network.NetworkCaptureStore
+import com.termfold.app.preview.network.NetworkRulesHub
 import org.mozilla.geckoview.WebExtension
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -51,6 +54,7 @@ object GeckoTermfoldExtension {
                         ): GeckoResult<Any>? {
                             if (nativeApp != NATIVE_APP) return null
                             val json = message as? JSONObject ?: return null
+                            ingestExtensionEvent(json)
                             val id = json.optString("id")
                             if (id.isNotBlank()) {
                                 pending.remove(id)?.invoke(json)
@@ -65,6 +69,7 @@ object GeckoTermfoldExtension {
                                 object : WebExtension.PortDelegate {
                                     override fun onPortMessage(message: Any, port: WebExtension.Port) {
                                         val json = message as? JSONObject ?: return
+                                        if (ingestExtensionEvent(json)) return
                                         val id = json.optString("id")
                                         if (id.isNotBlank()) {
                                             pending.remove(id)?.invoke(json)
@@ -79,6 +84,7 @@ object GeckoTermfoldExtension {
                                 },
                             )
                             Log.i(TAG, "Native port connected")
+                            NetworkRulesHub.pushToExtension()
                         }
                     },
                     NATIVE_APP,
@@ -108,6 +114,25 @@ object GeckoTermfoldExtension {
             object : WebExtension.MessageDelegate {},
             NATIVE_APP,
         )
+    }
+
+    private fun ingestExtensionEvent(json: JSONObject): Boolean {
+        when (json.optString("type")) {
+            "network_capture" -> {
+                NetworkCaptureStore.ingest(json)
+                return true
+            }
+            "console" -> {
+                GeckoConsoleLog.record(
+                    json.optString("sessionKey"),
+                    json.optString("level", "log"),
+                    json.optString("text"),
+                    json.optString("where"),
+                )
+                return true
+            }
+        }
+        return false
     }
 
     fun extension(): WebExtension? = extensionRef.get()

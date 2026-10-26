@@ -45,4 +45,11 @@ class ComposerFuzzyMatchTest {
         )
         assertEquals("summarize", ranked.first())
     }
+
+    @Test
+    fun matchTierExactBeforeFuzzy() {
+        assertTrue(ComposerFuzzyMatch.matchTier("main", "main") < ComposerFuzzyMatch.matchTier("main", "feature/main-qa"))
+        assertTrue(ComposerFuzzyMatch.matchTier("kamal", "kamal-bilal") < ComposerFuzzyMatch.matchTier("kamal", "remove-posthog-alorica-prod-kamal-bilal"))
+        assertEquals(0, ComposerFuzzyMatch.matchTier("main-qa", "main-qa"))
+    }
 }

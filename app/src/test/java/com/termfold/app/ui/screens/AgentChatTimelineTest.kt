@@ -27,68 +27,146 @@ class AgentChatTimelineTest {
         AcpToolFileDiff(path = "/root/ws/a.kt", operation = AcpToolFileDiff.Operation.MODIFY, patchText = "@@"),
     )
 
+    private fun itemsWithUserThenTools(vararg tools: AcpItem.ToolCall): List<AcpItem> =
+        listOf(AcpItem.UserMessage(10L, "go", emptyList())) + tools
+
     @Test
     fun inProgressDefaultsExpanded() {
-        assertFalse(defaultToolCallCollapsed(tool(status = "in_progress"), showLiveToolDiffs = true))
-        assertFalse(defaultToolCallCollapsed(tool(status = "in_progress"), showLiveToolDiffs = false))
+        val items = itemsWithUserThenTools(tool(status = "in_progress"))
+        assertFalse(defaultToolCallCollapsed(tool(status = "in_progress"), items, showLiveToolDiffs = true, agentBusy = true))
+        assertFalse(defaultToolCallCollapsed(tool(status = "in_progress"), items, showLiveToolDiffs = false, agentBusy = true))
     }
 
     @Test
-    fun completedFileToolExpandedWhenLiveDiffsOn() {
+    fun liveDiffsExpandOnlyLatestTurnWhenIdle() {
+        val items = itemsWithUserThenTools(
+            tool(id = 1L, status = "completed", fileDiffs = oneFileDiff),
+        )
         assertFalse(
             defaultToolCallCollapsed(
-                tool(status = "completed", fileDiffs = oneFileDiff),
+                tool(id = 1L, status = "completed", fileDiffs = oneFileDiff),
+                items,
                 showLiveToolDiffs = true,
+                agentBusy = false,
+            ),
+        )
+        val olderTurn = listOf(
+            AcpItem.UserMessage(1L, "old", emptyList()),
+            tool(id = 2L, status = "completed", fileDiffs = oneFileDiff),
+            AcpItem.UserMessage(10L, "new", emptyList()),
+            tool(id = 3L, status = "completed", fileDiffs = oneFileDiff),
+        )
+        assertTrue(
+            defaultToolCallCollapsed(
+                tool(id = 2L, status = "completed", fileDiffs = oneFileDiff),
+                olderTurn,
+                showLiveToolDiffs = true,
+                agentBusy = false,
             ),
         )
         assertFalse(
             defaultToolCallCollapsed(
-                tool(status = "failed", fileDiffs = oneFileDiff),
+                tool(id = 3L, status = "completed", fileDiffs = oneFileDiff),
+                olderTurn,
                 showLiveToolDiffs = true,
+                agentBusy = false,
+            ),
+        )
+    }
+
+    @Test
+    fun liveDiffsCollapseCompletedToolsDuringBusyTurn() {
+        val items = itemsWithUserThenTools(
+            tool(id = 1L, status = "completed", fileDiffs = oneFileDiff),
+            tool(id = 2L, status = "in_progress"),
+        )
+        assertTrue(
+            defaultToolCallCollapsed(
+                tool(id = 1L, status = "completed", fileDiffs = oneFileDiff),
+                items,
+                showLiveToolDiffs = true,
+                agentBusy = true,
+            ),
+        )
+        assertFalse(
+            defaultToolCallCollapsed(
+                tool(id = 2L, status = "in_progress"),
+                items,
+                showLiveToolDiffs = true,
+                agentBusy = true,
             ),
         )
     }
 
     @Test
     fun completedFileToolCollapsedWhenLiveDiffsOff() {
+        val items = itemsWithUserThenTools(tool(status = "completed", fileDiffs = oneFileDiff))
         assertTrue(
             defaultToolCallCollapsed(
                 tool(status = "completed", fileDiffs = oneFileDiff),
+                items,
                 showLiveToolDiffs = false,
+                agentBusy = false,
             ),
         )
     }
 
     @Test
     fun completedNonFileToolCollapsedRegardlessOfSetting() {
-        assertTrue(defaultToolCallCollapsed(tool(status = "completed"), showLiveToolDiffs = true))
-        assertTrue(defaultToolCallCollapsed(tool(status = "completed"), showLiveToolDiffs = false))
+        val items = itemsWithUserThenTools(tool(status = "completed"))
+        assertTrue(defaultToolCallCollapsed(tool(status = "completed"), items, showLiveToolDiffs = true, agentBusy = false))
+        assertTrue(defaultToolCallCollapsed(tool(status = "completed"), items, showLiveToolDiffs = false, agentBusy = false))
     }
 
     @Test
-    fun syncExpandsWhenFileDiffsArriveLate() {
-        val emptyDiff = listOf(tool(id = 1L, status = "completed", fileDiffs = emptyList()))
+    fun syncExpandsLatestTurnWhenFileDiffsArriveLate() {
+        val emptyDiff = listOf(
+            AcpItem.UserMessage(10L, "x", emptyList()),
+            tool(id = 1L, status = "completed", fileDiffs = emptyList()),
+        )
         val map = mutableMapOf<Long, Boolean>()
-        syncCompletedToolCollapse(emptyDiff, map, showLiveToolDiffs = true)
+        syncCompletedToolCollapse(emptyDiff, map, showLiveToolDiffs = true, agentBusy = false)
         assertEquals(true, map[1L])
-        val withDiff = listOf(tool(id = 1L, status = "completed", fileDiffs = oneFileDiff))
-        syncCompletedToolCollapse(withDiff, map, showLiveToolDiffs = true)
+        val withDiff = listOf(
+            AcpItem.UserMessage(10L, "x", emptyList()),
+            tool(id = 1L, status = "completed", fileDiffs = oneFileDiff),
+        )
+        syncCompletedToolCollapse(withDiff, map, showLiveToolDiffs = true, agentBusy = false)
         assertEquals(false, map[1L])
     }
 
     @Test
     fun syncRespectsUserToggledToolIds() {
-        val items = listOf(tool(id = 1L, status = "completed", fileDiffs = oneFileDiff))
+        val items = itemsWithUserThenTools(tool(id = 1L, status = "completed", fileDiffs = oneFileDiff))
         val map = mutableMapOf(1L to true)
-        syncCompletedToolCollapse(items, map, showLiveToolDiffs = true, userToggledToolIds = setOf(1L))
+        syncCompletedToolCollapse(items, map, showLiveToolDiffs = true, agentBusy = false, userToggledToolIds = setOf(1L))
         assertEquals(true, map[1L])
     }
 
     @Test
-    fun syncAppliesDefaultForNewTools() {
-        val items = listOf(tool(id = 2L, status = "completed", fileDiffs = oneFileDiff))
-        val map = mutableMapOf<Long, Boolean>()
-        syncCompletedToolCollapse(items, map, showLiveToolDiffs = true)
-        assertEquals(false, map[2L])
+    fun buildMapExpandsLatestTurnWhenFileDiffsArriveLate() {
+        val empty = listOf(
+            AcpItem.UserMessage(10L, "x", emptyList()),
+            tool(id = 1L, status = "completed", fileDiffs = emptyList()),
+        )
+        assertEquals(true, buildToolCallCollapsedMap(empty, showLiveToolDiffs = true, agentBusy = false, emptySet())[1L])
+        val withDiff = listOf(
+            AcpItem.UserMessage(10L, "x", emptyList()),
+            tool(id = 1L, status = "completed", fileDiffs = oneFileDiff),
+        )
+        assertEquals(false, buildToolCallCollapsedMap(withDiff, showLiveToolDiffs = true, agentBusy = false, emptySet())[1L])
+    }
+
+    @Test
+    fun buildMapRespectsUserOverride() {
+        val items = itemsWithUserThenTools(tool(id = 1L, status = "completed", fileDiffs = oneFileDiff))
+        val map = buildToolCallCollapsedMap(
+            items,
+            showLiveToolDiffs = true,
+            agentBusy = false,
+            userToggledToolIds = setOf(1L),
+            userCollapsedOverrides = mapOf(1L to true),
+        )
+        assertEquals(true, map[1L])
     }
 }

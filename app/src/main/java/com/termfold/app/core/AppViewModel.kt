@@ -503,13 +503,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun removeSession(folderId: String, sessionId: String) {
         viewModelScope.launch {
+            var workspaceId = com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN
             store.update { data ->
                 data.copy(
                     folders = data.folders.map { folder ->
                         if (folder.id != folderId) return@map folder
+                        workspaceId = folder.sessions.find { it.id == sessionId }?.workspaceId
+                            ?: workspaceId
                         folder.copy(sessions = folder.sessions.filterNot { it.id == sessionId })
                     }
                 )
+            }
+            withContext(Dispatchers.IO) {
+                val compose = com.termfold.app.gitworkspace.SessionKeys.compose(folderId, workspaceId, sessionId)
+                com.termfold.app.preview.network.NetworkRuleStore.forApp(getApplication())
+                    .deleteSession(com.termfold.app.preview.engine.PreviewUrlRouter.sessionKeyForCoding(compose))
+                com.termfold.app.preview.network.NetworkRulesHub.notifyChanged()
             }
         }
     }
@@ -583,6 +592,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
             withContext(Dispatchers.IO) {
                 AutomationPaths.hostProjectDir(app, projectId).deleteRecursively()
+                val store = com.termfold.app.preview.network.NetworkRuleStore.forApp(app)
+                store.allSessions().keys.filter { it.startsWith("$projectId:") }.forEach { store.deleteSession(it) }
+                com.termfold.app.preview.network.NetworkRulesHub.notifyChanged()
             }
         }
     }
@@ -600,6 +612,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
             withContext(Dispatchers.IO) {
                 AutomationPaths.hostSessionDir(app, projectId, sessionId).deleteRecursively()
+                com.termfold.app.preview.network.NetworkRuleStore.forApp(app)
+                    .deleteSession(com.termfold.app.automation.AutomationSessionContext.key(projectId, sessionId))
+                com.termfold.app.preview.network.NetworkRulesHub.notifyChanged()
             }
         }
     }

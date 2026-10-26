@@ -10,8 +10,15 @@ import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.webkit.WebView
+import com.termfold.app.preview.engine.BrowserBridgeTimeouts
 import com.termfold.app.preview.engine.BrowserSurface
+import com.termfold.app.preview.engine.GeckoBrowserSurface
 import com.termfold.app.preview.engine.WebViewBrowserSurface
+import com.termfold.app.preview.network.NetworkCaptureStore
+import com.termfold.app.preview.network.NetworkRuleCommands
+import com.termfold.app.preview.network.NetworkRuleKeys
+import com.termfold.app.preview.network.NetworkRuleStore
+import com.termfold.app.preview.network.NetworkRulesHub
 import com.termfold.app.shell.ShellPaths
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -41,6 +48,7 @@ interface DriverUi {
     fun consoleSize(): Int
     fun consoleText(errorsOnly: Boolean, since: Int): String
     fun consoleErrorsSince(since: Int): Int
+    fun appendConsole(level: String, text: String, where: String = "")
     fun networkText(failedOnly: Boolean, sinceGeneration: Int = 0): String
     fun networkInFlight(): Int
     fun networkGeneration(): Int
@@ -104,7 +112,9 @@ class BrowserDriver(
             "wait" -> waitFor(args)
             "screenshot" -> screenshot(args)
             "console" -> ok(ui.consoleText(args.optBoolean("errors_only"), 0))
-            "network" -> ok(ui.networkText(args.optBoolean("failed_only"), args.optInt("since_generation", 0)))
+            "network" -> network(args)
+            "network_detail" -> networkDetail(args)
+            "network_rules" -> networkRules(args)
             "eval" -> eval(args)
             "viewport" -> viewport(args)
             "upload" -> upload(args)
@@ -176,6 +186,66 @@ class BrowserDriver(
     private fun dismissCaptcha(): JSONObject {
         ui.dismissCaptchaFalsePositive()
         return ok("Captcha handoff dismissed. Continue when the page is ready.")
+    }
+
+    private fun captureSessionKey(args: JSONObject): String? =
+        NetworkRuleKeys.boundSessionKey(args.optString("session_key").takeIf { it.isNotBlank() })
+
+    private fun network(args: JSONObject): JSONObject {
+        NetworkCaptureStore.attach(context)
+        val key = captureSessionKey(args) ?: return err("No bound browser session for network.")
+        when (args.optString("op", "list")) {
+            "preserve" -> {
+                when (args.optString("enabled", "").lowercase()) {
+                    "true", "on", "1" -> NetworkCaptureStore.setPreserve(key, true)
+                    "false", "off", "0" -> NetworkCaptureStore.setPreserve(key, false)
+                    else -> return err("Use enabled: true or false.")
+                }
+                return ok("Preserve log is ${NetworkCaptureStore.preserveStatus(key)}.")
+            }
+            "preserve_status" -> return ok("Preserve log is ${NetworkCaptureStore.preserveStatus(key)}.")
+            "clear" -> {
+                NetworkCaptureStore.clear(key)
+                return ok("Network capture cleared.")
+            }
+            else -> {
+                val sinceCursor = if (args.has("since_cursor")) args.optLong("since_cursor") else 0L
+                val sinceGeneration = if (args.has("since_generation")) args.optInt("since_generation") else 0
+                val (text, cursor) = NetworkCaptureStore.listText(
+                    key,
+                    sinceCursor,
+                    args.optBoolean("failed_only"),
+                    args.optBoolean("xhr_only"),
+                    args.optString("url_contains").takeIf { it.isNotBlank() },
+                    args.optInt("limit", NetworkCaptureStore.LIST_DEFAULT_LIMIT),
+                    sinceGeneration,
+                )
+                val genSuffix = if (sinceGeneration > 0) " generation_filter=$sinceGeneration" else ""
+                return ok("$text\n(cursor=$cursor$genSuffix)")
+            }
+        }
+    }
+
+    private fun networkDetail(args: JSONObject): JSONObject {
+        NetworkCaptureStore.attach(context)
+        val key = captureSessionKey(args) ?: return err("No bound browser session for network.")
+        val id = when {
+            args.has("entry_id") -> args.optLong("entry_id")
+            args.has("id") -> args.optLong("id")
+            else -> 0L
+        }
+        if (id <= 0L) return err("Give entry_id.")
+        val part = args.optString("part", "overview")
+        return ok(NetworkCaptureStore.detailText(key, id, part))
+    }
+
+    private fun networkRules(args: JSONObject): JSONObject {
+        NetworkRulesHub.attach(context)
+        val key = captureSessionKey(args)
+            ?: return err("No bound browser session for network rules.")
+        val result = NetworkRuleCommands.execute(NetworkRuleStore.forApp(context), key, args)
+        if (!result.has("error")) NetworkRulesHub.notifyChanged()
+        return result
     }
 
     private suspend fun refreshCaptcha() {
@@ -540,12 +610,58 @@ class BrowserDriver(
     private suspend fun eval(args: JSONObject): JSONObject {
         val script = args.optString("script")
         if (script.isBlank()) return err("Give a script.")
-        val wrapped = "(function(){try{var r=(0,eval)(${JSONObject.quote(script)});" +
-            "if(r&&typeof r.then==='function')return JSON.stringify({note:'Returned a promise; await it with wait or read the result later.'});" +
-            "return JSON.stringify(r===undefined?null:r);}catch(e){return JSON.stringify({error:String(e)});}})()"
-        val raw = js(wrapped)
+        val awaitMs = when {
+            args.has("await_ms") -> args.optInt("await_ms", 0)
+            args.optBoolean("await", false) -> 10_000
+            else -> 0
+        }.coerceIn(0, 60_000)
+        val wrapped = buildEvalWrapper(script, awaitMs)
+        val rpcMs = (awaitMs + 5_000L).coerceAtLeast(BrowserBridgeTimeouts.EXTENSION_RPC_MS).coerceAtMost(65_000L)
+        val raw = if (surface is GeckoBrowserSurface) {
+            surface.evaluateJavascript(wrapped, rpcMs)
+        } else {
+            js(wrapped)
+        }
         val decoded = runCatching { JSONTokener(raw).nextValue() as? String }.getOrNull() ?: raw
-        return ok(decoded.take(20_000))
+        return ok(formatEvalResult(decoded).take(20_000))
+    }
+
+    private fun buildEvalWrapper(script: String, awaitMs: Int): String {
+        val quoted = JSONObject.quote(script)
+        val awaitBlock = if (awaitMs > 0) {
+            "if(r&&typeof r.then==='function'){r=await Promise.race([r,new Promise(function(_,rej){setTimeout(function(){rej(new Error('eval_await_timeout'));},$awaitMs);})]);}"
+        } else {
+            "if(r&&typeof r.then==='function')return JSON.stringify({note:'Returned a promise; set await_ms (milliseconds) or await:true.'});"
+        }
+        return "(async function(){var __tfLogs=[];function __tfCap(l,a){try{__tfLogs.push({level:l,msg:Array.prototype.map.call(a,function(x){try{return typeof x==='object'?JSON.stringify(x):String(x);}catch(e){return String(x);}}).join(' ')});}catch(e){}}var __o={log:console.log,warn:console.warn,error:console.error,info:console.info,debug:console.debug};['log','info','warn','error','debug'].forEach(function(l){if(!__o[l])return;console[l]=function(){__tfCap(l,arguments);return __o[l].apply(console,arguments);};});try{var r=(0,eval)($quoted);$awaitBlock return JSON.stringify({value:r===undefined?null:r,logs:__tfLogs});}catch(e){return JSON.stringify({error:String(e),logs:__tfLogs});}finally{['log','info','warn','error','debug'].forEach(function(l){if(__o[l])console[l]=__o[l];});}})()"
+    }
+
+    private fun formatEvalResult(decoded: String): String {
+        val obj = runCatching { JSONObject(decoded) }.getOrNull()
+        if (obj == null) return decoded
+        pushEvalLogs(obj.optJSONArray("logs"))
+        when {
+            obj.has("error") -> return obj.optString("error")
+            obj.has("note") -> return obj.optString("note")
+            obj.has("value") -> {
+                val v = obj.get("value")
+                return when (v) {
+                    null, JSONObject.NULL -> "null"
+                    is String -> v
+                    is Number, is Boolean -> v.toString()
+                    else -> v.toString()
+                }
+            }
+        }
+        return decoded
+    }
+
+    private fun pushEvalLogs(logs: JSONArray?) {
+        if (logs == null || surface is GeckoBrowserSurface) return
+        for (i in 0 until logs.length()) {
+            val row = logs.optJSONObject(i) ?: continue
+            ui.appendConsole(row.optString("level", "log"), row.optString("msg", ""), "eval")
+        }
     }
 
     private suspend fun upload(args: JSONObject): JSONObject {

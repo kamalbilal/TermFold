@@ -188,6 +188,9 @@ object BrowserSessionRegistry {
 
     private fun evict(entry: BrowserSessionEntry) {
         entry.tier = BrowserPowerTier.IDLE_COLD
+        com.termfold.app.preview.network.NetworkCaptureStore.clear(entry.storageContextId)
+        com.termfold.app.preview.network.NetworkCaptureHub.setUiSubscribed(entry.storageContextId, false)
+        com.termfold.app.preview.network.NetworkCaptureHub.pushCaptureOff(entry.storageContextId)
         entry.teardown()
     }
 
@@ -232,17 +235,28 @@ object BrowserSessionRegistry {
         override fun viewportName(): String = viewportName
         override suspend fun moveCursor(x: Float, y: Float, label: String) {}
         override fun pulse() {}
-        override fun consoleSize(): Int = 0
-        override fun consoleText(errorsOnly: Boolean, since: Int): String =
-            if (errorsOnly) "No console errors." else "The console is empty."
+        override fun consoleSize(): Int = com.termfold.app.preview.GeckoConsoleLog.marker(gecko.storageContextId).toInt()
 
-        override fun consoleErrorsSince(since: Int): Int = 0
+        override fun consoleText(errorsOnly: Boolean, since: Int): String =
+            com.termfold.app.preview.GeckoConsoleLog.text(gecko.storageContextId, errorsOnly, since.toLong())
+
+        override fun consoleErrorsSince(since: Int): Int =
+            com.termfold.app.preview.GeckoConsoleLog.errorsSince(gecko.storageContextId, since.toLong())
+
+        override fun appendConsole(level: String, text: String, where: String) {
+            com.termfold.app.preview.GeckoConsoleLog.record(gecko.storageContextId, level, text, where)
+        }
         override fun networkText(failedOnly: Boolean, sinceGeneration: Int): String =
-            if (failedOnly) "No failed requests." else "No requests recorded yet."
+            com.termfold.app.preview.network.GeckoNetworkLog.text(
+                gecko.storageContextId,
+                failedOnly,
+                sinceGeneration,
+            )
 
         override fun networkInFlight(): Int = if (gecko.progress < 100) 1 else 0
         override fun networkGeneration(): Int = BrowserBridge.networkGeneration
-        override fun failedRequestCount(): Int = 0
+        override fun failedRequestCount(): Int =
+            com.termfold.app.preview.network.GeckoNetworkLog.failedCount(gecko.storageContextId)
         override fun visibleControlCount(): Int = 0
         override fun setVisibleControls(count: Int) {}
         override fun offerUpload(file: java.io.File) {}

@@ -1070,11 +1070,13 @@ class AcpClient(
         val sessionId = agentSessionId
         if (sessionId == null) {
             abortInFlightUserTurn()
+            sendNextQueued()
             return
         }
         val content = buildPromptContent(text, images, files)
         if (content == null || content.length() == 0) {
             abortInFlightUserTurn()
+            sendNextQueued()
             return
         }
         var compressAfterSummarize = false
@@ -1106,10 +1108,6 @@ class AcpClient(
             Log.w(TAG, "prompt failed", failure)
             appendSystemError(failure.message ?: "prompt failed")
         } finally {
-            finalizeUndoableForTurn(messageId)
-            if (compressAfterSummarize) {
-                maybeCompressContextAfterSummarize(messageId)
-            }
             _state.update { state ->
                 state.copy(
                     agentBusy = false,
@@ -1117,8 +1115,18 @@ class AcpClient(
                 )
             }
             turnInFlight = false
-            sendNextQueued()
             persistTimeline()
+            val compress = compressAfterSummarize
+            scope.launch {
+                try {
+                    finalizeUndoableForTurn(messageId)
+                    if (compress) {
+                        maybeCompressContextAfterSummarize(messageId)
+                    }
+                } finally {
+                    sendNextQueued()
+                }
+            }
         }
     }
 

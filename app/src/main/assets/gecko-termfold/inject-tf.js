@@ -93,5 +93,17 @@ if(a.selector){try{var e=document.querySelector(a.selector);return {found:!!e&&v
 if(a.text)return {found:!!document.body&&document.body.innerText.toLowerCase().indexOf(String(a.text).toLowerCase())>=0};
 return {found:document.readyState==='complete'};}
 return {snapshot:snapshot,point:point,viewport:viewport,fill:fill,select:select,state:state,hover:hover,pos:pos,text:text,has:has,outline:outline,box:box,captchaDetect:function(){return captchaDetect(document)}};
-})()
+})();
+
+(function installTermfoldConsoleHook() {
+  var s = document.createElement("script");
+  s.textContent =
+    "(function(){if(window.__termfoldConsoleHook)return;window.__termfoldConsoleHook=true;function emit(level,args){var msg=Array.prototype.map.call(args,function(a){try{return typeof a==='object'?JSON.stringify(a):String(a);}catch(e){return String(a);}}).join(' ');document.dispatchEvent(new CustomEvent('termfold-console',{detail:{level:level,text:msg}}));}['log','info','warn','error','debug'].forEach(function(level){var orig=console[level];if(!orig)return;console[level]=function(){emit(level,arguments);return orig.apply(console,arguments);};});})();";
+  try {
+    (document.head || document.documentElement).appendChild(s);
+    s.remove();
+  } catch (e) {
+    /* CSP */
+  }
+})();
 

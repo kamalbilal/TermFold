@@ -76,8 +76,10 @@ const TOOLS = [
   { name: 'browser_screenshot', action: 'screenshot', description: 'Screenshot of what the browser shows (or of one element: give ref, text or selector). Not kept; set save only when the user wants it kept in the project. Set if_changed to skip it when the page looks the same as the last one.', props: { ref: REF, text: TEXT_TARGET, selector: SELECTOR, save: { type: 'boolean' }, if_changed: { type: 'boolean' } }, image: true },
   { name: 'browser_text', action: 'text', description: 'Readable text of the page, or of one part with selector. Cut at max characters (default 8000).', props: { selector: SELECTOR, max: { type: 'number' } } },
   { name: 'browser_console', action: 'console', description: 'Read the page console: errors, warnings and console.log output since the page loaded.', props: { errors_only: { type: 'boolean' } } },
-  { name: 'browser_network', action: 'network', description: 'List the requests the page made, with failures marked. since_generation returns only entries after that action generation.', props: { failed_only: { type: 'boolean' }, since_generation: { type: 'integer' } } },
-  { name: 'browser_eval', action: 'eval', description: 'Run JavaScript in the page and return the result (JSON). For reading state, localStorage, computed styles...', props: { script: { type: 'string' } }, required: ['script'] },
+  { name: 'browser_network', action: 'network', description: 'Network capture summary (no bodies). op: list (default), preserve, preserve_status, clear. List: since_cursor and/or since_generation (from health network_generation), failed_only, xhr_only, url_contains, limit (max 80). Bodies via browser_network_detail.', props: { op: { type: 'string', enum: ['list', 'preserve', 'preserve_status', 'clear'] }, enabled: { type: 'boolean' }, since_cursor: { type: 'integer' }, since_generation: { type: 'integer' }, failed_only: { type: 'boolean' }, xhr_only: { type: 'boolean' }, url_contains: { type: 'string' }, limit: { type: 'integer' } } },
+  { name: 'browser_network_detail', action: 'network_detail', description: 'One captured request: entry_id + part (overview|headers|request_body|response_body). Bodies truncated for tokens.', props: { entry_id: { type: 'integer' }, part: { type: 'string' } }, required: ['entry_id'] },
+  { name: 'browser_network_rules', action: 'network_rules', description: 'Session-scoped Chrome-like network rules. op: list, add_block, add_override, remove, clear. Match URL patterns with * and ?. Do not patch window.fetch. add_override takes url_pattern, body, optional status and headers (response headers, e.g. CORS).', props: { op: { type: 'string', enum: ['list', 'add_block', 'add_override', 'remove', 'clear'] }, url_pattern: { type: 'string' }, body: { type: 'string' }, status: { type: 'number' }, headers: { type: 'object' }, id: { type: 'string', description: 'Rule id for remove.' } }, required: ['op'] },
+  { name: 'browser_eval', action: 'eval', description: 'Run JavaScript in the page (DevTools-console context). console.log during eval appears in Preview console (Gecko). Use await_ms (0–60000) or await:true (10s) to resolve returned promises. Multi-statement scripts OK.', props: { script: { type: 'string' }, await_ms: { type: 'integer', description: 'Milliseconds to wait when the script returns a Promise (default 0).' }, await: { type: 'boolean', description: 'Shorthand: wait up to 10s for a Promise.' } }, required: ['script'] },
   { name: 'browser_navigate', action: null, description: 'Go back, forward, or reload the page.', props: { action: { type: 'string', enum: ['back', 'forward', 'reload'] } }, required: ['action'] },
   { name: 'browser_viewport', action: 'viewport', description: 'Lay the page out at phone width, desktop width, or fit to the pane, to check responsive design.', props: { mode: { type: 'string', enum: ['phone', 'desktop', 'fit'] } }, required: ['mode'] },
   { name: 'browser_upload', action: 'upload', description: 'Choose a file from the Linux environment for a file field (<input type=file>).', props: { ref: REF, selector: SELECTOR, text: TEXT_TARGET, path: { type: 'string', description: 'File path, absolute or relative to the project.' } }, required: ['path'] },
@@ -184,8 +186,13 @@ const HELP = `termfold-browser: use TermFold's browser (the preview the user see
   text [--selector <css>] [--max <chars>]
                                 readable text of the page or one part (default 8000 characters)
   console [--errors]            console messages and errors
-  network [--failed]            requests the page made, failures marked
-  eval <javascript>             run JavaScript in the page, print the result
+  network list [--failed] [--xhr] [--since-cursor N] [--url Q] [--limit N]
+  network preserve on|off|status
+  network detail <id> [--part headers|request_body|response_body|overview]
+  network-rules list|add_block|add_override|remove|clear
+                                session-only URL block / body override (not a fetch patch)
+  eval <javascript> [--await-ms N] [--await]
+                                run JavaScript in the page; optional promise wait
   back | forward | reload
   viewport <phone|desktop|fit>
   upload <ref> <file>           choose a file for a file field
@@ -238,8 +245,64 @@ async function cli(argv) {
     case 'wait': { const sel = option('--selector'); args = sel ? { selector: sel } : {}; if (rest[0]) args.text = rest[0]; if (rest[1]) args.timeout = parseFloat(rest[1]); break; }
     case 'screenshot': { const save = flag('--save'); const ifChanged = flag('--if-changed'); args = Object.assign(target(rest.join(' ') || undefined), { save, if_changed: ifChanged }); break; }
     case 'console': args = { errors_only: flag('--errors') }; break;
-    case 'network': args = { failed_only: flag('--failed') }; break;
-    case 'eval': args = { script: rest.join(' ') }; break;
+    case 'network': {
+      const sub = rest[0] || 'list';
+      if (sub === 'preserve') {
+        args = { op: 'preserve', enabled: rest[1] === 'on' || rest[1] === 'true' };
+        if (rest[1] === 'off' || rest[1] === 'false') args.enabled = false;
+        if (rest[1] === 'status') args = { op: 'preserve_status' };
+      } else if (sub === 'detail') {
+        action = 'network_detail';
+        args = { entry_id: parseInt(rest[1], 10), part: option('--part') || 'overview' };
+      } else if (sub === 'clear') {
+        args = { op: 'clear' };
+      } else {
+        args = {
+          op: 'list',
+          failed_only: flag('--failed'),
+          xhr_only: flag('--xhr'),
+          since_cursor: option('--since-cursor') ? parseInt(option('--since-cursor'), 10) : undefined,
+          since_generation: option('--since-generation') ? parseInt(option('--since-generation'), 10) : undefined,
+          url_contains: option('--url'),
+          limit: option('--limit') ? parseInt(option('--limit'), 10) : undefined,
+        };
+      }
+      break;
+    }
+    case 'network-rules': {
+      action = 'network_rules';
+      const op = rest[0];
+      args = { op: op };
+      const pattern = option('--pattern') || option('--url');
+      if (pattern) args.url_pattern = pattern;
+      const body = option('--body');
+      if (body) args.body = body;
+      const id = option('--id');
+      if (id) args.id = id;
+      if (op === 'add_block' && !args.url_pattern && rest[1]) args.url_pattern = rest[1];
+      if (op === 'add_override' && !args.url_pattern && rest[1]) {
+        args.url_pattern = rest[1];
+        if (!args.body && rest[2]) args.body = rest.slice(2).join(' ');
+      }
+      if (op === 'remove' && !args.id && rest[1]) args.id = rest[1];
+      break;
+    }
+    case 'eval': {
+      const awaitMs = option('--await-ms');
+      const awaitFlag = flag('--await');
+      const scriptParts = [];
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === '--await-ms' || rest[i] === '--await') {
+          if (rest[i] === '--await-ms') i++;
+          continue;
+        }
+        scriptParts.push(rest[i]);
+      }
+      args = { script: scriptParts.join(' ') };
+      if (awaitMs) args.await_ms = parseInt(awaitMs, 10);
+      if (awaitFlag) args.await = true;
+      break;
+    }
     case 'viewport': args = { mode: rest[0] }; break;
     case 'upload': args = Object.assign(target(rest[0]), { path: path.resolve(process.cwd(), rest[1] || '') }); break;
     default:

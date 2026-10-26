@@ -309,7 +309,7 @@
     <string name="terminal_find">Search the terminal</string>
     <string name="settings_agent_chat">Agent chat</string>
     <string name="settings_agent_chat_live_diffs">Show live file diffs</string>
-    <string name="settings_agent_chat_live_diffs_desc">Update line-level diffs while a tool call is still running and keep file edit tools expanded in chat. When off, diffs appear after each tool finishes and completed tools stay collapsed.</string>
+    <string name="settings_agent_chat_live_diffs_desc">Stream line-level diffs for the active tool while it runs. After each reply, only that turn’s file edits stay expanded; older turns stay collapsed until you open them. When off, hunks appear only after a tool finishes and completed tools default to collapsed.</string>
     <string name="acp_sticky_user_message">Sticky user messages</string>
     <string name="settings_idle_disconnect">Disconnect idle agents</string>
     <string name="settings_idle_disconnect_desc">When TermFold is in the background and an agent chat is not working, stop its agent process after the timeout below. Your messages stay; reopening reconnects.</string>
@@ -561,6 +561,13 @@
     <string name="preview_copy_link">Copy address</string>
     <string name="preview_start_page">Start page</string>
     <string name="preview_clear_site_data">Clear cookies &amp; storage</string>
+    <string name="preview_network_inspector">Network</string>
+    <string name="preview_network_rules">Network rules</string>
+    <string name="preview_network_rules_blocked">Blocked</string>
+    <string name="preview_network_rules_overrides">Body overrides</string>
+    <string name="preview_network_rules_empty">No blocks or overrides for this session. Ask the agent to add them.</string>
+    <string name="preview_network_rules_clear_all">Clear all</string>
+    <string name="preview_network_rules_delete">Delete rule</string>
     <string name="preview_captcha_handoff">Solve the security check on screen, then continue the agent.</string>
     <string name="preview_captcha_not">Not a captcha</string>
     <string name="settings_browser_allowlist">Browser allowlist (agents)</string>

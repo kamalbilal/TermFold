@@ -11,7 +11,7 @@ interface BrowserSurface {
     fun url(): String?
     fun width(): Int
     fun height(): Int
-    suspend fun evaluateJavascript(code: String): String
+    suspend fun evaluateJavascript(code: String, timeoutMs: Long = BrowserBridgeTimeouts.EXTENSION_RPC_MS): String
     fun onResume()
     fun canGoBack(): Boolean
     fun canGoForward(): Boolean
@@ -30,7 +30,7 @@ class WebViewBrowserSurface(private val webView: WebView) : BrowserSurface {
     override fun width(): Int = webView.width
     override fun height(): Int = webView.height
 
-    override suspend fun evaluateJavascript(code: String): String =
+    override suspend fun evaluateJavascript(code: String, timeoutMs: Long): String =
         kotlinx.coroutines.suspendCancellableCoroutine { cont ->
             webView.evaluateJavascript(code) { value ->
                 if (cont.isActive) cont.resume(value ?: "null") {}

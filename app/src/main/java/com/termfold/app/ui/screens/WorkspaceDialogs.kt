@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.height
 
 import androidx.compose.foundation.layout.heightIn
 
+import androidx.compose.foundation.layout.widthIn
+
 import androidx.compose.foundation.layout.padding
 
 import androidx.compose.foundation.layout.size
@@ -76,7 +78,7 @@ import com.termfold.app.R
 
 import com.termfold.app.core.Folder
 
-import com.termfold.app.acp.ComposerFuzzyMatch
+import com.termfold.app.acp.BranchPickerOrder
 
 import com.termfold.app.gitworkspace.BRANCH_LIST_ERROR_TIMEOUT
 import com.termfold.app.gitworkspace.BranchListCache
@@ -622,25 +624,7 @@ private fun orderBranchesForPicker(
     all: List<String>,
     recent: List<String>,
     query: String,
-): List<String> {
-    if (query.isBlank()) {
-        val recentHead = recent.filter { it in all }
-        return recentHead + all.filter { it !in recentHead }
-    }
-    val recentSet = recent.toSet()
-    return all
-        .map { name ->
-            val score = ComposerFuzzyMatch.score(query, name) +
-                if (name in recentSet) 12 else 0
-            name to score
-        }
-        .filter { it.second >= ComposerFuzzyMatch.MIN_SCORE }
-        .sortedWith(
-            compareByDescending<Pair<String, Int>> { it.second }
-                .thenBy { it.first.lowercase() },
-        )
-        .map { it.first }
-}
+): List<String> = BranchPickerOrder.order(all, recent, query)
 
 @Composable
 
@@ -903,6 +887,7 @@ fun BranchChip(
 ) {
     Row(
         modifier = modifier
+            .then(if (truncate) Modifier.widthIn(min = 0.dp) else Modifier)
             .padding(end = 4.dp)
             .clickable(onClick = onClick),
         verticalAlignment = Alignment.CenterVertically,
@@ -913,7 +898,7 @@ fun BranchChip(
             color = Palette.Accent,
             maxLines = if (truncate) 1 else Int.MAX_VALUE,
             overflow = if (truncate) TextOverflow.Ellipsis else TextOverflow.Clip,
-            modifier = if (truncate) Modifier.weight(1f, fill = false) else Modifier,
+            modifier = if (truncate) Modifier.weight(1f, fill = true).widthIn(min = 0.dp) else Modifier,
         )
         if (uncommittedChanges) {
             Text(

@@ -27,16 +27,27 @@ termfold-browser wait "Order confirmed"    # wait for text to appear
 termfold-browser screenshot                # temporary file under /tmp; prints the path (--save keeps it in the project)
 termfold-browser screenshot 12 --if-changed # one element; skipped if the page looks the same
 termfold-browser console --errors          # JavaScript errors
-termfold-browser network --failed          # failed requests (404, 500, CORS...)
+termfold-browser network list --failed     # summary rows only (low tokens); use cursor from output
+termfold-browser network detail 12 --part response_body
+termfold-browser network preserve on       # keep calls across reload (default off)
+termfold-browser network-rules list
+termfold-browser network-rules add_block --pattern 'https://api.example.com/*'
+termfold-browser network-rules add_override --pattern 'https://api.example.com/v1/*' --body '{"ok":false}'
 termfold-browser viewport phone            # phone | desktop | fit
-termfold-browser eval "document.title"     # run JavaScript in the page
+termfold-browser eval "document.title"     # run JS in the page (DevTools-console context)
+termfold-browser eval "fetch('/api').then(r=>r.json())" --await-ms 8000
+termfold-browser eval "console.log('hi'); 42"  # logs show in Preview console (Gecko)
 ```
+
+**Debugging with `eval`:** Use `browser_eval` / `eval` like the browser console—read app state, call site helpers, inspect `document`, trigger small probes. For async code pass `await_ms` or `await:true` (10s). `console.log` from eval and from the page is mirrored into Preview → Console on Gecko. Pair with `console --errors` and `network --failed`.
 
 ## Long automations (token and battery)
 
 - Prefer `wait` (text, URL, network idle) over polling with full snapshots.
 - After the first snapshot, use `snapshot --changed`, `outline`, and `console --errors` before another full snapshot.
-- Use `network --failed` instead of dumping the whole network log.
+- Use `network list --failed` or `--url api` then **one** `network detail <id>` — never dump all bodies. List returns `(cursor=…)` for `since_cursor`; legacy `since_generation` / `health` → `network_generation` still filters new rows after your last browser command.
+- Preview **Network** drawer (Globe icon): filters, Preserve log, tap row for headers/bodies. **Network rules** (⋮) stays separate.
+- Network **block** and **override body** are session-scoped (`browser_network_rules`). Match Chrome-style URL patterns (`*` / `?`), including a base path like `https://api.foo.com/v1/*`. Do **not** patch `window.fetch`. Rules do not apply to other TermFold sessions. List `browser_network` first to pick URLs. Optional override `headers` are **response** headers (set `Access-Control-Allow-Origin` for cross-origin reads). OPTIONS preflight on the same pattern is given CORS headers; if preflight still fails, add a matching override for that URL. The user can delete rules from Preview ⋮ → Network rules.
 - Use `screenshot --if-changed` only when you need pixels; grep `/tmp/termfold-browser/snapshot.txt` for labels instead of re-snapshotting.
 - During an active automation or coding session with a bound browser profile, commands may run while the preview bubble is closed; keep the agent run active per TermFold’s notification policy.
 

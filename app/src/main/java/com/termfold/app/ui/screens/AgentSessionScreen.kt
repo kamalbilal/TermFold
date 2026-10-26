@@ -758,7 +758,8 @@ fun AgentSessionScreen(
 
 @Composable
 private fun phaseLabel(state: AcpUiState): String = when {
-    state.agentBusy -> stringResource(R.string.acp_working)
+    com.termfold.app.acp.AcpTurnUi.showWorkingIndicator(state.agentBusy, state.items) ->
+        stringResource(R.string.acp_working)
     state.phase == AcpPhase.READY -> stringResource(R.string.acp_phase_ready)
     state.phase == AcpPhase.AUTH_REQUIRED -> stringResource(R.string.acp_phase_signin)
     state.phase == AcpPhase.ERROR -> stringResource(R.string.acp_phase_stopped)
@@ -1375,17 +1376,29 @@ private fun Timeline(
 
     var previewImage by remember { mutableStateOf<AcpBlock.Image?>(null) }
 
-    var collapsedTools by remember { mutableStateOf(mapOf<Long, Boolean>()) }
     val userToggledToolIds = remember { mutableStateSetOf<Long>() }
+    var userCollapsedOverrides by remember { mutableStateOf(mapOf<Long, Boolean>()) }
+    val listedSessionId = client.listedSessionId
+    LaunchedEffect(listedSessionId) {
+        userToggledToolIds.clear()
+        userCollapsedOverrides = emptyMap()
+    }
+    LaunchedEffect(items.isEmpty()) {
+        if (items.isEmpty()) {
+            userToggledToolIds.clear()
+            userCollapsedOverrides = emptyMap()
+        }
+    }
     var expandedToolFiles by remember { mutableStateOf(mapOf<String, Boolean>()) }
     val toolContextFolds = remember { mutableStateMapOf<String, Set<String>>() }
-    LaunchedEffect(items, showLiveToolDiffs) {
-        val next = collapsedTools.toMutableMap()
-        syncCompletedToolCollapse(items, next, showLiveToolDiffs, userToggledToolIds)
-        if (next != collapsedTools) collapsedTools = next
-    }
-    // Snapshot maps here so collapse/expand toggles always rebuild lazy rows.
-    val collapsedSnapshot = collapsedTools
+    // Recompute every frame so late-arriving fileDiffs pick up live-diff expansion without waiting on LaunchedEffect.
+    val collapsedSnapshot = buildToolCallCollapsedMap(
+        items = items,
+        showLiveToolDiffs = showLiveToolDiffs,
+        agentBusy = state.agentBusy,
+        userToggledToolIds = userToggledToolIds,
+        userCollapsedOverrides = userCollapsedOverrides,
+    )
     val expandedFilesSnapshot = expandedToolFiles
     val presentationSnapshot = toolDiffPresentationCache.toMap()
     val toolContextSnapshot = toolContextFolds.toMap()
@@ -1532,9 +1545,7 @@ private fun Timeline(
                             collapsed = collapsed,
                             onToggle = {
                                 userToggledToolIds.add(item.id)
-                                collapsedTools = collapsedTools.toMutableMap().apply {
-                                    this[item.id] = !collapsed
-                                }
+                                userCollapsedOverrides = userCollapsedOverrides + (item.id to !collapsed)
                             },
                         )
                     }
@@ -1619,7 +1630,7 @@ private fun Timeline(
             }
         }
 
-        if (state.agentBusy) {
+        if (com.termfold.app.acp.AcpTurnUi.showWorkingIndicator(state.agentBusy, items)) {
             // Keyed by the turn, so each message the agent takes on starts its own timer.
             val turn = items.count { it is AcpItem.UserMessage }
             item(key = "working-$turn") { WorkingRow() }
@@ -2527,7 +2538,8 @@ private fun Composer(
     val pickImages = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(MAX_COMPOSER_IMAGES),
     ) { uris ->
-        uris.forEach { addImage(it) }
+        // Photo picker returns newest-first; preserve the user's tap order.
+        uris.asReversed().forEach { addImage(it) }
     }
 
     val canSend = input.text.isNotBlank() || images.isNotEmpty() || files.isNotEmpty()
@@ -2857,8 +2869,10 @@ private fun Composer(
                     tint = Palette.TextDim,
                     size = 38,
                 )
-                Spacer(Modifier.weight(1f))
                 Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .widthIn(min = 0.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.End,
                 ) {
@@ -2868,11 +2882,19 @@ private fun Composer(
                             onClick = onBranchClick,
                             truncate = true,
                             uncommittedChanges = branchUncommitted,
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .widthIn(min = 0.dp),
                         )
                         Spacer(Modifier.width(6.dp))
                     }
                     if (settings.isNotEmpty()) {
-                        SettingsButton(agentId, settings, onChangeSetting)
+                        SettingsButton(
+                            agentId,
+                            settings,
+                            onChangeSetting,
+                            summaryMaxWidth = 112.dp,
+                        )
                         Spacer(Modifier.width(4.dp))
                     }
                     // While the agent works: Stop, and beside it Send, which queues the message.
@@ -3064,6 +3086,7 @@ private fun SettingsButton(
     agentId: String,
     settings: List<AcpSetting>,
     onChange: (AcpSetting, String) -> Unit,
+    summaryMaxWidth: androidx.compose.ui.unit.Dp = 200.dp,
 ) {
     val context = LocalContext.current
     var open by remember { mutableStateOf(false) }
@@ -3112,7 +3135,7 @@ private fun SettingsButton(
                     color = Palette.TextDim,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 200.dp),
+                    modifier = Modifier.widthIn(max = summaryMaxWidth),
                 )
             }
         }

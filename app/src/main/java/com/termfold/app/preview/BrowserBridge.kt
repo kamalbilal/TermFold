@@ -148,6 +148,8 @@ object BrowserBridge {
         }
         val app = context.applicationContext
         appContext = app
+        com.termfold.app.preview.network.NetworkRulesHub.attach(app)
+        com.termfold.app.preview.network.NetworkCaptureStore.attach(app)
         Thread({ serve(app) }, "termfold-browser").apply { isDaemon = true }.start()
         // The busy frame fades a few seconds after the agent's last action.
         Thread({

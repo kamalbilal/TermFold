@@ -122,10 +122,23 @@ The system SHALL provide a user setting, default enabled, that controls whether 
 - **WHEN** a tool call status is `completed` or `failed` and the user expands it
 - **THEN** the UI SHALL show the final per-file diff content regardless of the live-diff setting
 
-#### Scenario: Live diffs on keeps file tools expanded by default
+#### Scenario: Live diffs on expands the active tool and the latest turn
 
-- **WHEN** the live-diff setting is enabled and a tool call with one or more structured file diffs appears in the timeline (including when it reaches a terminal status)
-- **THEN** the tool-call row SHALL default to expanded so per-file sections are visible without an extra tap, unless the user has collapsed that tool call in the current session
+- **WHEN** the live-diff setting is enabled and a tool call with structured file diffs is `in_progress`
+- **THEN** the tool-call row SHALL default to expanded so live hunks are visible unless the user collapsed that row in the current session
+- **WHEN** the agent is still working on the current user turn and a file-changing tool has reached a terminal status
+- **THEN** that completed tool-call row SHALL default to collapsed so only the active tool stays expanded
+- **WHEN** the turn has ended (the agent is no longer busy for that prompt) and a file-changing tool belongs to the latest user turn
+- **THEN** that tool-call row SHALL default to expanded unless the user collapsed it; tools from earlier turns SHALL default to collapsed
+
+#### Scenario: Diffs arrive after a collapsed auto-default
+
+- **WHEN** the live-diff setting is enabled, a tool call is `in_progress` with no structured file diffs yet, and structured file diffs are later attached
+- **THEN** the tool-call row SHALL remain expanded and show live hunks without an extra tap
+- **WHEN** a completed tool in the latest user turn receives structured file diffs after the agent is no longer busy for that prompt
+- **THEN** the tool-call row SHALL expand automatically unless the user collapsed that row in the current session
+- **WHEN** a completed tool in the current turn receives file diffs while the agent is still busy
+- **THEN** the row MAY stay collapsed until the turn ends, then SHALL follow the latest-turn expansion rule above
 
 #### Scenario: Live diffs off collapses completed file tools by default
 
@@ -134,12 +147,18 @@ The system SHALL provide a user setting, default enabled, that controls whether 
 
 ### Requirement: Tool collapse defaults respect user toggles
 
-The system SHALL apply default expand/collapse for tool calls only when no per-session user preference exists for that tool-call row id.
+The system SHALL apply default expand/collapse for tool calls only when the user has not explicitly toggled that tool-call row in the current session. Automatic defaults MAY be revised when structured file diffs become available or when live-diff policy applies, provided the user has not toggled that row.
 
 #### Scenario: User collapse sticks
 
-- **WHEN** the user collapses a tool call and later the tool status or live-diff setting changes
+- **WHEN** the user collapses a tool call and later the tool status, structured file diffs, or live-diff setting changes
 - **THEN** the UI SHALL keep that row collapsed until the user expands it again
+
+#### Scenario: Automatic default without user toggle
+
+- **WHEN** a tool-call row collapse state was set only by automatic policy (no explicit user toggle for that row id)
+- **AND** structured file diffs later become available while live diffs are enabled
+- **THEN** the UI MAY update collapse state to match the live-diff default without treating that as a user preference
 
 #### Scenario: User expand sticks
 

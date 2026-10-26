@@ -13,6 +13,7 @@ class GeckoBrowserSurface(
     private val geckoView: GeckoView?,
     private val urlProvider: () -> String? = { null },
     private val historyState: () -> Pair<Boolean, Boolean> = { false to false },
+    private val sessionKey: String? = null,
 ) : BrowserSurface {
 
     override fun url(): String? = urlProvider()
@@ -21,9 +22,10 @@ class GeckoBrowserSurface(
 
     override fun height(): Int = geckoView?.height ?: 0
 
-    override suspend fun evaluateJavascript(code: String): String {
+    override suspend fun evaluateJavascript(code: String, timeoutMs: Long): String {
         val response = GeckoTermfoldExtension.request(
-            JSONObject().put("op", "eval").put("code", code),
+            JSONObject().put("op", "eval").put("code", code).put("sessionKey", sessionKey ?: ""),
+            timeoutMs,
         ) ?: return "null"
         if (response.has("error")) return "null"
         return response.optString("json", "null")
@@ -31,7 +33,7 @@ class GeckoBrowserSurface(
 
     suspend fun callTf(expression: String, timeoutMs: Long = BrowserBridgeTimeouts.EXTENSION_RPC_MS): JSONObject? {
         val response = GeckoTermfoldExtension.request(
-            JSONObject().put("op", "tf").put("expr", expression),
+            JSONObject().put("op", "tf").put("expr", expression).put("sessionKey", sessionKey ?: ""),
             timeoutMs,
         ) ?: return JSONObject().put("error", "engine_not_ready")
         if (response.has("error")) {

@@ -35,9 +35,16 @@ class GeckoBrowserSession(
         session = GeckoSession(settings)
         session.open(runtime)
         session.progressDelegate = object : GeckoSession.ProgressDelegate {
+            override fun onPageStart(session: GeckoSession, url: String) {
+                if (url.isNotBlank() && url != "about:blank") {
+                    com.termfold.app.preview.network.NetworkCaptureStore.onMainFrameNavigation(storageContextId)
+                }
+            }
+
             override fun onPageStop(session: GeckoSession, success: Boolean) {
                 progress = 100
                 onProgress?.invoke(100)
+                com.termfold.app.preview.network.NetworkRulesHub.bindSession(storageContextId)
                 if (!success) {
                     loadError = loadError ?: "Page load failed"
                     onLoadError?.invoke(loadError)
@@ -65,6 +72,7 @@ class GeckoBrowserSession(
                 if (url != null && url != "about:blank") {
                     loadError = null
                     onLoadError?.invoke(null)
+                    com.termfold.app.preview.GeckoConsoleLog.clear(storageContextId)
                 }
             }
         }
@@ -80,8 +88,10 @@ class GeckoBrowserSession(
             }
         }
         geckoView?.setSession(session)
-        surface = GeckoBrowserSurface(session, geckoView, { currentUrl }) { canGoBack to canGoForward }
+        surface = GeckoBrowserSurface(session, geckoView, { currentUrl }, { canGoBack to canGoForward }, storageContextId)
         GeckoTermfoldExtension.registerSession(session)
+        com.termfold.app.preview.network.NetworkRulesHub.bindSession(storageContextId)
+        com.termfold.app.preview.network.NetworkRulesHub.pushToExtension()
     }
 
     fun stopLoading() {
@@ -102,6 +112,7 @@ class GeckoBrowserSession(
         } else {
             session.loadUri(url)
         }
+        com.termfold.app.preview.network.NetworkRulesHub.bindSession(storageContextId)
     }
 
     fun release() {

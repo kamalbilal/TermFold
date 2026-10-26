@@ -29,6 +29,25 @@ object ComposerFuzzyMatch {
         return best.coerceIn(0, 100)
     }
 
+    /**
+     * Lower sorts earlier in branch-picker lists: full-name exact, prefix, segment exact,
+     * segment prefix, then substring index, then fuzzy-only.
+     */
+    fun matchTier(query: String, candidate: String): Int {
+        val q = query.trim().lowercase()
+        if (q.isEmpty()) return 0
+        val c = candidate.lowercase()
+        if (c == q) return 0
+        if (c.startsWith(q)) return 1
+        for (segment in c.split('/', '\\', '.', '-', '_').filter { it.isNotEmpty() }) {
+            if (segment == q) return 2
+            if (segment.startsWith(q)) return 3
+        }
+        val idx = c.indexOf(q)
+        if (idx >= 0) return 4 + idx.coerceAtMost(500)
+        return 10_000
+    }
+
     fun <T> rank(
         items: Sequence<T>,
         query: String,
@@ -55,7 +74,10 @@ object ComposerFuzzyMatch {
             }
             .filter { it.second >= minScore }
             .sortedWith(
-                compareByDescending<Pair<T, Int>> { it.second }
+                compareBy<Pair<T, Int>> {
+                    matchTier(q, searchable(it.first).lineSequence().first())
+                }
+                    .thenByDescending { it.second }
                     .thenBy { primaryMatchStart(q, searchable(it.first)) }
                     .thenBy { searchable(it.first).lineSequence().first().length }
                     .thenBy { searchable(it.first).lineSequence().first().lowercase() },
