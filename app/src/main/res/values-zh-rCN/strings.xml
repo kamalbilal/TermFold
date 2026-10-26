@@ -289,6 +289,8 @@
     <string name="preview_fit">适应窗格</string>
     <string name="preview_phone">手机宽度</string>
     <string name="preview_desktop">桌面宽度</string>
+    <string name="preview_browser_dark">深色模式</string>
+    <string name="preview_browser_light">浅色模式</string>
     <string name="preview_screenshot_copy">复制截图</string>
     <string name="preview_screenshot_save">将截图保存到项目</string>
     <string name="preview_screenshot_copied">截图已复制</string>

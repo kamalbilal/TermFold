@@ -284,7 +284,6 @@ class AcpClient(
         if (running.get() && !retryable) return
         running.set(true)
         closedByUser = false
-        idleDisconnected = false
         runCatching { process?.destroy() }
         process = null
         agentSessionId = null
@@ -303,6 +302,38 @@ class AcpClient(
                 }
             }
         }
+    }
+
+    /**
+     * After [disconnectIdle], restarts the agent process and waits until the wire session is ready
+     * or startup fails.
+     */
+    suspend fun reconnectAfterIdle(timeoutMs: Long = 120_000): Boolean = ensureWireSessionForSend(timeoutMs)
+
+    private suspend fun ensureWireSessionForSend(timeoutMs: Long = 120_000): Boolean {
+        if (agentSessionId != null && _state.value.phase == AcpPhase.READY) return true
+        when (_state.value.phase) {
+            AcpPhase.INSTALLING, AcpPhase.CONNECTING -> Unit
+            AcpPhase.CLOSED -> {
+                if (closedByUser && !idleDisconnected) return false
+                if (idleDisconnected || !running.get()) start()
+            }
+            AcpPhase.ERROR, AcpPhase.AUTH_REQUIRED -> return false
+            AcpPhase.READY -> return agentSessionId != null
+            else -> return false
+        }
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (agentSessionId != null && _state.value.phase == AcpPhase.READY) {
+                idleDisconnected = false
+                return true
+            }
+            when (_state.value.phase) {
+                AcpPhase.ERROR, AcpPhase.AUTH_REQUIRED -> return false
+                else -> kotlinx.coroutines.delay(200)
+            }
+        }
+        return false
     }
 
     /** Kills the agent and starts it again, keeping the visible conversation. */
@@ -926,6 +957,7 @@ class AcpClient(
             bindConversation(listed, sessionId)
         }
         val settings = parseSettings(response.optJSONObject("result"))
+        idleDisconnected = false
         _state.update { it.copy(phase = AcpPhase.READY, statusText = "", settings = settings) }
     }
 
@@ -963,7 +995,7 @@ class AcpClient(
         images: List<AcpBlock.Image>,
         files: List<AcpBlock.TextFile>,
     ) {
-        if (agentSessionId == null) return
+        if (!ensureWireSessionForSend()) return
         if (_state.value.checkpoints.wireResyncing) {
             enqueue(text, images, files)
             return

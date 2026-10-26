@@ -65,6 +65,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.key
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.fadeIn
@@ -121,6 +122,7 @@ import com.termfold.app.acp.AcpUiState
 import com.termfold.app.acp.checkpoints.CheckpointBusy
 import com.termfold.app.acp.PastedImages
 import com.termfold.app.core.Folder
+import com.termfold.app.preview.BrowserBridge
 import com.termfold.app.preview.Preview
 import com.termfold.app.shell.ShellConfig
 import com.termfold.app.shell.TerminalHost
@@ -275,6 +277,20 @@ fun AgentSessionScreen(
         com.termfold.app.notify.SessionWatcher.onSessionStarted(context.applicationContext)
     }
 
+    DisposableEffect(key, automationSessionKey) {
+        if (automationSessionKey == null) {
+            BrowserBridge.codingSessionKey = key
+            BrowserBridge.writeBrowserConfig(context.applicationContext)
+        }
+        onDispose {
+            if (automationSessionKey == null) {
+                BrowserBridge.codingSessionKey = null
+                com.termfold.app.preview.engine.BrowserSessionRegistry.releaseCoding(key)
+                BrowserBridge.writeBrowserConfig(context.applicationContext)
+            }
+        }
+    }
+
     val state by client.state.collectAsStateWithLifecycle()
     var agentWasBusy by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
@@ -424,14 +440,15 @@ fun AgentSessionScreen(
             onQuickOpen = { showQuickOpen = true },
         )
 
+        val hasConversation = state.items.isNotEmpty() || state.restoring
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
-            val hasConversation = state.items.isNotEmpty() || state.restoring
             when {
                 // Once there is a conversation it stays on screen; a restart or failure shows as a
                 // slim banner above it rather than replacing what the user was reading.
                 hasConversation -> Column(Modifier.widthIn(max = ContentMaxWidth).fillMaxSize()) {
                     PhaseBanner(
                         state,
+                        idleDisconnected = client.isIdleDisconnected(),
                         onRetry = { client.start() },
                         onReinstallCursor = if (isCursor) ({ client.reinstallCursor() }) else null,
                     )
@@ -533,7 +550,11 @@ fun AgentSessionScreen(
             }
         }
 
-        if (state.phase == AcpPhase.READY) {
+        if (
+            state.phase == AcpPhase.READY ||
+            client.isIdleDisconnected() ||
+            (hasConversation && state.phase in setOf(AcpPhase.CONNECTING, AcpPhase.INSTALLING))
+        ) {
             Composer(
                 draftKey = key,
                 guestWorkspace = guestDir,
@@ -1096,11 +1117,17 @@ private fun SessionHeaderOverflowMenu(
 @Composable
 private fun PhaseBanner(
     state: AcpUiState,
+    idleDisconnected: Boolean,
     onRetry: () -> Unit,
     onReinstallCursor: (() -> Unit)? = null,
 ) {
     val text: String
     val loading: Boolean
+    val reconnectLabel = when {
+        idleDisconnected && state.phase == AcpPhase.CLOSED ->
+            stringResource(R.string.acp_idle_disconnect_reconnect)
+        else -> stringResource(R.string.action_retry)
+    }
     when (state.phase) {
         AcpPhase.INSTALLING, AcpPhase.CONNECTING -> {
             text = state.statusText.ifBlank { stringResource(R.string.acp_status_connecting) }
@@ -1113,6 +1140,15 @@ private fun PhaseBanner(
         AcpPhase.AUTH_REQUIRED -> {
             text = stringResource(R.string.acp_auth_required)
             loading = false
+        }
+        AcpPhase.CLOSED -> if (idleDisconnected) {
+            text = stringResource(R.string.acp_idle_disconnect_notice)
+            loading = false
+        } else if (state.restoring) {
+            text = stringResource(R.string.acp_restoring)
+            loading = true
+        } else {
+            return
         }
         else -> if (state.restoring) {
             text = stringResource(R.string.acp_restoring)
@@ -1156,7 +1192,7 @@ private fun PhaseBanner(
                 Spacer(Modifier.width(4.dp))
             }
             Text(
-                text = stringResource(R.string.action_retry),
+                text = reconnectLabel,
                 style = MaterialTheme.typography.labelLarge,
                 color = Palette.Accent,
                 modifier = Modifier

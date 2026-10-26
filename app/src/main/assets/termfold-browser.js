@@ -26,9 +26,12 @@ function config() {
 }
 
 function call(action, args) {
-  const { port, token, automation_session_key } = config();
+  const { port, token, automation_session_key, agent_session_key } = config();
   // The agent's working folder: screenshots and relative uploads go to its project.
-  const base = { cwd: process.cwd(), session_key: automation_session_key || '' };
+  const base = {
+    cwd: process.cwd(),
+    session_key: automation_session_key || agent_session_key || '',
+  };
   const body = Buffer.from(JSON.stringify({ token, action, args: Object.assign(base, args || {}) }));
   return new Promise((resolve, reject) => {
     const req = http.request(

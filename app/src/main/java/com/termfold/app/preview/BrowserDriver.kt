@@ -10,10 +10,11 @@ import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.webkit.WebView
+import com.termfold.app.preview.engine.BrowserSurface
+import com.termfold.app.preview.engine.WebViewBrowserSurface
 import com.termfold.app.shell.ShellPaths
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -57,6 +58,8 @@ interface DriverUi {
     fun tabNew(url: String?): Int?
     fun tabClose(id: Int): Boolean
     fun ensureResumed()
+
+    fun browserSurface(): BrowserSurface = WebViewBrowserSurface(activeWebView())
 }
 
 /**
@@ -69,17 +72,17 @@ class BrowserDriver(
     private val ui: DriverUi,
 ) : BrowserBridge.Controller {
 
-    private val web: WebView get() = ui.activeWebView()
+    private val surface: BrowserSurface get() = ui.browserSurface()
 
     override suspend fun run(action: String, args: JSONObject): JSONObject = withContext(Dispatchers.Main) {
         ui.ensureResumed()
-        web.onResume()
+        surface.onResume()
         resolveTab(args)?.let { return@withContext it }
         when (action) {
             "open" -> open(args)
-            "back" -> history { if (web.canGoBack()) web.goBack() else return@history "There is no earlier page." ; null }
-            "forward" -> history { if (web.canGoForward()) web.goForward() else return@history "There is no later page."; null }
-            "reload" -> history { web.reload(); null }
+            "back" -> history { if (surface.canGoBack()) surface.goBack() else return@history "There is no earlier page." ; null }
+            "forward" -> history { if (surface.canGoForward()) surface.goForward() else return@history "There is no later page."; null }
+            "reload" -> history { surface.reload(); null }
             "status" -> ok(pageLine())
             "health" -> health()
             "tab_list" -> ok(tabListText())
@@ -123,7 +126,7 @@ class BrowserDriver(
         val failed = ui.failedRequestCount()
         val controls = ui.visibleControlCount()
         val json = JSONObject()
-            .put("url", web.url.orEmpty())
+            .put("url", surface.url().orEmpty())
             .put("title", runCatching { JSONTokener(js("document.title")).nextValue() as? String }.getOrNull().orEmpty())
             .put("viewport", ui.viewportName())
             .put("console_errors", errors.coerceAtLeast(0))
@@ -369,7 +372,7 @@ class BrowserDriver(
         val point = call("point(${spec(where)})") ?: return notFound(where)
         if (point.has("error")) return notFound(where)
         // A real site's password field: typed as asked, with a reminder the agent must pass on.
-        val realPassword = point.optString("type").equals("password", true) && !Preview.isLocal(web.url.orEmpty())
+        val realPassword = point.optString("type").equals("password", true) && !Preview.isLocal(surface.url().orEmpty())
         val (x, y) = toPx(point)
         ui.moveCursor(x, y, "Type · " + point.optString("name").take(20))
         ui.pulse()
@@ -393,13 +396,13 @@ class BrowserDriver(
 
     private suspend fun type(args: JSONObject): JSONObject {
         val text = args.optString("text")
-        web.requestFocus()
+        surface.requestFocus()
         val events = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD).getEvents(text.toCharArray())
         if (events == null) {
             js("document.execCommand('insertText', false, ${JSONObject.quote(text)})")
         } else {
             events.forEach { event ->
-                web.dispatchKeyEvent(KeyEvent(event))
+                surface.dispatchKeyEvent(KeyEvent(event))
                 if (event.action == KeyEvent.ACTION_UP) delay(12)
             }
         }
@@ -511,7 +514,7 @@ class BrowserDriver(
                     if (!ui.captchaPending()) return ok("Captcha cleared. " + pageLine())
                 }
                 args.has("url") -> {
-                    val loc = web.url.orEmpty()
+                    val loc = surface.url().orEmpty()
                     if (loc.contains(args.optString("url")) && ui.progress() >= 100) return ok("URL matched. " + pageLine())
                 }
                 args.optBoolean("network_idle", false) -> {
@@ -566,7 +569,7 @@ class BrowserDriver(
     private suspend fun screenshot(args: JSONObject): JSONObject {
         BrowserBridge.setLabel("Taking a screenshot")
         delay(80)
-        if (web.width == 0 || web.height == 0) return err("The browser is not on screen.")
+        if (surface.width() == 0 || surface.height() == 0) return err("The browser is not on screen.")
         val baseline = args.optString("baseline").trim()
         if (baseline.isNotEmpty()) {
             val rootfs = ShellPaths.rootfsDir(context)
@@ -575,8 +578,8 @@ class BrowserDriver(
             if (!file.isFile) return err("Baseline not found: $guest")
             val baseBmp = android.graphics.BitmapFactory.decodeFile(file.absolutePath)
                 ?: return err("Could not read baseline image.")
-            var shot = Bitmap.createBitmap(web.width, web.height, Bitmap.Config.ARGB_8888)
-            web.draw(Canvas(shot))
+            var shot = surface.createScreenshotBitmap() ?: return err("The browser is not on screen.")
+            surface.drawScreenshot(Canvas(shot))
             val match = pictureHash(baseBmp) == pictureHash(shot)
             baseBmp.recycle()
             shot.recycle()
@@ -592,14 +595,14 @@ class BrowserDriver(
             if (region == null || region.has("error")) return err("Could not find that element to take a picture of it.")
             delay(150)
         }
-        var bitmap = Bitmap.createBitmap(web.width, web.height, Bitmap.Config.ARGB_8888)
-        web.draw(Canvas(bitmap))
+        var bitmap = surface.createScreenshotBitmap() ?: return err("The browser is not on screen.")
+        surface.drawScreenshot(Canvas(bitmap))
         var tries = 0
         while (isBlank(bitmap) && tries < 4) {
             tries++
             delay(250L * tries)
             bitmap.eraseColor(0)
-            web.draw(Canvas(bitmap))
+            surface.drawScreenshot(Canvas(bitmap))
         }
         if (region != null) {
             val scale = bitmap.width / region.optDouble("vw", bitmap.width.toDouble()).coerceAtLeast(1.0)
@@ -616,7 +619,7 @@ class BrowserDriver(
         val blank = isBlank(bitmap)
         val result = JSONObject()
         // The WebView may only be touched on the main thread; read what is needed first.
-        val shown = web.url?.let(Preview::display).orEmpty()
+        val shown = surface.url()?.let(Preview::display).orEmpty()
         return withContext(Dispatchers.IO) {
             val summary = StringBuilder("Screenshot of ").append(shown)
             // Kept in the project only when asked; otherwise a temporary file the agent can open,
@@ -681,10 +684,10 @@ class BrowserDriver(
 
     /** A finger drag over [pages] of the view (positive scrolls down), ending still so it does not fling. */
     private suspend fun swipe(pages: Double) {
-        val x = web.width / 2f
-        val distance = (web.height * 0.6f * pages.toFloat() / 0.8f).coerceIn(-web.height * 0.7f, web.height * 0.7f)
-        val startY = web.height / 2f + distance / 2f
-        val endY = web.height / 2f - distance / 2f
+        val x = surface.width() / 2f
+        val distance = (surface.height() * 0.6f * pages.toFloat() / 0.8f).coerceIn(-surface.height() * 0.7f, surface.height() * 0.7f)
+        val startY = surface.height() / 2f + distance / 2f
+        val endY = surface.height() / 2f - distance / 2f
         ui.moveCursor(x, startY, "Scroll")
         val down = SystemClock.uptimeMillis()
         touch(down, down, MotionEvent.ACTION_DOWN, x, startY)
@@ -704,15 +707,15 @@ class BrowserDriver(
     private fun touch(down: Long, time: Long, action: Int, x: Float, y: Float) {
         val event = MotionEvent.obtain(down, time, action, x, y, 0)
         event.source = InputDevice.SOURCE_TOUCHSCREEN
-        web.dispatchTouchEvent(event)
+        surface.dispatchTouchEvent(event)
         event.recycle()
     }
 
     private fun key(code: Int, meta: Int) {
-        web.requestFocus()
+        surface.requestFocus()
         val down = SystemClock.uptimeMillis()
-        web.dispatchKeyEvent(KeyEvent(down, down, KeyEvent.ACTION_DOWN, code, 0, meta))
-        web.dispatchKeyEvent(KeyEvent(down, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, code, 0, meta))
+        surface.dispatchKeyEvent(KeyEvent(down, down, KeyEvent.ACTION_DOWN, code, 0, meta))
+        surface.dispatchKeyEvent(KeyEvent(down, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, code, 0, meta))
     }
 
     private fun keyCode(name: String): Int? = when (name.lowercase()) {
@@ -746,7 +749,7 @@ class BrowserDriver(
     private suspend fun locate(args: JSONObject): Located? {
         if (args.has("x") && args.has("y") && !args.has("ref") && !args.has("text") && !args.has("selector")) {
             val vp = call("viewport()") ?: return null
-            val scale = web.width / vp.optDouble("vw", web.width.toDouble()).toFloat()
+            val scale = surface.width() / vp.optDouble("vw", surface.width().toDouble()).toFloat()
             return Located(args.optDouble("x").toFloat() * scale, args.optDouble("y").toFloat() * scale, null)
         }
         val point = call("point(${spec(args)})") ?: return null
@@ -767,10 +770,10 @@ class BrowserDriver(
     }
 
     private fun toPx(point: JSONObject): Pair<Float, Float> {
-        val vw = point.optDouble("vw", web.width.toDouble()).toFloat().takeIf { it > 0 } ?: web.width.toFloat()
-        val scale = web.width / vw
-        val x = (point.optDouble("x").toFloat() * scale).coerceIn(1f, web.width - 1f)
-        val y = (point.optDouble("y").toFloat() * scale).coerceIn(1f, web.height - 1f)
+        val vw = point.optDouble("vw", surface.width().toDouble()).toFloat().takeIf { it > 0 } ?: surface.width().toFloat()
+        val scale = surface.width() / vw
+        val x = (point.optDouble("x").toFloat() * scale).coerceIn(1f, surface.width() - 1f)
+        val y = (point.optDouble("y").toFloat() * scale).coerceIn(1f, surface.height() - 1f)
         return x to y
     }
 
@@ -810,7 +813,7 @@ class BrowserDriver(
 
     private suspend fun pageLine(): String {
         val title = runCatching { JSONTokener(js("document.title")).nextValue() as? String }.getOrNull().orEmpty()
-        return "Page: " + title.ifBlank { "(untitled)" } + " · " + (web.url?.let(Preview::display) ?: "")
+        return "Page: " + title.ifBlank { "(untitled)" } + " · " + (surface.url()?.let(Preview::display) ?: "")
     }
 
     private suspend fun position(): String {
@@ -845,9 +848,7 @@ class BrowserDriver(
         delay(200)
     }
 
-    private suspend fun js(code: String): String = suspendCancellableCoroutine { cont ->
-        web.evaluateJavascript(code) { value -> if (cont.isActive) cont.resume(value ?: "null") }
-    }
+    private suspend fun js(code: String): String = surface.evaluateJavascript(code)
 
     /** Calls a helper in the page (installing it first) and parses the JSON it returns. */
     private suspend fun call(expression: String): JSONObject? {

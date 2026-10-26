@@ -19,6 +19,7 @@ import com.termfold.app.core.Session
 import com.termfold.app.gitworkspace.WorkspaceIds
 import com.termfold.app.preview.BrowserBridge
 import com.termfold.app.preview.Preview
+import com.termfold.app.preview.engine.BrowserSessionRegistry
 import java.io.File
 
 @Composable
@@ -37,7 +38,12 @@ fun AutomationAgentSessionScreen(
         AutomationSessionContext.activeKey = sessionKey
         BrowserBridge.automationSessionKey = sessionKey
         BrowserBridge.writeBrowserConfig(context.applicationContext)
-        Preview.webViewDataDirectorySuffix = "auto-${session.id}"
+        Preview.webViewDataDirectorySuffix = sessionKey
+        BrowserSessionRegistry.ensureAutomation(
+            context.applicationContext,
+            sessionKey,
+            "auto-${session.id}",
+        )
         AutomationStorage.ensureSessionTree(context, project.id, session.id)
         onDispose {
             if (AutomationSessionContext.activeKey == sessionKey) {
@@ -46,10 +52,11 @@ fun AutomationAgentSessionScreen(
             if (BrowserBridge.automationSessionKey == sessionKey) {
                 BrowserBridge.automationSessionKey = null
             }
-            if (Preview.webViewDataDirectorySuffix == "auto-${session.id}") {
+            if (Preview.webViewDataDirectorySuffix == sessionKey) {
                 Preview.webViewDataDirectorySuffix = null
             }
             BrowserBridge.writeBrowserConfig(context.applicationContext)
+            BrowserSessionRegistry.release(sessionKey)
         }
     }
     val hostDir = AutomationPaths.hostSessionDir(context, project.id, session.id)

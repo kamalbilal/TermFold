@@ -116,6 +116,15 @@ import com.termfold.app.preview.Preview
 import com.termfold.app.preview.PreviewFiles
 import com.termfold.app.preview.PreviewTabHost
 import com.termfold.app.preview.PreviewWebView
+import com.termfold.app.preview.engine.BrowserSessionRegistry
+import com.termfold.app.preview.engine.PreviewUrlRouter
+import com.termfold.app.preview.engine.BrowserSurface
+import com.termfold.app.preview.engine.GeckoPreviewAndroidView
+import com.termfold.app.preview.engine.GeckoPreviewHost
+import com.termfold.app.preview.engine.GeckoViewport
+import com.termfold.app.preview.engine.PreviewBrowserTheme
+import com.termfold.app.preview.engine.PreviewEngineConfig
+import com.termfold.app.preview.engine.WebViewBrowserSurface
 import org.json.JSONArray
 import android.webkit.WebStorage
 import com.termfold.app.shell.ShellPaths
@@ -191,6 +200,7 @@ fun PreviewPane(
     var viewportName by rememberSaveable { mutableStateOf(Viewport.FIT.name) }
     val viewport = Viewport.valueOf(viewportName)
     var liveReload by rememberSaveable { mutableStateOf(true) }
+    var browserDarkMode by rememberSaveable { mutableStateOf(true) }
     var consoleOpen by remember { mutableStateOf(false) }
     val console = remember { mutableStateListOf<ConsoleLine>() }
     var consoleCounter by remember { mutableIntStateOf(0) }
@@ -198,6 +208,45 @@ fun PreviewPane(
     var menuOpen by remember { mutableStateOf(false) }
     var fileCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
     val showStart = currentUrl == null
+    val storageContextId = BrowserBridge.automationSessionKey
+        ?: BrowserBridge.codingSessionKey?.let { PreviewUrlRouter.sessionKeyForCoding(it) }
+        ?: Preview.webViewDataDirectorySuffix
+        ?: "preview"
+    val useGeckoEngine = !showStart
+    var geckoHost by remember(storageContextId) { mutableStateOf<GeckoPreviewHost?>(null) }
+    var driverStubWebView by remember { mutableStateOf<WebView?>(null) }
+
+    fun applyBrowserColorScheme() {
+        PreviewBrowserTheme.apply(context.applicationContext, browserDarkMode)
+        PreviewBrowserTheme.applyGeckoViewChrome(geckoHost?.geckoView, browserDarkMode)
+    }
+
+    LaunchedEffect(browserDarkMode) {
+        applyBrowserColorScheme()
+    }
+
+    LaunchedEffect(useGeckoEngine, storageContextId) {
+        if (useGeckoEngine && geckoHost == null) {
+            geckoHost = GeckoPreviewHost(
+                context.applicationContext,
+                storageContextId,
+                onTitle = { t ->
+                    title = t
+                    tabHost.activeTab().title = t
+                },
+                onProgress = { p -> progress = p },
+                onHistory = { back, forward ->
+                    canBack = back
+                    canForward = forward
+                },
+            )
+            applyBrowserColorScheme()
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { geckoHost?.release() }
+    }
 
     // What an agent driving the browser needs, and what the user sees while it does.
     val network = remember { java.util.Collections.synchronizedList(ArrayList<NetEntry>()) }
@@ -235,7 +284,7 @@ fun PreviewPane(
         }
         currentUrl = url
         tabHost.activeTab().url = url
-        webView?.let { PreviewWebView.loadUrlWhenReady(it, url) }
+        geckoHost?.loadUrl(url)
     }
 
     // A new request from outside (a header button, a file's Preview, a link) loads its page.
@@ -245,12 +294,12 @@ fun PreviewPane(
         go(url, newTab = true)
     }
 
-    LaunchedEffect(state.nonce, webView) {
-        val view = webView ?: return@LaunchedEffect
+    LaunchedEffect(state.nonce, webView, geckoHost) {
         val url = state.url
         currentUrl = url
         loadError = null
-        if (url != null) PreviewWebView.loadUrlWhenReady(view, url)
+        if (url == null) return@LaunchedEffect
+        geckoHost?.loadUrl(url)
     }
 
     // A preview of the project's files reloads when anything in its folder changes. Dev servers
@@ -267,7 +316,7 @@ fun PreviewPane(
             val now = withContext(Dispatchers.IO) { PreviewFiles.newest(dir) }
             if (now != last) {
                 last = now
-                webView?.reload()
+                geckoHost?.surface?.reload()
             }
         }
     }
@@ -283,14 +332,36 @@ fun PreviewPane(
         PreviewWebView.injectViewportMeta(view, DESKTOP_WIDTH, desktop)
     }
 
+    fun applyPreviewViewport(mode: Viewport) {
+        viewportName = mode.name
+        if (useGeckoEngine) {
+            val surf = geckoHost?.surface ?: return
+            scope.launch { GeckoViewport.apply(surf, mode.name.lowercase()) }
+        } else {
+            webView?.let { v ->
+                applyViewport(v)
+                v.reload()
+            }
+        }
+    }
+
     fun toast(text: String) = Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
 
     fun screenshot(saveToProject: Boolean) {
-        val view = webView ?: return
-        if (view.width == 0 || view.height == 0) return
-        val bitmap = runCatching {
-            Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888).also { view.draw(Canvas(it)) }
-        }.getOrNull() ?: return
+        val captureSurface = when {
+            useGeckoEngine && geckoHost != null -> geckoHost!!.surface
+            webView != null -> WebViewBrowserSurface(webView!!)
+            else -> null
+        } ?: return
+        if (captureSurface.width() == 0 || captureSurface.height() == 0) return
+        val bitmap = captureSurface.createScreenshotBitmap() ?: return
+        runCatching {
+            val canvas = Canvas(bitmap)
+            captureSurface.drawScreenshot(canvas)
+        }.onFailure {
+            bitmap.recycle()
+            return
+        }
         scope.launch {
             val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
             val result = withContext(Dispatchers.IO) {
@@ -331,15 +402,56 @@ fun PreviewPane(
 
     // This pane's driver. Panes are recreated (maximize, restore, rotation) and the old one can
     // finish going away after the new one registered; it must not unregister the new one.
+    fun previewSurface(): BrowserSurface? = when {
+        useGeckoEngine && geckoHost != null -> geckoHost!!.surface
+        webView != null -> WebViewBrowserSurface(webView!!)
+        else -> null
+    }
+
+    fun pageGoBack() {
+        if (useGeckoEngine) geckoHost?.session?.goBack() else webView?.goBack()
+    }
+
+    fun pageGoForward() {
+        if (useGeckoEngine) geckoHost?.session?.goForward() else webView?.goForward()
+    }
+
+    fun pageReload() {
+        loadError = null
+        if (useGeckoEngine) geckoHost?.surface?.reload() else webView?.reload()
+    }
+
+    fun pageStopOrReload() {
+        if (progress < 100 && !showStart) {
+            if (useGeckoEngine) geckoHost?.stopLoading() else webView?.stopLoading()
+        } else {
+            pageReload()
+        }
+    }
+
     var driver by remember { mutableStateOf<BrowserDriver?>(null) }
-    LaunchedEffect(webView, activeTabId) {
-        val view = webView ?: return@LaunchedEffect
-        tabHost.attachWebView(activeTabId, view)
+    LaunchedEffect(webView, geckoHost, useGeckoEngine, activeTabId, driverStubWebView) {
+        val surface = previewSurface() ?: return@LaunchedEffect
+        val interactionView: View = when {
+            useGeckoEngine && geckoHost != null -> geckoHost!!.geckoView
+            webView != null -> webView!!
+            else -> return@LaunchedEffect
+        }
+        if (!useGeckoEngine) {
+            val view = webView ?: return@LaunchedEffect
+            tabHost.attachWebView(activeTabId, view)
+        }
+        val driverWebView = if (useGeckoEngine) {
+            driverStubWebView ?: return@LaunchedEffect
+        } else {
+            webView!!
+        }
         val density = context.resources.displayMetrics.density
         driver = BrowserDriver(
             context,
             object : DriverUi {
-                override fun activeWebView() = tabHost.activeWebView()
+                override fun activeWebView() = driverWebView
+                override fun browserSurface(): BrowserSurface = surface
                 override fun projectDir() = state.projectDir
                 override fun navigate(url: String) = go(url)
                 override fun navigateNewTab(url: String): Int? {
@@ -352,6 +464,13 @@ fun PreviewPane(
                 override fun setViewport(mode: String): Boolean {
                     val target = Viewport.entries.firstOrNull { it.name.equals(mode, true) } ?: return false
                     viewportName = target.name
+                    if (useGeckoEngine) {
+                        kotlinx.coroutines.runBlocking {
+                            GeckoViewport.apply(surface, target.name.lowercase())
+                        }
+                        return true
+                    }
+                    val view = webView ?: return false
                     applyViewport(view)
                     view.reload()
                     return true
@@ -362,7 +481,12 @@ fun PreviewPane(
                     val to = androidx.compose.ui.geometry.Offset(x, y)
                     scope.launch {
                         if (cursor.value == androidx.compose.ui.geometry.Offset.Unspecified) {
-                            cursor.snapTo(androidx.compose.ui.geometry.Offset(view.width * 0.5f, view.height * 0.8f))
+                            cursor.snapTo(
+                                androidx.compose.ui.geometry.Offset(
+                                    interactionView.width * 0.5f,
+                                    interactionView.height * 0.8f,
+                                ),
+                            )
                         }
                         val distance = (cursor.value - to).getDistance() / density
                         cursor.animateTo(to, androidx.compose.animation.core.tween((220 + distance * 0.9f).toInt().coerceAtMost(650), easing = androidx.compose.animation.core.FastOutSlowInEasing))
@@ -415,10 +539,10 @@ fun PreviewPane(
                     BrowserBridge.captchaPending = false
                 }
                 override fun clearSiteData() {
-                    val url = currentUrl ?: return
+                    if (currentUrl == null) return
                     CookieManager.getInstance().removeAllCookies(null)
                     WebStorage.getInstance().deleteAllData()
-                    webView?.reload()
+                    pageReload()
                 }
                 override fun tabList(): JSONArray = tabHost.listJson()
                 override fun tabSwitch(id: Int): Boolean {
@@ -452,7 +576,7 @@ fun PreviewPane(
                     return closed
                 }
                 override fun ensureResumed() {
-                    webView?.onResume()
+                    if (!useGeckoEngine) webView?.onResume()
                 }
             },
         )
@@ -466,8 +590,29 @@ fun PreviewPane(
     // would otherwise keep the agent's commands and show the user nothing.
     LaunchedEffect(driver, visible) {
         val d = driver ?: return@LaunchedEffect
-        if (visible) BrowserBridge.controller = d
-        else if (BrowserBridge.controller === d) BrowserBridge.controller = null
+        val sessionKey = BrowserBridge.automationSessionKey
+        if (visible) {
+            if (sessionKey != null) {
+                val surface = previewSurface()
+                if (surface != null) {
+                    val headlessUrl = BrowserSessionRegistry.get(sessionKey)?.surface?.url()
+                    val visibleUrl = surface.url()
+                    BrowserSessionRegistry.attachUi(sessionKey, surface, d)
+                    if (!headlessUrl.isNullOrBlank() && headlessUrl != "about:blank" && headlessUrl != visibleUrl) {
+                        if (useGeckoEngine) {
+                            geckoHost?.loadUrl(headlessUrl)
+                        } else {
+                            webView?.let { PreviewWebView.loadUrlWhenReady(it, headlessUrl) }
+                        }
+                        currentUrl = headlessUrl
+                    }
+                }
+            }
+            BrowserBridge.controller = d
+        } else {
+            sessionKey?.let { BrowserSessionRegistry.restoreHeadless(context.applicationContext, it) }
+            if (BrowserBridge.controller === d) BrowserBridge.controller = null
+        }
     }
     // Keep the page interactive whenever it is on screen, including while the agent is idle or the
     // user paused the agent (pause only blocks new agent commands, not touch/scroll).
@@ -481,7 +626,7 @@ fun PreviewPane(
     }
 
     // Back steps through the page's history first when the preview has the screen to itself.
-    BackHandler(enabled = !parked && canBack && (!wide || maximized)) { webView?.goBack() }
+    BackHandler(enabled = !parked && canBack && (!wide || maximized)) { pageGoBack() }
 
     Column(modifier.background(Palette.Bg)) {
         // ---- Toolbar
@@ -489,13 +634,13 @@ fun PreviewPane(
             Modifier.fillMaxWidth().height(52.dp).padding(start = 4.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ToolIcon(TermFoldIcons.Back, stringResource(R.string.cd_back), enabled = canBack) { webView?.goBack() }
-            if (wide) ToolIcon(TermFoldIcons.Forward, stringResource(R.string.preview_forward), enabled = canForward) { webView?.goForward() }
+            ToolIcon(TermFoldIcons.Back, stringResource(R.string.cd_back), enabled = canBack) { pageGoBack() }
+            if (wide) ToolIcon(TermFoldIcons.Forward, stringResource(R.string.preview_forward), enabled = canForward) { pageGoForward() }
             ToolIcon(
                 if (progress < 100 && !showStart) TermFoldIcons.Close else TermFoldIcons.Refresh,
                 stringResource(if (progress < 100) R.string.acp_stop else R.string.preview_reload),
                 enabled = !showStart,
-            ) { if (progress < 100) webView?.stopLoading() else { loadError = null; webView?.reload() } }
+            ) { pageStopOrReload() }
             AddressBar(
                 url = currentUrl,
                 local = currentUrl?.let(Preview::isLocal) == true,
@@ -505,7 +650,7 @@ fun PreviewPane(
                 },
                 modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
             )
-            if (wide) ViewportButton(viewport) { viewportName = it.name; webView?.let { v -> applyViewport(v); v.reload() } }
+            if (wide) ViewportButton(viewport) { applyPreviewViewport(it) }
             Box {
                 ToolIcon(TermFoldIcons.Console, stringResource(R.string.preview_console), active = consoleOpen) { consoleOpen = !consoleOpen }
                 val errors = console.count { it.level == ConsoleMessage.MessageLevel.ERROR }
@@ -528,14 +673,27 @@ fun PreviewPane(
                 ) {
                     fun act(block: () -> Unit) { menuOpen = false; block() }
                     if (!wide) {
-                        MenuEntry(TermFoldIcons.Forward, stringResource(R.string.preview_forward)) { act { webView?.goForward() } }
+                        MenuEntry(TermFoldIcons.Forward, stringResource(R.string.preview_forward)) { act { pageGoForward() } }
                         Viewport.entries.forEach { mode ->
                             CheckItem(viewportIcon(mode), viewportLabel(mode), viewport == mode) {
-                                act { viewportName = mode.name; webView?.let { v -> applyViewport(v); v.reload() } }
+                                act { applyPreviewViewport(mode) }
                             }
                         }
                         HorizontalDivider(color = Palette.Border, modifier = Modifier.padding(vertical = 4.dp))
                     }
+                    CheckItem(TermFoldIcons.Moon, stringResource(R.string.preview_browser_dark), browserDarkMode) {
+                        act {
+                            browserDarkMode = true
+                            applyBrowserColorScheme()
+                        }
+                    }
+                    CheckItem(TermFoldIcons.Sun, stringResource(R.string.preview_browser_light), !browserDarkMode) {
+                        act {
+                            browserDarkMode = false
+                            applyBrowserColorScheme()
+                        }
+                    }
+                    HorizontalDivider(color = Palette.Border, modifier = Modifier.padding(vertical = 4.dp))
                     MenuEntry(TermFoldIcons.Camera, stringResource(R.string.preview_screenshot_copy)) { act { screenshot(saveToProject = false) } }
                     MenuEntry(TermFoldIcons.SaveToDevice, stringResource(R.string.preview_screenshot_save)) { act { screenshot(saveToProject = true) } }
                     HorizontalDivider(color = Palette.Border, modifier = Modifier.padding(vertical = 4.dp))
@@ -543,7 +701,10 @@ fun PreviewPane(
                         CheckItem(TermFoldIcons.Refresh, stringResource(R.string.preview_live_reload), liveReload) { act { liveReload = !liveReload } }
                     }
                     MenuEntry(TermFoldIcons.Refresh, stringResource(R.string.preview_hard_reload)) {
-                        act { webView?.clearCache(true); loadError = null; webView?.reload() }
+                        act {
+                            if (!useGeckoEngine) webView?.clearCache(true)
+                            pageReload()
+                        }
                     }
                     currentUrl?.takeIf { Preview.guestPathOf(it) == null }?.let { url ->
                         MenuEntry(TermFoldIcons.OpenExternal, stringResource(R.string.preview_open_outside)) { act { openOutside(url) } }
@@ -554,14 +715,18 @@ fun PreviewPane(
                         }
                     }
                     MenuEntry(TermFoldIcons.Home, stringResource(R.string.preview_start_page)) {
-                        act { currentUrl = null; loadError = null; webView?.loadUrl("about:blank") }
+                        act {
+                            currentUrl = null
+                            loadError = null
+                            if (useGeckoEngine) geckoHost?.loadUrl("about:blank") else webView?.loadUrl("about:blank")
+                        }
                     }
                     currentUrl?.let {
                         MenuEntry(TermFoldIcons.Refresh, stringResource(R.string.preview_clear_site_data)) {
                             act {
                                 CookieManager.getInstance().removeAllCookies(null)
                                 WebStorage.getInstance().deleteAllData()
-                                webView?.reload()
+                                pageReload()
                             }
                         }
                     }
@@ -650,7 +815,24 @@ fun PreviewPane(
                     .fillMaxHeight()
                     .clipToBounds(),
             ) {
-                androidx.compose.runtime.key(activeTabId) {
+                if (useGeckoEngine && geckoHost != null) {
+                    if (driverStubWebView == null) {
+                        AndroidView(
+                            modifier = Modifier.size(0.dp),
+                            factory = { ctx ->
+                                WebView(ctx).apply {
+                                    visibility = View.GONE
+                                    driverStubWebView = this
+                                }
+                            },
+                        )
+                    }
+                    GeckoPreviewAndroidView(
+                        host = geckoHost!!,
+                        modifier = Modifier.fillMaxSize(),
+                        releaseOnDispose = false,
+                    )
+                } else androidx.compose.runtime.key(activeTabId) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     // Tear the WebView down when it leaves the screen. Without this every pane that was
@@ -720,6 +902,7 @@ fun PreviewPane(
                                     loadError = null
                                     httpError = null
                                     console.clear()
+                                    viewportScript(view)
                                 }
 
                                 override fun onPageCommitVisible(view: WebView, url: String) {
@@ -845,7 +1028,7 @@ fun PreviewPane(
                     url = currentUrl.orEmpty(),
                     error = error,
                     servers = servers,
-                    onRetry = { loadError = null; webView?.reload() },
+                    onRetry = { pageReload() },
                     onOpen = ::go,
                 )
             }

@@ -32,6 +32,14 @@ termfold-browser viewport phone            # phone | desktop | fit
 termfold-browser eval "document.title"     # run JavaScript in the page
 ```
 
+## Long automations (token and battery)
+
+- Prefer `wait` (text, URL, network idle) over polling with full snapshots.
+- After the first snapshot, use `snapshot --changed`, `outline`, and `console --errors` before another full snapshot.
+- Use `network --failed` instead of dumping the whole network log.
+- Use `screenshot --if-changed` only when you need pixels; grep `/tmp/termfold-browser/snapshot.txt` for labels instead of re-snapshotting.
+- During an active automation or coding session with a bound browser profile, commands may run while the preview bubble is closed; keep the agent run active per TermFold’s notification policy.
+
 ## How to work
 
 1. Start the dev server in the background first (`npm run dev > /tmp/dev.log 2>&1 &`), then

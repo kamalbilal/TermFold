@@ -24,6 +24,10 @@
 -keep class com.termux.terminal.TerminalColors { *; }
 -keep class com.termux.terminal.TerminalColorScheme { *; }
 
+# GeckoView JNI and reflection.
+-keep class org.mozilla.geckoview.** { *; }
+-dontwarn org.mozilla.**
+
 # The file editor's page calls back into these through addJavascriptInterface.
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;

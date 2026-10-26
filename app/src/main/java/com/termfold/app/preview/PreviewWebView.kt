@@ -97,10 +97,16 @@ object PreviewWebView {
         view.post {
             view.requestLayout()
             view.invalidate()
-            view.evaluateJavascript(NUDGE_JS, null)
-            view.postDelayed({ view.evaluateJavascript(NUDGE_JS, null) }, 120)
+            for (delayMs in SPA_NUDGE_DELAYS_MS) {
+                view.postDelayed({
+                    view.evaluateJavascript(NUDGE_JS, null)
+                    view.invalidate()
+                }, delayMs)
+            }
         }
     }
+
+    private val SPA_NUDGE_DELAYS_MS = longArrayOf(0, 120, 350, 900, 2_000)
 
     private val NUDGE_JS = """
         (function(){

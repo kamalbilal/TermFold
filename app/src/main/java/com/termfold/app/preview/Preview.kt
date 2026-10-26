@@ -177,6 +177,17 @@ object DevServers {
  */
 object PreviewFiles {
 
+    /** In-memory body for [Preview.FILES_HOST] URLs loaded in GeckoView. */
+    fun bytesForUrl(context: Context, url: String): Pair<ByteArray, String>? {
+        val guest = Preview.guestPathOf(url) ?: return null
+        val response = respond(context, guest)
+        val stream = response.data ?: return null
+        return stream.use { body ->
+            val mime = response.mimeType ?: "application/octet-stream"
+            body.readBytes() to mime
+        }
+    }
+
     fun respond(context: Context, guestPath: String): WebResourceResponse {
         val rootfs = ShellPaths.rootfsDir(context)
         val segments = guestPath.split('/').filter { it.isNotEmpty() }

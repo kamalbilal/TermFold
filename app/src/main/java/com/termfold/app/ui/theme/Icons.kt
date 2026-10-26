@@ -545,6 +545,27 @@ object TermFoldIcons {
         )
     }
 
+    /** Crescent moon: dark page theme. */
+    val Moon: ImageVector by lazy {
+        stroked("Moon", "M15.2,5.4 A6.8,6.8 0 1,0 18.6,16.2 A5.6,5.6 0 1,1 15.2,5.4 Z")
+    }
+
+    /** Sun disc: light page theme. */
+    val Sun: ImageVector by lazy {
+        stroked(
+            "Sun",
+            "M12,8.2 A3.8,3.8 0 1,1 11.99,8.2 Z",
+            "M12,3.2 V5.0",
+            "M12,19.0 V20.8",
+            "M4.8,12 H6.6",
+            "M17.4,12 H19.2",
+            "M6.5,6.5 L7.8,7.8",
+            "M16.2,16.2 L17.5,17.5",
+            "M17.5,6.5 L16.2,7.8",
+            "M7.8,16.2 L6.5,17.5",
+        )
+    }
+
     /** A globe: the in-app browser. */
     val Globe: ImageVector by lazy {
         stroked(

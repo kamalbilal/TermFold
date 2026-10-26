@@ -17,6 +17,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import com.termfold.app.preview.engine.BrowserBridgeTimeouts
+import com.termfold.app.preview.engine.BrowserSessionRegistry
+import com.termfold.app.preview.engine.PreviewUrlRouter
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import java.io.BufferedInputStream
@@ -53,6 +56,10 @@ object BrowserBridge {
     /** When set, browser commands apply only to this automation session (`projectId:sessionId`). */
     @Volatile
     var automationSessionKey: String? = null
+
+    /** Active coding-agent session compose key (workspace chat); lazy headless browser profile. */
+    @Volatile
+    var codingSessionKey: String? = null
 
     /** What the user sees: whether an agent is driving, what it just did, and whether it is paused. */
     data class Activity(val active: Boolean = false, val label: String = "", val paused: Boolean = false)
@@ -114,7 +121,8 @@ object BrowserBridge {
                 JSONObject(file.readText()).optInt("port")
             }.getOrDefault(0))
             .put("token", token)
-            .put("automation_session_key", AutomationSessionContext.activeKey ?: "")
+            .put("automation_session_key", automationSessionKey ?: AutomationSessionContext.activeKey ?: "")
+            .put("agent_session_key", codingSessionKey ?: "")
         file.writeText(body.toString())
         file.setReadable(false, false)
         file.setReadable(true, true)
@@ -226,33 +234,52 @@ object BrowserBridge {
         }
         lastCommand = System.currentTimeMillis()
         _activity.update { it.copy(active = true, label = labelFor(action, args)) }
-        // The browser draws only while the pane is on screen: open it and wait for it.
-        var driver = controller
+        var registryKey = resolveRegistryKey(requiredKey, args)
+        if (registryKey == null && requiredKey == null && !codingSessionKey.isNullOrBlank()) {
+            registryKey = withContext(Dispatchers.Main) {
+                BrowserSessionRegistry.ensureCoding(context.applicationContext, codingSessionKey!!).key
+            }
+        }
+        val registryDriver = registryKey?.let { BrowserSessionRegistry.controllerFor(it) }
+        // On-screen preview wins over the headless registry profile for the same session.
+        var driver = controller ?: registryDriver
         if (driver == null) {
             withContext(Dispatchers.Main) { Preview.open() }
-            // With TermFold on screen the pane appears by itself. With nothing on screen (the app
-            // in the background, the bubble collapsed) the user has to bring it up, so tell them
-            // and give them time.
             val nobodyLooking = !com.termfold.app.notify.AppPresence.inForeground
             if (nobodyLooking) com.termfold.app.notify.Notifier.askForBrowser(context)
-            val until = System.currentTimeMillis() + if (nobodyLooking) 75_000 else 15_000
+            val until = System.currentTimeMillis() + if (nobodyLooking) {
+                BrowserBridgeTimeouts.PREVIEW_ATTACH_BACKGROUND_MS
+            } else {
+                BrowserBridgeTimeouts.PREVIEW_ATTACH_MS
+            }
             while (driver == null && System.currentTimeMillis() < until) {
                 delay(100)
-                driver = controller
+                driver = registryKey?.let { BrowserSessionRegistry.controllerFor(it) } ?: controller
             }
             if (nobodyLooking) com.termfold.app.notify.Notifier.cancelBrowserRequest(context)
         }
         if (driver == null) {
             return JSONObject().put(
                 "error",
-                "The browser can only work while TermFold is on screen (the app, or its bubble opened). " +
-                    "The user has been asked to open it; try the command again once they have.",
+                if (registryKey != null) {
+                    "No browser session is registered for this agent run. Open preview once or restart the session."
+                } else {
+                    "The browser can only work while TermFold is on screen (the app, or its bubble opened). " +
+                        "The user has been asked to open it; try the command again once they have."
+                },
             )
         }
         running.incrementAndGet()
         syncCommandInFlight()
+        val runBlock: suspend () -> JSONObject = { driver!!.run(action, args) }
         return runCatching {
-            withTimeout(90_000) { driver.run(action, args) }
+            if (registryKey != null) {
+                BrowserSessionRegistry.runExclusive(registryKey) {
+                    withTimeout(BrowserBridgeTimeouts.MCP_COMMAND_MS) { runBlock() }
+                }
+            } else {
+                withTimeout(BrowserBridgeTimeouts.MCP_COMMAND_MS) { runBlock() }
+            }
         }.getOrElse { JSONObject().put("error", it.message ?: it.javaClass.simpleName) }.also { result ->
             running.decrementAndGet()
             syncCommandInFlight()
@@ -265,6 +292,22 @@ object BrowserBridge {
                 recordAction(labelFor(action, args))
             }
         }
+    }
+
+    private fun resolveRegistryKey(requiredKey: String?, args: JSONObject): String? {
+        if (!requiredKey.isNullOrBlank() && BrowserSessionRegistry.get(requiredKey) != null) {
+            return requiredKey
+        }
+        if (!codingSessionKey.isNullOrBlank()) {
+            val activeCoding = PreviewUrlRouter.sessionKeyForCoding(codingSessionKey!!)
+            if (BrowserSessionRegistry.get(activeCoding) != null) return activeCoding
+        }
+        val given = args.optString("session_key")
+        if (given.isBlank()) return null
+        if (BrowserSessionRegistry.get(given) != null) return given
+        val coding = PreviewUrlRouter.sessionKeyForCoding(given)
+        if (BrowserSessionRegistry.get(coding) != null) return coding
+        return null
     }
 
     private fun labelFor(action: String, args: JSONObject): String = when (action) {
