@@ -60,8 +60,14 @@ object PrReviewReportParser {
     fun parseTurn(items: List<AcpItem>): PrReviewParse {
         val lastUser = items.indexOfLast { it is AcpItem.UserMessage }
         if (lastUser < 0) return PrReviewParse.Skipped
-        val agentText = items
-            .drop(lastUser + 1)
+        return parseTurnSlice(items.drop(lastUser))
+    }
+
+    /** [turnItems] must start with the user message for this turn. */
+    fun parseTurnSlice(turnItems: List<AcpItem>): PrReviewParse {
+        if (turnItems.isEmpty() || turnItems.first() !is AcpItem.UserMessage) return PrReviewParse.Skipped
+        val agentText = turnItems
+            .drop(1)
             .filterIsInstance<AcpItem.AgentText>()
             .joinToString("") { it.text }
         if (agentText.isBlank()) return PrReviewParse.Skipped

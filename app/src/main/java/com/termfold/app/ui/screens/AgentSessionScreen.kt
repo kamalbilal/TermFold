@@ -182,7 +182,11 @@ fun AgentSessionScreen(
     pmMode: Boolean = false,
     onReviewDone: (() -> Unit)? = null,
     onReviewAnother: (() -> Unit)? = null,
-    reviewChrome: (@Composable () -> Unit)? = null,
+    /**
+     * Workflow cards/controls after each user turn (below that turn's agent reply).
+     * Used by [PmAgentSessionScreen] and [PrReviewAgentSessionScreen]; pass null for plain agent chat.
+     */
+    turnFooter: (@Composable (userMessageId: Long, turnItems: List<AcpItem>) -> Unit)? = null,
     rewriteAgentText: (String) -> String = { it },
     onAcpSnapshot: ((items: List<AcpItem>, agentBusy: Boolean) -> Unit)? = null,
 ) {
@@ -474,7 +478,7 @@ fun AgentSessionScreen(
                         client = client,
                         onEditMessage = { editingMessage = it },
                         stickyUserMessagesEnabled = stickyUserMessagesEnabled,
-                        header = reviewChrome,
+                        turnFooter = turnFooter,
                         rewriteAgentText = rewriteAgentText,
                         modifier = Modifier.weight(1f),
                     )
@@ -1371,7 +1375,7 @@ private fun Timeline(
     client: AcpClient,
     onEditMessage: (AcpItem.UserMessage) -> Unit,
     stickyUserMessagesEnabled: Boolean = true,
-    header: (@Composable () -> Unit)? = null,
+    turnFooter: (@Composable (userMessageId: Long, turnItems: List<AcpItem>) -> Unit)? = null,
     rewriteAgentText: (String) -> String = { it },
     modifier: Modifier = Modifier,
 ) {
@@ -1444,6 +1448,7 @@ private fun Timeline(
         workspaceDir = workspaceDir,
         showLiveToolDiffs = showLiveToolDiffs,
         presentationCache = presentationSnapshot,
+        turnFooters = turnFooter != null,
     )
 
     // Follow the conversation while the user is at the bottom; debounce scroll-to-bottom so
@@ -1655,12 +1660,10 @@ private fun Timeline(
                         ToolCallDetailBlock(entry.item)
                     }
                 }
-            }
-        }
-
-        if (header != null) {
-            item(key = "pr-review-report") {
-                header()
+                is AgentChatLazyEntry.TurnFooter -> item(key = entry.key) {
+                    val turnItems = agentChatItemsForUserTurn(items, entry.userMessageId)
+                    turnFooter?.invoke(entry.userMessageId, turnItems)
+                }
             }
         }
 

@@ -64,6 +64,22 @@ class PrReviewReportParserTest {
     }
 
     @Test
+    fun parseTurnSliceUsesOnlyThatTurnAgentText() {
+        val turnOne = listOf(
+            AcpItem.UserMessage(1, "first", emptyList()),
+            AcpItem.AgentText(2, "```pr-review-report\n$validJson\n```"),
+        )
+        val turnTwo = listOf(
+            AcpItem.UserMessage(3, "second", emptyList()),
+            AcpItem.AgentText(4, "no fence yet"),
+        )
+        val first = PrReviewReportParser.parseTurnSlice(turnOne) as PrReviewParse.Ok
+        assertEquals("Adds login.", first.report.summary)
+        assertEquals(PrReviewParse.Missing, PrReviewReportParser.parseTurnSlice(turnTwo))
+        assertEquals(PrReviewParse.Missing, PrReviewReportParser.parseTurn(turnOne + turnTwo))
+    }
+
+    @Test
     fun ignoresThoughtAndUsesLastAgentText() {
         val items = listOf(
             AcpItem.UserMessage(1, "review", emptyList()),

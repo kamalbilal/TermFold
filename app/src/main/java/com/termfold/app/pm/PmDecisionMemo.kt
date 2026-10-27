@@ -41,5 +41,16 @@ object PmDecisionMemoParser {
             gaps = obj.optString("gaps", obj.optString("open_questions", "")),
         )
 
+    fun toJson(memo: PmDecisionMemo): String =
+        JSONObject()
+            .put("recommendation", memo.recommendation)
+            .put("landscape", memo.landscape)
+            .put("options", memo.options)
+            .put("scope_in", memo.scopeIn)
+            .put("scope_out", memo.scopeOut)
+            .put("risks", memo.risks)
+            .put("gaps", memo.gaps)
+            .toString()
+
     fun stripFences(text: String): String = fencedJson.replace(text, "").trim()
 }

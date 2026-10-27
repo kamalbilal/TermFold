@@ -27,6 +27,7 @@ import com.termfold.app.prreview.PrReviewKeys
 import com.termfold.app.prreview.PrReviewParse
 import com.termfold.app.prreview.PrReviewPaths
 import com.termfold.app.prreview.PrReviewPrompt
+import com.termfold.app.prreview.PrReviewReport
 import com.termfold.app.prreview.PrReviewReportParser
 import com.termfold.app.prreview.PrReviewSession
 import com.termfold.app.ui.theme.Palette
@@ -53,6 +54,7 @@ fun PrReviewAgentSessionScreen(
     var pasteOpen by remember { mutableStateOf(false) }
     var pasteValue by remember { mutableStateOf("") }
     var agentWasBusy by remember(session.id) { mutableStateOf(false) }
+    var lastUserMessageId by remember(session.id) { mutableStateOf<Long?>(null) }
     LaunchedEffect(session.id) {
         PrReviewPaths.ensureStub(context, session.id)
     }
@@ -89,17 +91,24 @@ fun PrReviewAgentSessionScreen(
         guestDirOverride = guestDir,
         hideBranchPicker = true,
         promptPrefix = { _ -> PrReviewPrompt.prefix(session) },
-        reviewChrome = {
-            PrReviewReportChrome(
-                report = prReviewReportFromSessionJson(session.lastReportJson),
-                parseError = session.lastParseError,
+        turnFooter = { userMessageId, turnItems ->
+            val parse = PrReviewReportParser.parseTurnSlice(turnItems)
+            val useSessionFallback = userMessageId == lastUserMessageId &&
+                agentChatTurnHasAgentReply(turnItems)
+            val (report, parseError) = prReviewChromeFromParse(
+                parse = parse,
+                fallbackReport = if (useSessionFallback) {
+                    prReviewReportFromSessionJson(session.lastReportJson)
+                } else {
+                    null
+                },
+                fallbackParseError = if (useSessionFallback) session.lastParseError else null,
             )
+            PrReviewReportChrome(report = report, parseError = parseError)
         },
-        rewriteAgentText = { text ->
-            if (session.lastReportJson.isNullOrBlank()) text
-            else PrReviewReportParser.stripFences(text)
-        },
+        rewriteAgentText = PrReviewReportParser::stripFences,
         onAcpSnapshot = { items: List<AcpItem>, busy ->
+            lastUserMessageId = items.filterIsInstance<AcpItem.UserMessage>().lastOrNull()?.id
             if (agentWasBusy && !busy) {
                 onSaveParse(PrReviewReportParser.parseTurn(items))
             }
@@ -181,5 +190,22 @@ fun PrReviewAgentSessionScreen(
                 }
             },
         )
+    }
+}
+
+private fun prReviewChromeFromParse(
+    parse: PrReviewParse,
+    fallbackReport: PrReviewReport?,
+    fallbackParseError: String?,
+): Pair<PrReviewReport?, String?> {
+    if (parse is PrReviewParse.Ok) return parse.report to null
+    if (fallbackReport != null && parse !is PrReviewParse.Invalid) {
+        return fallbackReport to fallbackParseError
+    }
+    return when (parse) {
+        PrReviewParse.Missing -> null to "missing"
+        is PrReviewParse.Invalid -> null to parse.reason
+        PrReviewParse.Skipped -> null to null
+        is PrReviewParse.Ok -> parse.report to null
     }
 }

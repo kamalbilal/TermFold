@@ -158,6 +158,58 @@ class AgentChatTimelineTest {
     }
 
     @Test
+    fun turnFootersPlacedAfterEachUserTurnNotOnlyAtEnd() {
+        val items = listOf(
+            AcpItem.UserMessage(1L, "first", emptyList()),
+            AcpItem.AgentText(2L, "reply one"),
+            AcpItem.UserMessage(3L, "second", emptyList()),
+            AcpItem.AgentText(4L, "reply two"),
+        )
+        val flat = buildAgentChatTimelineEntries(
+            items = items,
+            collapsedTools = emptyMap(),
+            expandedToolFiles = emptyMap(),
+            contextFolds = emptyMap(),
+            workspaceDir = "/root/ws",
+            showLiveToolDiffs = false,
+            presentationCache = emptyMap(),
+            turnFooters = false,
+        )
+        assertTrue(flat.none { it is AgentChatLazyEntry.TurnFooter })
+
+        val withFooters = buildAgentChatTimelineEntries(
+            items = items,
+            collapsedTools = emptyMap(),
+            expandedToolFiles = emptyMap(),
+            contextFolds = emptyMap(),
+            workspaceDir = "/root/ws",
+            showLiveToolDiffs = false,
+            presentationCache = emptyMap(),
+            turnFooters = true,
+        )
+        val footerIds = withFooters.filterIsInstance<AgentChatLazyEntry.TurnFooter>().map { it.userMessageId }
+        assertEquals(listOf(1L, 3L), footerIds)
+        val firstFooterIndex = withFooters.indexOfFirst { it is AgentChatLazyEntry.TurnFooter && it.userMessageId == 1L }
+        val secondUserIndex = withFooters.indexOfFirst {
+            it is AgentChatLazyEntry.Standard && it.item is AcpItem.UserMessage && it.item.id == 3L
+        }
+        assertTrue(firstFooterIndex >= 0)
+        assertTrue(secondUserIndex > firstFooterIndex)
+    }
+
+    @Test
+    fun agentChatItemsForUserTurnSlicesOneTurn() {
+        val items = listOf(
+            AcpItem.UserMessage(1L, "a", emptyList()),
+            AcpItem.AgentText(2L, "x"),
+            AcpItem.UserMessage(3L, "b", emptyList()),
+            AcpItem.AgentText(4L, "y"),
+        )
+        assertEquals(listOf(1L, 2L), agentChatItemsForUserTurn(items, 1L).map { it.id })
+        assertEquals(listOf(3L, 4L), agentChatItemsForUserTurn(items, 3L).map { it.id })
+    }
+
+    @Test
     fun buildMapRespectsUserOverride() {
         val items = itemsWithUserThenTools(tool(id = 1L, status = "completed", fileDiffs = oneFileDiff))
         val map = buildToolCallCollapsedMap(

@@ -74,7 +74,9 @@ fun PmAgentSessionScreen(
     var competitorName by remember { mutableStateOf("") }
     var competitorUrl by remember { mutableStateOf("") }
     var agentWasBusy by remember(session.id) { mutableStateOf(false) }
-    var lastMemo by remember(session.id) { mutableStateOf(session.lastDecisionJson) }
+    var firstUserMessageId by remember(session.id) { mutableStateOf<Long?>(null) }
+    var lastUserMessageId by remember(session.id) { mutableStateOf<Long?>(null) }
+    var memosByUserMessageId by remember(session.id) { mutableStateOf(mapOf<Long, String>()) }
 
     val goldenGuest = codingFolder?.let { WorkspaceStore.goldenGuestPath(context, it) }
     val copyGuest = if (session.mode == PmMode.RELEASE && codingFolder != null && session.workspaceId != null) {
@@ -104,10 +106,6 @@ fun PmAgentSessionScreen(
         if (session.researchPackCache.isNullOrBlank()) {
             onRefreshResearch(session.id, false)
         }
-    }
-
-    LaunchedEffect(session.lastDecisionJson) {
-        lastMemo = session.lastDecisionJson
     }
 
     val discoveryWorkspaceId = if (session.mode == PmMode.DISCOVERY) WorkspaceIds.GOLDEN else null
@@ -168,37 +166,46 @@ fun PmAgentSessionScreen(
                 PmPrompt.prefix(context, session, userQuery = query)
             },
             onPmSessionMemory = { showMemory = true },
-            reviewChrome = {
+            turnFooter = { userMessageId, turnItems ->
                 Column(Modifier.fillMaxWidth()) {
-                    PmSessionChrome(
-                        session = session,
-                        researchExpanded = researchExpanded,
-                        onToggleResearchLog = { researchExpanded = !researchExpanded },
-                        includeCompetitive = session.includeCompetitiveResearch,
-                        onIncludeCompetitiveChange = { enabled ->
-                            onUpdateSession(session.copy(includeCompetitiveResearch = enabled))
-                        },
-                        competitorName = competitorName,
-                        competitorUrl = competitorUrl,
-                        onCompetitorNameChange = { competitorName = it },
-                        onCompetitorUrlChange = { competitorUrl = it },
-                        onAddCompetitor = {
-                            if (competitorName.isBlank()) return@PmSessionChrome
-                            val next = session.copy(
-                                competitors = session.competitors + PmCompetitor(
-                                    name = competitorName.trim(),
-                                    homepageUrl = competitorUrl.trim(),
-                                ),
-                            )
-                            PmBriefFiles.syncCompetitorsMarkdown(context, next)
-                            onUpdateSession(next)
-                            competitorName = ""
-                            competitorUrl = ""
-                        },
-                        onRefreshResearch = { onRefreshResearch(session.id, true) },
+                    if (userMessageId == firstUserMessageId) {
+                        PmSessionChrome(
+                            session = session,
+                            researchExpanded = researchExpanded,
+                            onToggleResearchLog = { researchExpanded = !researchExpanded },
+                            includeCompetitive = session.includeCompetitiveResearch,
+                            onIncludeCompetitiveChange = { enabled ->
+                                onUpdateSession(session.copy(includeCompetitiveResearch = enabled))
+                            },
+                            competitorName = competitorName,
+                            competitorUrl = competitorUrl,
+                            onCompetitorNameChange = { competitorName = it },
+                            onCompetitorUrlChange = { competitorUrl = it },
+                            onAddCompetitor = {
+                                if (competitorName.isBlank()) return@PmSessionChrome
+                                val next = session.copy(
+                                    competitors = session.competitors + PmCompetitor(
+                                        name = competitorName.trim(),
+                                        homepageUrl = competitorUrl.trim(),
+                                    ),
+                                )
+                                PmBriefFiles.syncCompetitorsMarkdown(context, next)
+                                onUpdateSession(next)
+                                competitorName = ""
+                                competitorUrl = ""
+                            },
+                            onRefreshResearch = { onRefreshResearch(session.id, true) },
+                        )
+                    }
+                    val memoJson = pmMemoJsonForTurn(
+                        userMessageId = userMessageId,
+                        turnItems = turnItems,
+                        memosByUserMessageId = memosByUserMessageId,
+                        lastUserMessageId = lastUserMessageId,
+                        sessionLastDecisionJson = session.lastDecisionJson,
                     )
                     PmDecisionChrome(
-                        memo = lastMemo?.let {
+                        memo = memoJson?.let {
                             runCatching { PmDecisionMemoParser.fromJson(org.json.JSONObject(it)) }.getOrNull()
                         },
                     )
@@ -206,19 +213,19 @@ fun PmAgentSessionScreen(
             },
             rewriteAgentText = PmDecisionMemoParser::stripFences,
             onAcpSnapshot = { items: List<AcpItem>, busy ->
+                val users = items.filterIsInstance<AcpItem.UserMessage>()
+                firstUserMessageId = users.firstOrNull()?.id
+                val lastUserId = users.lastOrNull()?.id
+                lastUserMessageId = lastUserId
                 if (agentWasBusy && !busy) {
-                    val text = items.filterIsInstance<AcpItem.AgentText>().map { it.text }.joinToString("\n")
+                    val turnUserId = lastUserId
+                    val turnItems = turnUserId?.let { agentChatItemsForUserTurn(items, it) } ?: emptyList()
+                    val text = turnItems.filterIsInstance<AcpItem.AgentText>().map { it.text }.joinToString("\n")
                     PmDecisionMemoParser.parseFromAgentText(text)?.let { memo ->
-                        val json = org.json.JSONObject()
-                            .put("recommendation", memo.recommendation)
-                            .put("landscape", memo.landscape)
-                            .put("options", memo.options)
-                            .put("scope_in", memo.scopeIn)
-                            .put("scope_out", memo.scopeOut)
-                            .put("risks", memo.risks)
-                            .put("gaps", memo.gaps)
-                            .toString()
-                        lastMemo = json
+                        val json = PmDecisionMemoParser.toJson(memo)
+                        if (turnUserId != null) {
+                            memosByUserMessageId = memosByUserMessageId + (turnUserId to json)
+                        }
                         onUpdateSession(session.copy(lastDecisionJson = json))
                         scope.launch {
                             withContext(Dispatchers.IO) {
@@ -371,4 +378,29 @@ private fun PmSessionChrome(
             }
         }
     }
+}
+
+private fun pmDecisionJsonFromTurnItems(turnItems: List<AcpItem>): String? {
+    val text = turnItems.filterIsInstance<AcpItem.AgentText>().map { it.text }.joinToString("\n")
+    val memo = PmDecisionMemoParser.parseFromAgentText(text) ?: return null
+    return PmDecisionMemoParser.toJson(memo)
+}
+
+private fun pmMemoJsonForTurn(
+    userMessageId: Long,
+    turnItems: List<AcpItem>,
+    memosByUserMessageId: Map<Long, String>,
+    lastUserMessageId: Long?,
+    sessionLastDecisionJson: String?,
+): String? {
+    memosByUserMessageId[userMessageId]?.let { return it }
+    pmDecisionJsonFromTurnItems(turnItems)?.let { return it }
+    if (
+        userMessageId == lastUserMessageId &&
+        agentChatTurnHasAgentReply(turnItems) &&
+        !sessionLastDecisionJson.isNullOrBlank()
+    ) {
+        return sessionLastDecisionJson
+    }
+    return null
 }

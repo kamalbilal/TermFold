@@ -29,4 +29,19 @@ class PmDecisionMemoParserTest {
     fun ignoresNonMemoJson() {
         assertNull(PmDecisionMemoParser.parseFromAgentText("no structured output"))
     }
+
+    @Test
+    fun toJsonRoundTripsThroughFromJson() {
+        val memo = PmDecisionMemo(
+            recommendation = "Ship",
+            landscape = "Busy",
+            options = "A / B",
+            scopeIn = "MVP",
+            scopeOut = "Enterprise",
+            risks = "Low",
+            gaps = "Pricing",
+        )
+        val restored = PmDecisionMemoParser.fromJson(org.json.JSONObject(PmDecisionMemoParser.toJson(memo)))
+        assertEquals(memo, restored)
+    }
 }
