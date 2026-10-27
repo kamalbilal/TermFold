@@ -898,7 +898,7 @@ fun BranchChip(
             color = Palette.Accent,
             maxLines = if (truncate) 1 else Int.MAX_VALUE,
             overflow = if (truncate) TextOverflow.Ellipsis else TextOverflow.Clip,
-            modifier = if (truncate) Modifier.weight(1f, fill = true).widthIn(min = 0.dp) else Modifier,
+            modifier = if (truncate) Modifier.weight(1f, fill = false).widthIn(min = 0.dp) else Modifier,
         )
         if (uncommittedChanges) {
             Text(

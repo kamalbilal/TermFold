@@ -26,6 +26,7 @@ class GeckoBrowserSession(
     @Volatile private var canGoForward = false
     @Volatile var progress: Int = 100
     @Volatile var loadError: String? = null
+    @Volatile private var displayBound = false
 
     init {
         val runtime = GeckoRuntimeHolder.getOrCreate(appContext)
@@ -87,11 +88,19 @@ class GeckoBrowserSession(
                 onHistory?.invoke(canGoBack, canGoForward)
             }
         }
-        geckoView?.setSession(session)
+        // UI sessions bind in bindToDisplay() once GeckoView is on screen; binding too early paints blank.
         surface = GeckoBrowserSurface(session, geckoView, { currentUrl }, { canGoBack to canGoForward }, storageContextId)
         GeckoTermfoldExtension.registerSession(session)
         com.termfold.app.preview.network.NetworkRulesHub.bindSession(storageContextId)
         com.termfold.app.preview.network.NetworkRulesHub.pushToExtension()
+    }
+
+    /** Attach session to [GeckoView] after it is in the window; safe to call repeatedly. */
+    fun bindToDisplay() {
+        val view = geckoView ?: return
+        if (displayBound) return
+        view.setSession(session)
+        displayBound = true
     }
 
     fun stopLoading() {
@@ -118,6 +127,7 @@ class GeckoBrowserSession(
     fun release() {
         GeckoTermfoldExtension.unregisterSession(session)
         geckoView?.releaseSession()
+        displayBound = false
         session.close()
     }
 }

@@ -2538,8 +2538,15 @@ private fun Composer(
     val pickImages = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(MAX_COMPOSER_IMAGES),
     ) { uris ->
-        // Photo picker returns newest-first; preserve the user's tap order.
-        uris.asReversed().forEach { addImage(it) }
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        scope.launch {
+            // Load one-by-one so thumbnails stay in picker/tap order (parallel decode races).
+            uris.forEach { uri ->
+                val encoded = withContext(Dispatchers.IO) { PastedImages.load(context, uri) }
+                if (encoded != null) images.add(encoded.toBlock())
+            }
+            persistAttachments()
+        }
     }
 
     val canSend = input.text.isNotBlank() || images.isNotEmpty() || files.isNotEmpty()
@@ -2870,9 +2877,7 @@ private fun Composer(
                     size = 38,
                 )
                 Row(
-                    modifier = Modifier
-                        .weight(1f)
-                        .widthIn(min = 0.dp),
+                    modifier = Modifier.weight(1f),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.End,
                 ) {
@@ -2882,9 +2887,7 @@ private fun Composer(
                             onClick = onBranchClick,
                             truncate = true,
                             uncommittedChanges = branchUncommitted,
-                            modifier = Modifier
-                                .weight(1f, fill = false)
-                                .widthIn(min = 0.dp),
+                            modifier = Modifier.widthIn(max = 168.dp),
                         )
                         Spacer(Modifier.width(6.dp))
                     }

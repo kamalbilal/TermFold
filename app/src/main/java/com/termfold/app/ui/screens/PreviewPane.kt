@@ -219,28 +219,15 @@ fun PreviewPane(
         ?: Preview.webViewDataDirectorySuffix
         ?: "preview"
     var networkOpen by remember { mutableStateOf(false) }
-    var networkDetailEntry by remember { mutableStateOf<com.termfold.app.preview.network.NetworkCaptureStore.Entry?>(null) }
     var networkPreserve by remember(storageContextId) {
         mutableStateOf(com.termfold.app.preview.network.NetworkCaptureStore.isPreserve(storageContextId))
     }
     var networkEntries by remember { mutableStateOf(emptyList<com.termfold.app.preview.network.NetworkCaptureStore.Entry>()) }
     val useGeckoEngine = !showStart
-    var geckoHost by remember(storageContextId) { mutableStateOf<GeckoPreviewHost?>(null) }
-    var driverStubWebView by remember { mutableStateOf<WebView?>(null) }
-
-    fun applyBrowserColorScheme() {
-        PreviewBrowserTheme.apply(context.applicationContext, browserDarkMode)
-        PreviewBrowserTheme.applyGeckoViewChrome(geckoHost?.geckoView, browserDarkMode)
-    }
-
-    LaunchedEffect(browserDarkMode) {
-        applyBrowserColorScheme()
-    }
-
-    LaunchedEffect(useGeckoEngine, storageContextId) {
-        if (useGeckoEngine && geckoHost == null) {
-            geckoHost = GeckoPreviewHost(
-                context.applicationContext,
+    val geckoHost: GeckoPreviewHost? = if (useGeckoEngine) {
+        remember(storageContextId) {
+            GeckoPreviewHost(
+                context,
                 storageContextId,
                 onTitle = { t ->
                     title = t
@@ -252,11 +239,22 @@ fun PreviewPane(
                     canForward = forward
                 },
             )
-            applyBrowserColorScheme()
         }
+    } else {
+        null
+    }
+    var driverStubWebView by remember { mutableStateOf<WebView?>(null) }
+
+    fun applyBrowserColorScheme() {
+        PreviewBrowserTheme.apply(context.applicationContext, browserDarkMode)
+        PreviewBrowserTheme.applyGeckoViewChrome(geckoHost?.geckoView, browserDarkMode)
     }
 
-    DisposableEffect(Unit) {
+    LaunchedEffect(geckoHost, browserDarkMode) {
+        applyBrowserColorScheme()
+    }
+
+    DisposableEffect(geckoHost) {
         onDispose { geckoHost?.release() }
     }
 
@@ -341,7 +339,7 @@ fun PreviewPane(
         }
         currentUrl = url
         tabHost.activeTab().url = url
-        geckoHost?.loadUrl(url)
+        geckoHost?.let { GeckoPreviewHost.loadUrlWhenReady(it, url) }
     }
 
     // A new request from outside (a header button, a file's Preview, a link) loads its page.
@@ -351,12 +349,16 @@ fun PreviewPane(
         go(url, newTab = true)
     }
 
-    LaunchedEffect(state.nonce, webView, geckoHost) {
-        val url = state.url
-        currentUrl = url
+    LaunchedEffect(state.nonce) {
         loadError = null
-        if (url == null) return@LaunchedEffect
-        geckoHost?.loadUrl(url)
+        state.url?.let { currentUrl = it }
+    }
+
+    LaunchedEffect(state.nonce, geckoHost, currentUrl) {
+        val url = currentUrl ?: return@LaunchedEffect
+        if (url == "about:blank") return@LaunchedEffect
+        val host = geckoHost ?: return@LaunchedEffect
+        GeckoPreviewHost.loadUrlWhenReady(host, url)
     }
 
     // A preview of the project's files reloads when anything in its folder changes. Dev servers
@@ -680,7 +682,7 @@ fun PreviewPane(
                     BrowserSessionRegistry.attachUi(sessionKey, surface, d)
                     if (!headlessUrl.isNullOrBlank() && headlessUrl != "about:blank" && headlessUrl != visibleUrl) {
                         if (useGeckoEngine) {
-                            geckoHost?.loadUrl(headlessUrl)
+                            geckoHost?.let { GeckoPreviewHost.loadUrlWhenReady(it, headlessUrl) }
                         } else {
                             webView?.let { PreviewWebView.loadUrlWhenReady(it, headlessUrl) }
                         }
@@ -705,6 +707,7 @@ fun PreviewPane(
         onDispose { if (BrowserBridge.controller === driver) BrowserBridge.controller = null }
     }
 
+    BackHandler(enabled = networkOpen && useGeckoEngine) { networkOpen = false }
     BackHandler(enabled = networkRulesOpen) { networkRulesOpen = false }
     // Back steps through the page's history first when the preview has the screen to itself.
     BackHandler(enabled = !networkRulesOpen && !parked && canBack && (!wide || maximized)) { pageGoBack() }
@@ -733,20 +736,24 @@ fun PreviewPane(
                 modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
             )
             if (wide) ViewportButton(viewport) { applyPreviewViewport(it) }
-            Box {
-                ToolIcon(TermFoldIcons.Console, stringResource(R.string.preview_console), active = consoleOpen) { consoleOpen = !consoleOpen }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box {
+                    ToolIcon(TermFoldIcons.Console, stringResource(R.string.preview_console), active = consoleOpen) {
+                        consoleOpen = !consoleOpen
+                    }
+                    val errors = console.count { it.level == ConsoleMessage.MessageLevel.ERROR }
+                    if (errors > 0) {
+                        Box(
+                            Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 4.dp).size(16.dp).clip(CircleShape).background(Palette.Pink),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(if (errors > 99) "99" else errors.toString(), fontSize = 9.sp, color = Palette.OnAccent, maxLines = 1)
+                        }
+                    }
+                }
                 if (useGeckoEngine) {
                     ToolIcon(TermFoldIcons.Globe, stringResource(R.string.preview_network_inspector), active = networkOpen) {
                         networkOpen = !networkOpen
-                    }
-                }
-                val errors = console.count { it.level == ConsoleMessage.MessageLevel.ERROR }
-                if (errors > 0) {
-                    Box(
-                        Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 4.dp).size(16.dp).clip(CircleShape).background(Palette.Pink),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(if (errors > 99) "99" else errors.toString(), fontSize = 9.sp, color = Palette.OnAccent, maxLines = 1)
                     }
                 }
             }
@@ -1130,37 +1137,6 @@ fun PreviewPane(
                 recent = BrowserBridge.actionLog().takeLast(3).joinToString(" → ") { it.label },
             )
 
-            // ---- Console, over the bottom of the page
-            androidx.compose.animation.AnimatedVisibility(
-                visible = networkOpen && useGeckoEngine,
-                enter = slideInVertically(Motion.standard()) { it } + fadeIn(Motion.standard()),
-                exit = slideOutVertically(Motion.quick()) { it } + fadeOut(Motion.quick()),
-                modifier = Modifier.align(Alignment.BottomCenter),
-            ) {
-                NetworkInspectorDrawer(
-                    sessionKey = storageContextId,
-                    entries = networkEntries,
-                    height = maxHeight * 0.42f,
-                    preserve = networkPreserve,
-                    onPreserveChange = { on ->
-                        networkPreserve = on
-                        com.termfold.app.preview.network.NetworkCaptureStore.setPreserve(storageContextId, on)
-                    },
-                    onClear = {
-                        com.termfold.app.preview.network.NetworkCaptureStore.clear(storageContextId)
-                        networkEntries = emptyList()
-                    },
-                    onClose = { networkOpen = false },
-                    onSelectEntry = { networkDetailEntry = it },
-                )
-            }
-            networkDetailEntry?.let { entry ->
-                NetworkEntryDetailSheet(
-                    sessionKey = storageContextId,
-                    entry = entry,
-                    onDismiss = { networkDetailEntry = null },
-                )
-            }
             androidx.compose.animation.AnimatedVisibility(
                 visible = consoleOpen,
                 enter = slideInVertically(Motion.standard()) { it } + fadeIn(Motion.standard()),
@@ -1187,6 +1163,23 @@ fun PreviewPane(
             }
         }
     }
+        if (networkOpen && useGeckoEngine) {
+            NetworkInspectorScreen(
+                sessionKey = storageContextId,
+                entries = networkEntries,
+                preserve = networkPreserve,
+                onPreserveChange = { on ->
+                    networkPreserve = on
+                    com.termfold.app.preview.network.NetworkCaptureStore.setPreserve(storageContextId, on)
+                },
+                onClear = {
+                    com.termfold.app.preview.network.NetworkCaptureStore.clear(storageContextId)
+                    networkEntries = emptyList()
+                },
+                onClose = { networkOpen = false },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
         if (networkRulesOpen) {
             NetworkRulesScreen(
                 sessionKey = storageContextId,
