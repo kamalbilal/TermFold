@@ -31,6 +31,7 @@ import com.termfold.app.core.Folder
 import com.termfold.app.core.Session
 import com.termfold.app.gitworkspace.WorkspaceIds
 import com.termfold.app.gitworkspace.WorkspaceStore
+import com.termfold.app.pm.forStringResourceArg
 import com.termfold.app.pm.PmBriefFiles
 import com.termfold.app.pm.PmCompetitor
 import com.termfold.app.pm.PmDecisionMemoParser
@@ -44,7 +45,9 @@ import com.termfold.app.pm.memory.PmMemoryRepository
 import com.termfold.app.prreview.DoneKind
 import com.termfold.app.preview.BrowserBridge
 import com.termfold.app.ui.theme.Palette
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val STUB_WORKSPACE_ID = "pm-stub"
 
@@ -57,6 +60,7 @@ fun PmAgentSessionScreen(
     onDoneKind: suspend (String) -> DoneKind,
     onApplyDone: (String) -> Unit,
     onRefreshResearch: (sessionId: String, showProgress: Boolean) -> Unit,
+    onSetViewBranch: (sessionId: String, branch: String) -> Unit,
     modifier: Modifier = Modifier,
     filesOpen: Boolean = false,
     onToggleFiles: () -> Unit = {},
@@ -106,8 +110,12 @@ fun PmAgentSessionScreen(
         lastMemo = session.lastDecisionJson
     }
 
+    val discoveryWorkspaceId = if (session.mode == PmMode.DISCOVERY) WorkspaceIds.GOLDEN else null
     val branchChip = when (session.mode) {
-        PmMode.DISCOVERY -> stringResource(R.string.pm_viewing_branch, session.viewBranch)
+        PmMode.DISCOVERY -> stringResource(
+            R.string.pm_viewing_branch,
+            session.viewBranch.ifBlank { "HEAD" }.forStringResourceArg(),
+        )
         PmMode.RELEASE -> session.branch.ifBlank { session.viewBranch }
     }
 
@@ -123,7 +131,9 @@ fun PmAgentSessionScreen(
                 command = "",
                 tint = session.tint,
                 acpAgentId = session.acpAgentId,
-                workspaceId = session.workspaceId ?: STUB_WORKSPACE_ID,
+                workspaceId = session.workspaceId
+                    ?: discoveryWorkspaceId
+                    ?: STUB_WORKSPACE_ID,
             ),
         ),
     )
@@ -137,7 +147,7 @@ fun PmAgentSessionScreen(
         AgentSessionScreen(
             folder = folder,
             sessionId = session.id,
-            workspaceId = session.workspaceId ?: STUB_WORKSPACE_ID,
+            workspaceId = session.workspaceId ?: discoveryWorkspaceId ?: STUB_WORKSPACE_ID,
             agentId = session.acpAgentId,
             onBack = onBack,
             modifier = modifier,
@@ -159,36 +169,40 @@ fun PmAgentSessionScreen(
             },
             onPmSessionMemory = { showMemory = true },
             reviewChrome = {
-                PmSessionChrome(
-                    session = session,
-                    researchExpanded = researchExpanded,
-                    onToggleResearchLog = { researchExpanded = !researchExpanded },
-                    includeCompetitive = session.includeCompetitiveResearch,
-                    onIncludeCompetitiveChange = { enabled ->
-                        onUpdateSession(session.copy(includeCompetitiveResearch = enabled))
-                    },
-                    competitorName = competitorName,
-                    competitorUrl = competitorUrl,
-                    onCompetitorNameChange = { competitorName = it },
-                    onCompetitorUrlChange = { competitorUrl = it },
-                    onAddCompetitor = {
-                        if (competitorName.isBlank()) return@PmSessionChrome
-                        val next = session.copy(
-                            competitors = session.competitors + PmCompetitor(
-                                name = competitorName.trim(),
-                                homepageUrl = competitorUrl.trim(),
-                            ),
-                        )
-                        PmBriefFiles.syncCompetitorsMarkdown(context, next)
-                        onUpdateSession(next)
-                        competitorName = ""
-                        competitorUrl = ""
-                    },
-                    onRefreshResearch = { onRefreshResearch(session.id, true) },
-                )
-                PmDecisionChrome(
-                    memo = lastMemo?.let { runCatching { PmDecisionMemoParser.fromJson(org.json.JSONObject(it)) }.getOrNull() },
-                )
+                Column(Modifier.fillMaxWidth()) {
+                    PmSessionChrome(
+                        session = session,
+                        researchExpanded = researchExpanded,
+                        onToggleResearchLog = { researchExpanded = !researchExpanded },
+                        includeCompetitive = session.includeCompetitiveResearch,
+                        onIncludeCompetitiveChange = { enabled ->
+                            onUpdateSession(session.copy(includeCompetitiveResearch = enabled))
+                        },
+                        competitorName = competitorName,
+                        competitorUrl = competitorUrl,
+                        onCompetitorNameChange = { competitorName = it },
+                        onCompetitorUrlChange = { competitorUrl = it },
+                        onAddCompetitor = {
+                            if (competitorName.isBlank()) return@PmSessionChrome
+                            val next = session.copy(
+                                competitors = session.competitors + PmCompetitor(
+                                    name = competitorName.trim(),
+                                    homepageUrl = competitorUrl.trim(),
+                                ),
+                            )
+                            PmBriefFiles.syncCompetitorsMarkdown(context, next)
+                            onUpdateSession(next)
+                            competitorName = ""
+                            competitorUrl = ""
+                        },
+                        onRefreshResearch = { onRefreshResearch(session.id, true) },
+                    )
+                    PmDecisionChrome(
+                        memo = lastMemo?.let {
+                            runCatching { PmDecisionMemoParser.fromJson(org.json.JSONObject(it)) }.getOrNull()
+                        },
+                    )
+                }
             },
             rewriteAgentText = PmDecisionMemoParser::stripFences,
             onAcpSnapshot = { items: List<AcpItem>, busy ->
@@ -206,12 +220,16 @@ fun PmAgentSessionScreen(
                             .toString()
                         lastMemo = json
                         onUpdateSession(session.copy(lastDecisionJson = json))
-                        PmMemoryRepository(context, session.id).upsertChunk(
-                            kind = "decision",
-                            title = memo.recommendation.take(120).ifBlank { "Decision memo" },
-                            searchText = memo.recommendation,
-                            body = text.take(12_000),
-                        )
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                PmMemoryRepository(context, session.id).upsertChunk(
+                                    kind = "decision",
+                                    title = memo.recommendation.take(120).ifBlank { "Decision memo" },
+                                    searchText = memo.recommendation,
+                                    body = text.take(12_000),
+                                )
+                            }
+                        }
                     }
                 }
                 agentWasBusy = busy
@@ -241,13 +259,7 @@ fun PmAgentSessionScreen(
             onSwitched = { },
             onViewBranch = { branch ->
                 showViewBranchPicker = false
-                onUpdateSession(
-                    session.copy(
-                        viewBranch = branch,
-                        researchPackCache = null,
-                        researchPackBranch = null,
-                    ),
-                )
+                onSetViewBranch(session.id, branch)
             },
         )
     }

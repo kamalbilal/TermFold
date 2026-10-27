@@ -246,6 +246,11 @@ private sealed interface AutomationOptionsTarget {
     data class Session(override val projectId: String, val sessionId: String) : AutomationOptionsTarget
 }
 
+private sealed interface WorkflowSessionOptionsTarget {
+    data class PrReview(val sessionId: String) : WorkflowSessionOptionsTarget
+    data class Pm(val sessionId: String) : WorkflowSessionOptionsTarget
+}
+
 @Composable
 internal fun TermFoldRoot(viewModel: AppViewModel) {
     val data by viewModel.folders.collectAsStateWithLifecycle()
@@ -313,6 +318,8 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
     var confirmDelete by remember { mutableStateOf<OptionsTarget?>(null) }
     var automationOptionsFor by remember { mutableStateOf<AutomationOptionsTarget?>(null) }
     var automationConfirmDelete by remember { mutableStateOf<AutomationOptionsTarget?>(null) }
+    var workflowSessionOptionsFor by remember { mutableStateOf<WorkflowSessionOptionsTarget?>(null) }
+    var workflowSessionConfirmDelete by remember { mutableStateOf<WorkflowSessionOptionsTarget?>(null) }
     var addSessionFor by remember { mutableStateOf<String?>(null) }
     var pendingCursorAdd by remember { mutableStateOf<PendingCursorAdd?>(null) }
     var cursorBranchPick by remember { mutableStateOf(false) }
@@ -730,21 +737,23 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                         },
                         onAddProject = { newAutomationProject = true },
                         onOpenPrReview = { destination = Destination.PrReviewSession(it) },
+                        onOpenPrReviewOptions = { sessionId ->
+                            workflowSessionOptionsFor = WorkflowSessionOptionsTarget.PrReview(sessionId)
+                        },
                         onStartPrReview = { url ->
                             viewModel.bindPrReview(url) { id ->
                                 destination = Destination.PrReviewSession(id)
                             }
                         },
                         onOpenPmSession = { destination = Destination.PmSession(it) },
+                        onOpenPmSessionOptions = { sessionId ->
+                            workflowSessionOptionsFor = WorkflowSessionOptionsTarget.Pm(sessionId)
+                        },
                         onStartPmDiscovery = { folderId, name ->
-                            viewModel.startPmDiscovery(folderId, name) { id ->
-                                destination = Destination.PmSession(id)
-                            }
+                            viewModel.startPmDiscovery(folderId, name)
                         },
                         onStartPmRelease = { folderId, branch, name, label ->
-                            viewModel.startPmRelease(folderId, branch, name, label) { id ->
-                                destination = Destination.PmSession(id)
-                            }
+                            viewModel.startPmRelease(folderId, branch, name, label)
                         },
                         useGrid = windowWidth.isWide,
                         modifier = Modifier.windowInsetsPadding(
@@ -856,6 +865,9 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                             onApplyDone = { viewModel.applyPmDone(it) },
                             onRefreshResearch = { id, showProgress ->
                                 viewModel.refreshPmResearch(id, showProgress = showProgress)
+                            },
+                            onSetViewBranch = { id, branch ->
+                                viewModel.setPmViewBranch(id, branch)
                             },
                             filesOpen = filesOpen,
                             onToggleFiles = { filesOpen = !filesOpen },
@@ -1125,10 +1137,10 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
         )
     }
     LaunchedEffect(pmJob?.doneSessionId) {
-        if (pmJob?.doneSessionId != null) {
-            kotlinx.coroutines.delay(400)
-            viewModel.dismissPmJob()
-        }
+        val id = pmJob?.doneSessionId ?: return@LaunchedEffect
+        destination = Destination.PmSession(id)
+        kotlinx.coroutines.delay(400)
+        viewModel.dismissPmJob()
     }
     pmJob?.let { job ->
         val error = job.error
@@ -1237,6 +1249,46 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
         },
         folderNameFor = { id -> data.folder(id)?.name.orEmpty() },
         sessionIdsFor = { id -> data.folder(id)?.sessions?.map { it.id }.orEmpty() },
+    )
+
+    WorkflowSessionOptionsLayer(
+        optionsFor = workflowSessionOptionsFor,
+        onDismissOptions = { workflowSessionOptionsFor = null },
+        onRequestDelete = { workflowSessionConfirmDelete = it },
+        confirmDelete = workflowSessionConfirmDelete,
+        onDismissDelete = { workflowSessionConfirmDelete = null },
+        sessionNameFor = { target ->
+            when (target) {
+                is WorkflowSessionOptionsTarget.PrReview ->
+                    prReviewData.session(target.sessionId)?.name.orEmpty()
+                is WorkflowSessionOptionsTarget.Pm ->
+                    pmData.session(target.sessionId)?.name.orEmpty()
+            }
+        },
+        onConfirmDelete = { target ->
+            when (target) {
+                is WorkflowSessionOptionsTarget.PrReview -> {
+                    viewModel.removePrReviewSession(target.sessionId)
+                    if (destination is Destination.PrReviewSession &&
+                        (destination as Destination.PrReviewSession).sessionId == target.sessionId
+                    ) {
+                        tab = NavTab.WORKFLOWS
+                        destination = Destination.WorkflowsSection(WorkflowsSection.PR_REVIEWER)
+                    }
+                }
+                is WorkflowSessionOptionsTarget.Pm -> {
+                    viewModel.removePmSession(target.sessionId)
+                    if (destination is Destination.PmSession &&
+                        (destination as Destination.PmSession).sessionId == target.sessionId
+                    ) {
+                        tab = NavTab.WORKFLOWS
+                        destination = Destination.WorkflowsSection(WorkflowsSection.PRODUCT_MANAGER)
+                    }
+                }
+            }
+            workflowSessionConfirmDelete = null
+            workflowSessionOptionsFor = null
+        },
     )
 
     AutomationOptionsLayer(
@@ -1363,6 +1415,35 @@ private data class PendingCursorProvision(
     val workspaceId: String,
     val sessionId: String,
 )
+
+@Composable
+private fun WorkflowSessionOptionsLayer(
+    optionsFor: WorkflowSessionOptionsTarget?,
+    onDismissOptions: () -> Unit,
+    onRequestDelete: (WorkflowSessionOptionsTarget) -> Unit,
+    confirmDelete: WorkflowSessionOptionsTarget?,
+    onDismissDelete: () -> Unit,
+    sessionNameFor: (WorkflowSessionOptionsTarget) -> String,
+    onConfirmDelete: (WorkflowSessionOptionsTarget) -> Unit,
+) {
+    optionsFor?.let { target ->
+        com.termfold.app.ui.screens.OptionsSheet(
+            title = sessionNameFor(target),
+            actions = listOf(stringResource(R.string.action_remove) to { onRequestDelete(target) }),
+            onDismiss = onDismissOptions,
+        )
+    }
+    confirmDelete?.let { target ->
+        val name = sessionNameFor(target)
+        com.termfold.app.ui.screens.ConfirmDialog(
+            title = stringResource(R.string.workflow_session_remove_title, name.replace("%", "%%")),
+            body = stringResource(R.string.workflow_session_remove_body),
+            confirmLabel = stringResource(R.string.action_remove),
+            onConfirm = { onConfirmDelete(target) },
+            onDismiss = onDismissDelete,
+        )
+    }
+}
 
 @Composable
 private fun AutomationOptionsLayer(

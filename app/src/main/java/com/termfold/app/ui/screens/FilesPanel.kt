@@ -71,6 +71,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.termfold.app.R
+import com.termfold.app.pm.forStringResourceArg
 import com.termfold.app.ui.components.LaunchedWhileVisible
 import com.termfold.app.files.FileActions
 import com.termfold.app.core.Folder
@@ -512,7 +513,10 @@ private fun FileTree(
                 Text(
                     when {
                         pmViewBranch != null ->
-                            stringResource(R.string.pm_files_viewing_read_only, pmViewBranch)
+                            stringResource(
+                                R.string.pm_files_viewing_read_only,
+                                pmViewBranch.forStringResourceArg(),
+                            )
                         sessionWorkspaceScope ->
                             stringResource(R.string.files_session_workspace_subtitle, folderName)
                         else -> folderName

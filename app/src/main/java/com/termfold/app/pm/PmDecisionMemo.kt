@@ -13,7 +13,11 @@ data class PmDecisionMemo(
 )
 
 object PmDecisionMemoParser {
-    private val fencedJson = Regex("""```json\s*(\{[\s\S]*?})\s*```""", RegexOption.IGNORE_CASE)
+    // ICU on Android requires escaping literal `}` (JVM regex accepts the unescaped form).
+    private val fencedJson = Regex(
+        """```json\s*(\{[\s\S]*?\})\s*```""",
+        RegexOption.IGNORE_CASE,
+    )
 
     fun parseFromAgentText(text: String): PmDecisionMemo? {
         val fenced = fencedJson.find(text)?.groupValues?.getOrNull(1)

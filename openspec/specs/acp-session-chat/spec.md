@@ -154,16 +154,16 @@ The system SHALL apply default expand/collapse for tool calls only when the user
 - **WHEN** the user collapses a tool call and later the tool status, structured file diffs, or live-diff setting changes
 - **THEN** the UI SHALL keep that row collapsed until the user expands it again
 
+#### Scenario: User expand sticks
+
+- **WHEN** the user expands a tool call that was collapsed by default
+- **THEN** the UI SHALL keep that row expanded until the user collapses it again
+
 #### Scenario: Automatic default without user toggle
 
 - **WHEN** a tool-call row collapse state was set only by automatic policy (no explicit user toggle for that row id)
 - **AND** structured file diffs later become available while live diffs are enabled
 - **THEN** the UI MAY update collapse state to match the live-diff default without treating that as a user preference
-
-#### Scenario: User expand sticks
-
-- **WHEN** the user expands a tool call that was collapsed by default
-- **THEN** the UI SHALL keep that row expanded until the user collapses it again
 
 ### Requirement: Timeline persistence includes diff payloads
 
@@ -178,3 +178,102 @@ The system SHALL persist structured diff data for tool calls in the local sessio
 
 - **WHEN** a timeline saved before structured diff persistence is loaded
 - **THEN** the system SHALL display the legacy `detail` text and SHALL NOT fail to load the session
+
+### Requirement: Live-diff default expansion tracks asynchronous file diffs
+
+When the live-diff setting is enabled, the system SHALL keep tool-call row collapse state aligned with the live-diff default as structured file diffs arrive or update, until the user explicitly toggles that row.
+
+#### Scenario: Diffs arrive after a collapsed auto-default
+
+- **WHEN** the live-diff setting is enabled, a tool call is shown in a terminal status with no structured file diffs yet, and the row defaulted to collapsed
+- **AND** structured file diffs are later attached to the same tool call
+- **THEN** the tool-call row SHALL expand automatically so per-file sections are visible without an extra tap
+
+#### Scenario: Diffs arrive after in-progress completion
+
+- **WHEN** the live-diff setting is enabled, a tool call was expanded while `in_progress`, then reaches `completed` or `failed` with structured file diffs
+- **THEN** the tool-call row SHALL remain expanded unless the user collapsed it during the session
+
+#### Scenario: No automatic expand after user collapse
+
+- **WHEN** the user has explicitly collapsed a tool-call row in the current session
+- **AND** structured file diffs arrive or grow for that tool call while live diffs are enabled
+- **THEN** the row SHALL stay collapsed until the user expands it again
+
+### Requirement: Product Manager session chat kind
+
+The system SHALL support a distinct **Product Manager** ACP session kind whose chat timeline uses the same message and tool-call presentation as coding sessions, with PM-specific prompt injection and deliverable formatting.
+
+#### Scenario: Open PM session chat
+
+- **WHEN** the user opens an active Product Manager session
+- **THEN** the chat screen uses the PM session kind and shows PM session header context (mode, view branch or release branch)
+
+### Requirement: PM per-turn context injection
+
+For Product Manager sessions, the system SHALL inject session brief documents (vision, constraints, competitors, release brief when applicable), a capped summary of the latest research pack, and a capped set of top-ranked non-secret chunks from that session’s private memory store on every user turn sent to the agent.
+
+#### Scenario: Follow-up after research
+
+- **WHEN** the user sends a follow-up message after a research pass completed
+- **THEN** the agent prompt includes the research pack summary and relevant session memory chunks without requiring the user to repeat prior context
+
+### Requirement: PM structured deliverable cards
+
+Product Manager agent replies that include a decision memo SHALL be renderable as structured in-chat sections (recommendation, landscape matrix, options, scope in/out, risks, gaps) when the agent emits the agreed PM response format.
+
+#### Scenario: Decision memo visible
+
+- **WHEN** the agent completes a Research and decide response
+- **THEN** the user can read the decision memo and evidence tags in the chat without opening external files
+
+### Requirement: PM agent memory tools
+
+Product Manager sessions SHALL expose agent-callable tools to search, write, and fetch by id records in the current session’s private memory store only.
+
+#### Scenario: Search is session-scoped
+
+- **WHEN** the agent searches PM memory
+- **THEN** results are only chunks from the current PM session id
+
+#### Scenario: Write from another session id rejected
+
+- **WHEN** a tool call attempts to write memory for a different session id
+- **THEN** the write fails and the current session store is unchanged
+
+### Requirement: PR review turns include PR identity
+
+For a PR review session, each user-initiated agent turn SHALL include the current pull request identity (repository, number, and head branch) in the prompt context sent to the agent.
+
+#### Scenario: First review turn
+
+- **WHEN** the user sends a message in a review session bound to a resolved GitHub PR
+- **THEN** the agent turn includes that PR’s repository, number, and head branch
+
+#### Scenario: PR replaced in same chat
+
+- **WHEN** the user binds a different PR URL to the same review session
+- **THEN** subsequent turns include the new PR identity and not the previous PR as current
+
+### Requirement: Review chat survives workspace deletion
+
+Deleting a PR review temp workspace SHALL NOT clear the session’s saved chat timeline. Reopening the same review session SHALL show the previous messages.
+
+#### Scenario: Done then reopen
+
+- **WHEN** the user taps Done (temp copy deleted) and later opens the same review session
+- **THEN** the chat timeline from before Done is still shown
+
+### Requirement: Idle disconnect is visible in chat
+
+When an ACP session was disconnected because of the idle disconnect policy, the chat timeline SHALL show a short inline notice explaining that the agent was stopped to save battery and that sending a message or reopening will reconnect.
+
+#### Scenario: Notice after idle disconnect
+
+- **WHEN** the user opens a session that was disconnected due to idle background timeout
+- **THEN** the UI SHALL show an inline notice describing idle disconnect and SHALL show the agent as not running until reconnect
+
+#### Scenario: Reconnect on send
+
+- **WHEN** the user sends a message in a session that was idle-disconnected
+- **THEN** the system SHALL start or reconnect the agent and SHALL continue the existing timeline without removing prior messages

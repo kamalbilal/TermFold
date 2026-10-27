@@ -903,6 +903,31 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun removePrReviewSession(sessionId: String) {
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            com.termfold.app.acp.AcpSessions.close(
+                com.termfold.app.prreview.PrReviewKeys.acpSessionKey(sessionId),
+            )
+            val session = prReviews.value.session(sessionId)
+            if (session?.workspaceId != null) {
+                val folder = folders.value.folder(session.folderId)
+                if (folder != null) {
+                    val golden = WorkspaceStore.goldenGuestPath(app, folder)
+                    val guest = WorkspaceStore.guestPath(app, folder, session.workspaceId)
+                    if (golden != null && guest != null) {
+                        GitWorkspace.deletePartialWorkspace(app, golden, guest)
+                    }
+                    WorkspaceStore.remove(app, folder.id, session.workspaceId)
+                }
+            }
+            withContext(Dispatchers.IO) {
+                com.termfold.app.prreview.PrReviewPaths.hostSessionDir(app, sessionId).deleteRecursively()
+            }
+            prReviewStore.update { it.without(sessionId) }
+        }
+    }
+
     fun saveReviewParse(sessionId: String, parse: PrReviewParse) {
         viewModelScope.launch {
             val session = prReviews.value.session(sessionId) ?: return@launch
@@ -1084,32 +1109,42 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val session = pmSessions.value.session(sessionId) ?: return@launch
             val next = PmResearchOrchestrator.invalidateOnViewBranchChange(session, branch)
             upsertPmSession(next)
+            refreshPmResearch(sessionId, force = true, showProgress = false)
         }
     }
 
     fun refreshPmResearch(sessionId: String, force: Boolean = true, showProgress: Boolean = false) {
         viewModelScope.launch {
             val app = getApplication<Application>()
-            val session = pmSessions.value.session(sessionId) ?: return@launch
-            val folder = folders.value.folder(session.folderId) ?: return@launch
-            val golden = WorkspaceStore.goldenGuestPath(app, folder) ?: return@launch
-            if (showProgress) {
-                _pmJob.value = PmJob(title = "Product Manager", step = "Research…")
-            }
-            val updated = PmResearchOrchestrator.runResearch(
-                context = app,
-                session = session,
-                goldenGuestPath = golden,
-                forceRefresh = force,
-                onProgress = { step ->
-                    if (showProgress) {
-                        _pmJob.value = PmJob(title = "Product Manager", step = step)
-                    }
-                },
-            )
-            upsertPmSession(updated)
-            if (showProgress) {
-                _pmJob.value = PmJob(title = "Product Manager", doneSessionId = sessionId, percent = 100)
+            try {
+                val session = pmSessions.value.session(sessionId) ?: return@launch
+                val folder = folders.value.folder(session.folderId) ?: return@launch
+                val golden = WorkspaceStore.goldenGuestPath(app, folder) ?: return@launch
+                if (showProgress) {
+                    _pmJob.value = PmJob(title = "Product Manager", step = "Research…")
+                }
+                val updated = PmResearchOrchestrator.runResearch(
+                    context = app,
+                    session = session,
+                    goldenGuestPath = golden,
+                    forceRefresh = force,
+                    onProgress = { step ->
+                        if (showProgress) {
+                            _pmJob.value = PmJob(title = "Product Manager", step = step)
+                        }
+                    },
+                )
+                upsertPmSession(updated)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (showProgress) {
+                    _pmJob.value = PmJob(title = "Product Manager", error = e.message ?: e.toString())
+                }
+            } finally {
+                if (showProgress && _pmJob.value?.error == null) {
+                    _pmJob.value = null
+                }
             }
         }
     }
@@ -1117,6 +1152,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun removePmSession(sessionId: String) {
         val app = getApplication<Application>()
         viewModelScope.launch {
+            com.termfold.app.acp.AcpSessions.close(
+                com.termfold.app.pm.PmKeys.acpSessionKey(sessionId),
+            )
             val session = pmSessions.value.session(sessionId)
             if (session?.workspaceId != null) {
                 val folder = folders.value.folder(session.folderId)

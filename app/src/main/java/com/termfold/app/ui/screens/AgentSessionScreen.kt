@@ -258,6 +258,8 @@ fun AgentSessionScreen(
         return
     }
 
+    val automationPrefixState = androidx.compose.runtime.rememberUpdatedState(automationPromptPrefix)
+    val extraPrefixState = androidx.compose.runtime.rememberUpdatedState(promptPrefix)
     val client = remember(key, guestDir, automationReadOnlyGuestRoot, pmMode) {
         val existing = AcpSessions.client(key)
         if (existing != null && existing.workspaceGuestDir == guestDir) {
@@ -271,8 +273,8 @@ fun AgentSessionScreen(
                     sessionKey = key,
                     agent = resolved,
                     workspaceGuestDir = guestDir,
-                    automationPromptPrefix = automationPromptPrefix,
-                    extraPromptPrefix = promptPrefix,
+                    automationPromptPrefix = automationPrefixState.value,
+                    extraPromptPrefix = { text -> extraPrefixState.value?.invoke(text) ?: "" },
                     automationReadOnlyGuestRoot = automationReadOnlyGuestRoot,
                     automationGuardrails = automationGuardrails,
                     pmMode = pmMode,

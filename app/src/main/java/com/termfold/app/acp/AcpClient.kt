@@ -1025,28 +1025,31 @@ class AcpClient(
         }
         if (!hasPromptPayload(pendingWireContext, text, images.size, files.size)) return null
         val messageId = nextItemId()
-        val preTurnDeferred = scope.async { checkpointStore.commit(context) }
-        pendingPreTurnCommits[messageId] = preTurnDeferred
-        scope.launch {
-            val preHash = runCatching { preTurnDeferred.await() }.getOrNull()
-            pendingPreTurnCommits.remove(messageId)
-            if (preHash != null) {
-                _state.update { state ->
-                    state.copy(
-                        checkpoints = state.checkpoints.copy(
-                            preTurnByMessageId = state.checkpoints.preTurnByMessageId + (messageId to preHash),
-                        ),
-                    )
-                }
-            } else {
-                _state.update { state ->
-                    if (state.items.none { it.id == messageId }) return@update state
-                    state.copy(
-                        items = state.items + AcpItem.Notice(
-                            nextItemId(),
-                            "Workspace checkpoint could not be saved (git in Linux guest). Open Terminal and run termfold-setup if you have not, then try again. Undo is unavailable for this message.",
-                        ),
-                    )
+        val readOnlyPmGolden = pmMode && automationReadOnlyGuestRoot != null
+        if (!readOnlyPmGolden) {
+            val preTurnDeferred = scope.async { checkpointStore.commit(context) }
+            pendingPreTurnCommits[messageId] = preTurnDeferred
+            scope.launch {
+                val preHash = runCatching { preTurnDeferred.await() }.getOrNull()
+                pendingPreTurnCommits.remove(messageId)
+                if (preHash != null) {
+                    _state.update { state ->
+                        state.copy(
+                            checkpoints = state.checkpoints.copy(
+                                preTurnByMessageId = state.checkpoints.preTurnByMessageId + (messageId to preHash),
+                            ),
+                        )
+                    }
+                } else {
+                    _state.update { state ->
+                        if (state.items.none { it.id == messageId }) return@update state
+                        state.copy(
+                            items = state.items + AcpItem.Notice(
+                                nextItemId(),
+                                "Workspace checkpoint could not be saved (git in Linux guest). Open Terminal and run termfold-setup if you have not, then try again. Undo is unavailable for this message.",
+                            ),
+                        )
+                    }
                 }
             }
         }

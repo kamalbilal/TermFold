@@ -18,6 +18,7 @@
     <string name="pm_empty_subtitle">Link a coding project for discovery on golden, or plan a release on a temp branch copy.</string>
     <string name="pm_new_session">New PM session</string>
     <string name="pm_pick_folder">Pick project</string>
+    <string name="pm_pick_folder_empty">Link a coding project under Folders first.</string>
     <string name="pm_session_details">Session details</string>
     <string name="pm_session_name">Session name</string>
     <string name="pm_mode_discovery">Product discovery (golden)</string>
@@ -129,6 +130,8 @@
     <string name="action_ok">OK</string>
     <string name="action_add">Add</string>
     <string name="action_remove">Remove</string>
+    <string name="workflow_session_remove_title">Remove %1$s?</string>
+    <string name="workflow_session_remove_body">This session is removed from Workflows. The chat and any temp git copy are deleted from this device.</string>
     <string name="action_copy">Copy</string>
     <string name="action_retry">Retry</string>
     <string name="action_restart">Restart</string>

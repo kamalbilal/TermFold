@@ -2,12 +2,15 @@ package com.termfold.app.ui.screens
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -29,6 +32,7 @@ import com.termfold.app.R
 import com.termfold.app.core.Folder
 import com.termfold.app.pm.PmMode
 import com.termfold.app.pm.PmSession
+import com.termfold.app.ui.components.BareIconButton
 import com.termfold.app.ui.components.BottomNavSpacer
 import com.termfold.app.ui.components.LeadingTile
 import com.termfold.app.ui.components.ListRow
@@ -45,6 +49,7 @@ fun PmSessionListScreen(
     pmError: String?,
     onBack: () -> Unit,
     onOpenSession: (String) -> Unit,
+    onOpenSessionOptions: (String) -> Unit,
     onStartDiscovery: (folderId: String, name: String) -> Unit,
     onStartRelease: (folderId: String, branch: String, name: String, releaseLabel: String) -> Unit,
     useGrid: Boolean,
@@ -88,12 +93,21 @@ fun PmSessionListScreen(
                             LeadingTile(tint = folderTint(session.tint), icon = TermFoldIcons.Sparkle)
                         },
                         trailing = {
-                            Icon(
-                                TermFoldIcons.ChevronRight,
-                                contentDescription = null,
-                                tint = Palette.TextFaint,
-                                modifier = Modifier.size(20.dp),
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                BareIconButton(
+                                    icon = TermFoldIcons.More,
+                                    contentDescription = stringResource(R.string.cd_more),
+                                    onClick = { onOpenSessionOptions(session.id) },
+                                    size = 34,
+                                    tint = Palette.TextFaint,
+                                )
+                                Icon(
+                                    TermFoldIcons.ChevronRight,
+                                    contentDescription = null,
+                                    tint = Palette.TextFaint,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
                         },
                         onClick = { onOpenSession(session.id) },
                     )
@@ -153,10 +167,23 @@ private fun PmNewSessionDialog(
                         Text(stringResource(R.string.pm_mode_release))
                     }
                 }
-                1 -> LazyColumn {
-                    items(codingFolders) { folder ->
-                        TextButton(onClick = { selectedFolder = folder; step = 2 }) {
-                            Text(folder.name)
+                1 -> {
+                    if (codingFolders.isEmpty()) {
+                        Text(
+                            stringResource(R.string.pm_pick_folder_empty),
+                            color = Palette.TextDim,
+                        )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 320.dp),
+                        ) {
+                            items(codingFolders, key = { it.id }) { folder ->
+                                TextButton(onClick = { selectedFolder = folder; step = 2 }) {
+                                    Text(folder.name)
+                                }
+                            }
                         }
                     }
                 }
@@ -205,13 +232,13 @@ private fun PmNewSessionDialog(
             if (step == 2 && selectedFolder != null) {
                 TextButton(
                     onClick = {
-                        val folderId = selectedFolder!!.id
+                        val folder = selectedFolder ?: return@TextButton
                         if (mode == PmMode.DISCOVERY) {
-                            onDiscovery(folderId, name)
+                            onDiscovery(folder.id, name.trim())
                         } else if (branch.trim().isBlank()) {
                             return@TextButton
                         } else {
-                            onRelease(folderId, branch.trim(), name, releaseLabel)
+                            onRelease(folder.id, branch.trim(), name.trim(), releaseLabel.trim())
                         }
                     },
                 ) {

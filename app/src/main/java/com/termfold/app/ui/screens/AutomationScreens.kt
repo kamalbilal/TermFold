@@ -125,8 +125,10 @@ fun WorkflowsSectionScreen(
     onOpenProjectOptions: (String) -> Unit,
     onAddProject: () -> Unit,
     onOpenPrReview: (String) -> Unit,
+    onOpenPrReviewOptions: (String) -> Unit = {},
     onStartPrReview: (String) -> Unit,
     onOpenPmSession: (String) -> Unit = {},
+    onOpenPmSessionOptions: (String) -> Unit = {},
     onStartPmDiscovery: (String, String) -> Unit = { _, _ -> },
     onStartPmRelease: (String, String, String, String) -> Unit = { _, _, _, _ -> },
     useGrid: Boolean,
@@ -148,6 +150,7 @@ fun WorkflowsSectionScreen(
             error = prReviewError,
             onBack = onBack,
             onOpenSession = onOpenPrReview,
+            onOpenSessionOptions = onOpenPrReviewOptions,
             onStart = onStartPrReview,
             useGrid = useGrid,
             modifier = modifier,
@@ -158,6 +161,7 @@ fun WorkflowsSectionScreen(
             pmError = pmError,
             onBack = onBack,
             onOpenSession = onOpenPmSession,
+            onOpenSessionOptions = onOpenPmSessionOptions,
             onStartDiscovery = onStartPmDiscovery,
             onStartRelease = onStartPmRelease,
             useGrid = useGrid,
@@ -441,6 +445,7 @@ fun PrReviewerListScreen(
     error: String?,
     onBack: () -> Unit,
     onOpenSession: (String) -> Unit,
+    onOpenSessionOptions: (String) -> Unit,
     onStart: (String) -> Unit,
     useGrid: Boolean,
     modifier: Modifier = Modifier,
@@ -500,12 +505,21 @@ fun PrReviewerListScreen(
                             LeadingTile(tint = folderTint(session.tint), icon = TermFoldIcons.GitBranch)
                         },
                         trailing = {
-                            Icon(
-                                TermFoldIcons.ChevronRight,
-                                contentDescription = null,
-                                tint = Palette.TextFaint,
-                                modifier = Modifier.size(20.dp),
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                BareIconButton(
+                                    icon = TermFoldIcons.More,
+                                    contentDescription = stringResource(R.string.cd_more),
+                                    onClick = { onOpenSessionOptions(session.id) },
+                                    size = 34,
+                                    tint = Palette.TextFaint,
+                                )
+                                Icon(
+                                    TermFoldIcons.ChevronRight,
+                                    contentDescription = null,
+                                    tint = Palette.TextFaint,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
                         },
                         onClick = { onOpenSession(session.id) },
                     )
