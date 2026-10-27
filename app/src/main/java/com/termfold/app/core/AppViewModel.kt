@@ -12,7 +12,17 @@ import com.termfold.app.automation.AutomationSession
 import com.termfold.app.automation.AutomationStorage
 import com.termfold.app.data.AutomationStore
 import com.termfold.app.data.FolderStore
+import com.termfold.app.data.PmSessionStore
 import com.termfold.app.data.PrReviewStore
+import com.termfold.app.pm.PmBriefFiles
+import com.termfold.app.pm.PmBind
+import com.termfold.app.pm.PmData
+import com.termfold.app.pm.PmMode
+import com.termfold.app.pm.PmPaths
+import com.termfold.app.pm.PmRepoResearch
+import com.termfold.app.pm.PmResearchOrchestrator
+import com.termfold.app.pm.PmSession
+import com.termfold.app.pm.memory.PmMemoryStore
 import com.termfold.app.gitworkspace.CheckoutMode
 import com.termfold.app.gitworkspace.GitWorkspace
 import com.termfold.app.gitworkspace.ProjectWorkspaces
@@ -47,6 +57,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 
 /** Progress of a full backup or restore to a single `.termfold` file. */
 data class BackupJob(
@@ -58,6 +69,14 @@ data class BackupJob(
 )
 
 data class PrReviewJob(
+    val title: String,
+    val step: String = "",
+    val percent: Int = 0,
+    val error: String? = null,
+    val doneSessionId: String? = null,
+)
+
+data class PmJob(
     val title: String,
     val step: String = "",
     val percent: Int = 0,
@@ -99,6 +118,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val store = FolderStore(application)
     private val automationStore = AutomationStore(application)
     private val prReviewStore = PrReviewStore(application)
+    private val pmSessionStore = PmSessionStore(application)
 
     val folders: StateFlow<AppData> = store.data
         .stateIn(viewModelScope, SharingStarted.Eagerly, AppData())
@@ -108,6 +128,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     val prReviews: StateFlow<PrReviewData> = prReviewStore.data
         .stateIn(viewModelScope, SharingStarted.Eagerly, PrReviewData())
+
+    val pmSessions: StateFlow<PmData> = pmSessionStore.data
+        .stateIn(viewModelScope, SharingStarted.Eagerly, PmData())
 
     private val _shell = MutableStateFlow(ShellProgress())
     val shell: StateFlow<ShellProgress> = _shell.asStateFlow()
@@ -121,6 +144,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _prReviewJob = MutableStateFlow<PrReviewJob?>(null)
     val prReviewJob: StateFlow<PrReviewJob?> = _prReviewJob.asStateFlow()
     private var prReviewBindJob: Job? = null
+
+    private val _pmJob = MutableStateFlow<PmJob?>(null)
+    val pmJob: StateFlow<PmJob?> = _pmJob.asStateFlow()
+    private var pmBindJob: Job? = null
 
     fun dismissJob() {
         if (_job.value?.done == true || _job.value?.error != null) _job.value = null
@@ -896,5 +923,255 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun upsertReviewSession(session: PrReviewSession) {
         prReviewStore.update { it.upsert(session) }
+    }
+
+    fun dismissPmJob() {
+        val job = _pmJob.value ?: return
+        if (job.error != null || job.doneSessionId != null) _pmJob.value = null
+    }
+
+    fun cancelPmBind() {
+        pmBindJob?.cancel()
+    }
+
+    fun startPmDiscovery(folderId: String, name: String, onReady: (String) -> Unit = {}) {
+        pmBindJob?.cancel()
+        pmBindJob = viewModelScope.launch {
+            val app = getApplication<Application>()
+            try {
+                _pmJob.value = PmJob(title = "Product Manager", step = "Linking project…")
+                val folder = folders.value.folder(folderId)
+                    ?: throw IllegalStateException("Project not found")
+                val golden = WorkspaceStore.goldenGuestPath(app, folder)
+                    ?: throw IllegalStateException("Workspace unavailable")
+                val id = UUID.randomUUID().toString()
+                val viewBranch = PmRepoResearch.defaultViewBranch(app, golden)
+                val session = PmSession(
+                    id = id,
+                    name = name.ifBlank { "Discovery" },
+                    folderId = folderId,
+                    mode = PmMode.DISCOVERY,
+                    viewBranch = viewBranch,
+                    tint = pmSessions.value.sessions.size % 6,
+                    createdAtMs = System.currentTimeMillis(),
+                    updatedAtMs = System.currentTimeMillis(),
+                )
+                withContext(Dispatchers.IO) {
+                    PmPaths.ensureStub(app, id)
+                    PmBriefFiles.ensureDefaults(app, session)
+                }
+                upsertPmSession(session)
+                _pmJob.value = PmJob(title = "Product Manager", doneSessionId = id, percent = 100)
+                onReady(id)
+            } catch (e: CancellationException) {
+                _pmJob.value = null
+                throw e
+            } catch (e: Throwable) {
+                _pmJob.value = PmJob(title = "Product Manager", error = e.message ?: e.toString())
+            }
+        }
+    }
+
+    fun startPmRelease(
+        folderId: String,
+        branch: String,
+        name: String,
+        releaseLabel: String = "",
+        onReady: (String) -> Unit = {},
+    ) {
+        pmBindJob?.cancel()
+        pmBindJob = viewModelScope.launch {
+            val app = getApplication<Application>()
+            var partialGolden: String? = null
+            var partialGuest: String? = null
+            var partialFolderId: String? = null
+            var partialWorkspaceId: String? = null
+            var createdId: String? = null
+            try {
+                _pmJob.value = PmJob(title = "Product Manager", step = "Preparing release copy…")
+                val folder = folders.value.folder(folderId)
+                    ?: throw IllegalStateException("Project not found")
+                val golden = WorkspaceStore.goldenGuestPath(app, folder)
+                    ?: throw IllegalStateException("Workspace unavailable")
+                partialGolden = golden
+                partialFolderId = folderId
+                val id = UUID.randomUUID().toString()
+                createdId = id
+                val workspaceId = ProjectWorkspaces.newSessionId()
+                partialWorkspaceId = workspaceId
+                val guest = ProjectWorkspaces.sessionGuestPath(golden, workspaceId)
+                partialGuest = guest
+                GitWorkspace.fetchOrigin(app, golden)
+                val session = PmSession(
+                    id = id,
+                    name = name.ifBlank { releaseLabel.ifBlank { branch } },
+                    folderId = folderId,
+                    mode = PmMode.RELEASE,
+                    viewBranch = branch,
+                    branch = branch,
+                    releaseLabel = releaseLabel,
+                    workspaceId = workspaceId,
+                    tint = pmSessions.value.sessions.size % 6,
+                    createdAtMs = System.currentTimeMillis(),
+                    updatedAtMs = System.currentTimeMillis(),
+                )
+                withContext(Dispatchers.IO) {
+                    PmPaths.ensureStub(app, id)
+                    PmBriefFiles.ensureDefaults(app, session)
+                }
+                upsertPmSession(session)
+                val record = WorkspaceRecord(
+                    id = workspaceId,
+                    goldenProjectId = folderId,
+                    guestPath = guest,
+                    createdAt = System.currentTimeMillis(),
+                    sourceBranch = branch,
+                    lastKnownBranch = branch,
+                    complete = false,
+                    label = "PM release",
+                )
+                WorkspaceStore.insert(app, record)
+                GitWorkspace.provisionWorkspace(
+                    context = app,
+                    goldenGuestPath = golden,
+                    branch = branch,
+                    sessionWorkspaceId = workspaceId,
+                    onProgress = { progress ->
+                        _pmJob.value = PmJob(
+                            title = "Product Manager",
+                            step = "Copying $branch…",
+                            percent = progress.percent,
+                        )
+                    },
+                )
+                WorkspaceStore.insert(app, record.copy(complete = true))
+                upsertPmSession(session.copy(workspaceId = workspaceId))
+                _pmJob.value = PmJob(title = "Product Manager", doneSessionId = id, percent = 100)
+                onReady(id)
+            } catch (e: CancellationException) {
+                partialGolden?.let { g ->
+                    partialGuest?.let { guest ->
+                        GitWorkspace.deletePartialWorkspace(app, g, guest)
+                    }
+                }
+                if (partialFolderId != null && partialWorkspaceId != null) {
+                    WorkspaceStore.remove(app, partialFolderId!!, partialWorkspaceId!!)
+                }
+                createdId?.let { upsertPmSessionRemoval(it) }
+                _pmJob.value = null
+                throw e
+            } catch (e: Throwable) {
+                partialGolden?.let { g ->
+                    partialGuest?.let { guest ->
+                        GitWorkspace.deletePartialWorkspace(app, g, guest)
+                    }
+                }
+                if (partialFolderId != null && partialWorkspaceId != null) {
+                    WorkspaceStore.remove(app, partialFolderId!!, partialWorkspaceId!!)
+                }
+                createdId?.let { upsertPmSessionRemoval(it) }
+                _pmJob.value = PmJob(title = "Product Manager", error = e.message ?: e.toString())
+            }
+        }
+    }
+
+    fun updatePmSession(session: PmSession) {
+        viewModelScope.launch { upsertPmSession(session) }
+    }
+
+    fun setPmViewBranch(sessionId: String, branch: String) {
+        viewModelScope.launch {
+            val session = pmSessions.value.session(sessionId) ?: return@launch
+            val next = PmResearchOrchestrator.invalidateOnViewBranchChange(session, branch)
+            upsertPmSession(next)
+        }
+    }
+
+    fun refreshPmResearch(sessionId: String, force: Boolean = true, showProgress: Boolean = false) {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val session = pmSessions.value.session(sessionId) ?: return@launch
+            val folder = folders.value.folder(session.folderId) ?: return@launch
+            val golden = WorkspaceStore.goldenGuestPath(app, folder) ?: return@launch
+            if (showProgress) {
+                _pmJob.value = PmJob(title = "Product Manager", step = "Research…")
+            }
+            val updated = PmResearchOrchestrator.runResearch(
+                context = app,
+                session = session,
+                goldenGuestPath = golden,
+                forceRefresh = force,
+                onProgress = { step ->
+                    if (showProgress) {
+                        _pmJob.value = PmJob(title = "Product Manager", step = step)
+                    }
+                },
+            )
+            upsertPmSession(updated)
+            if (showProgress) {
+                _pmJob.value = PmJob(title = "Product Manager", doneSessionId = sessionId, percent = 100)
+            }
+        }
+    }
+
+    fun removePmSession(sessionId: String) {
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val session = pmSessions.value.session(sessionId)
+            if (session?.workspaceId != null) {
+                val folder = folders.value.folder(session.folderId)
+                if (folder != null) {
+                    val golden = WorkspaceStore.goldenGuestPath(app, folder)
+                    val guest = WorkspaceStore.guestPath(app, folder, session.workspaceId)
+                    if (golden != null && guest != null) {
+                        GitWorkspace.deletePartialWorkspace(app, golden, guest)
+                    }
+                    WorkspaceStore.remove(app, folder.id, session.workspaceId)
+                }
+            }
+            withContext(Dispatchers.IO) {
+                PmMemoryStore.deleteSession(app, sessionId)
+                PmPaths.hostSessionDir(app, sessionId).deleteRecursively()
+            }
+            upsertPmSessionRemoval(sessionId)
+        }
+    }
+
+    suspend fun pmDoneKind(sessionId: String): DoneKind {
+        val app = getApplication<Application>()
+        val session = pmSessions.value.session(sessionId) ?: return DoneKind.AlreadyGone
+        val workspaceId = session.workspaceId ?: return DoneKind.AlreadyGone
+        val folder = folders.value.folder(session.folderId) ?: return DoneKind.AlreadyGone
+        val guest = WorkspaceStore.guestPath(app, folder, workspaceId) ?: return DoneKind.AlreadyGone
+        val dirty = GitWorkspace.isDirty(app, guest)
+        val unpushed = GitWorkspace.hasUnpushedCommits(app, guest)
+        return PmBind.decideDone(copyExists = true, dirty = dirty, unpushed = unpushed)
+    }
+
+    fun applyPmDone(sessionId: String) {
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val session = pmSessions.value.session(sessionId) ?: return@launch
+            val workspaceId = session.workspaceId
+            val folder = folders.value.folder(session.folderId)
+            if (workspaceId != null && folder != null) {
+                val golden = WorkspaceStore.goldenGuestPath(app, folder)
+                val guest = WorkspaceStore.guestPath(app, folder, workspaceId)
+                if (golden != null && guest != null) {
+                    GitWorkspace.deletePartialWorkspace(app, golden, guest)
+                }
+                WorkspaceStore.remove(app, folder.id, workspaceId)
+            }
+            upsertPmSession(session.copy(workspaceId = null))
+            withContext(Dispatchers.IO) { PmPaths.ensureStub(app, sessionId) }
+        }
+    }
+
+    private suspend fun upsertPmSession(session: PmSession) {
+        pmSessionStore.update { it.upsert(session.copy(updatedAtMs = System.currentTimeMillis())) }
+    }
+
+    private suspend fun upsertPmSessionRemoval(sessionId: String) {
+        pmSessionStore.update { it.without(sessionId) }
     }
 }

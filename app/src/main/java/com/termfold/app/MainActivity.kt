@@ -90,6 +90,8 @@ import com.termfold.app.ui.screens.AgentSessionScreen
 import com.termfold.app.ui.screens.ConfirmDialog
 import com.termfold.app.ui.screens.FileManagerScreen
 import com.termfold.app.ui.screens.FilesWorkspace
+import com.termfold.app.ui.screens.LocalAutomationReadOnlyGuestRoot
+import com.termfold.app.ui.screens.LocalPmViewBranchLabel
 import com.termfold.app.ui.screens.LocalWorkspaceEditorOpen
 import com.termfold.app.ui.screens.FolderDetailScreen
 import com.termfold.app.automation.AutomationPaths
@@ -197,6 +199,7 @@ private sealed interface Destination {
     data class AutomationProject(val projectId: String) : Destination
     data class AutomationSession(val projectId: String, val sessionId: String) : Destination
     data class PrReviewSession(val sessionId: String) : Destination
+    data class PmSession(val sessionId: String) : Destination
 }
 
 /** How deep a destination sits, used to give the transitions a consistent direction. */
@@ -208,6 +211,7 @@ private fun Destination.depth(): Int = when (this) {
     is Destination.AutomationProject -> 2
     is Destination.AutomationSession -> 3
     is Destination.PrReviewSession -> 2
+    is Destination.PmSession -> 2
 }
 
 /**
@@ -248,6 +252,8 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
     val automationData by viewModel.automation.collectAsStateWithLifecycle()
     val prReviewData by viewModel.prReviews.collectAsStateWithLifecycle()
     val prReviewJob by viewModel.prReviewJob.collectAsStateWithLifecycle()
+    val pmData by viewModel.pmSessions.collectAsStateWithLifecycle()
+    val pmJob by viewModel.pmJob.collectAsStateWithLifecycle()
     val shell by viewModel.shell.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
@@ -459,6 +465,29 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                         )
                     }
                 }
+                is Destination.PmSession -> {
+                    val pm = pmData.session(d.sessionId)
+                    val coding = pm?.folderId?.let { data.folder(it) }
+                    coding ?: pm?.let { session ->
+                        Folder(
+                            id = "pm-${session.id}",
+                            name = session.name,
+                            path = com.termfold.app.pm.PmPaths.hostSessionDir(context, session.id).absolutePath,
+                            tint = session.tint,
+                            sessions = listOf(
+                                Session(
+                                    id = session.id,
+                                    name = session.name,
+                                    command = "",
+                                    tint = session.tint,
+                                    acpAgentId = session.acpAgentId,
+                                    workspaceId = session.workspaceId
+                                        ?: com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN,
+                                ),
+                            ),
+                        )
+                    }
+                }
                 is Destination.PrReviewSession -> {
                     val review = prReviewData.session(d.sessionId)
                     val coding = review?.folderId?.let { data.folder(it) }
@@ -509,13 +538,47 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                     }
                     guest?.let { com.termfold.app.shell.Projects.hostPath(context, it).absolutePath }
                 }
+                is Destination.PmSession -> {
+                    val pm = pmData.session(d.sessionId)
+                    val coding = pm?.folderId?.let { data.folder(it) }
+                    when {
+                        pm != null && coding != null && pm.mode == com.termfold.app.pm.PmMode.DISCOVERY -> {
+                            com.termfold.app.gitworkspace.WorkspaceStore.goldenGuestPath(context, coding)
+                                ?.let { com.termfold.app.shell.Projects.hostPath(context, it).absolutePath }
+                        }
+                        pm != null && coding != null && pm.workspaceId != null -> {
+                            com.termfold.app.gitworkspace.WorkspaceStore.guestPath(context, coding, pm.workspaceId)
+                                ?.let { com.termfold.app.shell.Projects.hostPath(context, it).absolutePath }
+                        }
+                        else -> pm?.let {
+                            com.termfold.app.pm.PmPaths.hostSessionDir(context, it.id).absolutePath
+                        }
+                    }
+                }
                 else -> null
             }
             val sessionWorkspaceFilesScope = when (val d = destination) {
                 is Destination.Terminal ->
                     d.workspaceId != com.termfold.app.gitworkspace.WorkspaceIds.GOLDEN
                 is Destination.PrReviewSession -> true
+                is Destination.PmSession ->
+                    pmData.session(d.sessionId)?.mode == com.termfold.app.pm.PmMode.RELEASE &&
+                        pmData.session(d.sessionId)?.workspaceId != null
                 else -> false
+            }
+            val pmFilesContext = when (val d = destination) {
+                is Destination.PmSession -> {
+                    val pm = pmData.session(d.sessionId)
+                    val coding = pm?.folderId?.let { data.folder(it) }
+                    val goldenGuest = if (pm?.mode == com.termfold.app.pm.PmMode.DISCOVERY && coding != null) {
+                        com.termfold.app.gitworkspace.WorkspaceStore.goldenGuestPath(context, coding)
+                    } else {
+                        null
+                    }
+                    val viewBranch = if (pm?.mode == com.termfold.app.pm.PmMode.DISCOVERY) pm.viewBranch else null
+                    goldenGuest to viewBranch
+                }
+                else -> null to null
             }
             // A phone's drawer closes when the screen changes; a tablet keeps the tree docked.
             LaunchedEffect(destination, windowWidth.isWide) {
@@ -523,6 +586,10 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
             }
             // Opaque and hit-testable too: a minimized side browser is parked beneath this.
             Box(modifier = Modifier.weight(1f).background(Palette.Bg).pointerInput(Unit) {}) {
+              androidx.compose.runtime.CompositionLocalProvider(
+                LocalAutomationReadOnlyGuestRoot provides pmFilesContext.first,
+                LocalPmViewBranchLabel provides pmFilesContext.second,
+              ) {
               FilesWorkspace(
                 folder = workspaceFolder,
                 filesOpen = filesOpen,
@@ -651,6 +718,8 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                         codingFolders = data.folders,
                         prReviews = prReviewData.sessions,
                         prReviewError = prReviewJob?.error,
+                        pmSessions = pmData.sessions,
+                        pmError = pmJob?.error,
                         onBack = {
                             tab = NavTab.WORKFLOWS
                             destination = Destination.Tabs
@@ -664,6 +733,17 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                         onStartPrReview = { url ->
                             viewModel.bindPrReview(url) { id ->
                                 destination = Destination.PrReviewSession(id)
+                            }
+                        },
+                        onOpenPmSession = { destination = Destination.PmSession(it) },
+                        onStartPmDiscovery = { folderId, name ->
+                            viewModel.startPmDiscovery(folderId, name) { id ->
+                                destination = Destination.PmSession(id)
+                            }
+                        },
+                        onStartPmRelease = { folderId, branch, name, label ->
+                            viewModel.startPmRelease(folderId, branch, name, label) { id ->
+                                destination = Destination.PmSession(id)
                             }
                         },
                         useGrid = windowWidth.isWide,
@@ -752,6 +832,42 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                     }
                 }
 
+                is Destination.PmSession -> {
+                    val session = pmData.session(current.sessionId)
+                    if (session == null) {
+                        LaunchedEffect(current.sessionId) {
+                            destination = Destination.WorkflowsSection(WorkflowsSection.PRODUCT_MANAGER)
+                        }
+                    } else {
+                        val coding = data.folder(session.folderId)
+                        BackHandler {
+                            tab = NavTab.WORKFLOWS
+                            destination = Destination.WorkflowsSection(WorkflowsSection.PRODUCT_MANAGER)
+                        }
+                        com.termfold.app.ui.screens.PmAgentSessionScreen(
+                            session = session,
+                            codingFolder = coding,
+                            onBack = {
+                                tab = NavTab.WORKFLOWS
+                                destination = Destination.WorkflowsSection(WorkflowsSection.PRODUCT_MANAGER)
+                            },
+                            onUpdateSession = { viewModel.updatePmSession(it) },
+                            onDoneKind = { viewModel.pmDoneKind(it) },
+                            onApplyDone = { viewModel.applyPmDone(it) },
+                            onRefreshResearch = { id, showProgress ->
+                                viewModel.refreshPmResearch(id, showProgress = showProgress)
+                            },
+                            filesOpen = filesOpen,
+                            onToggleFiles = { filesOpen = !filesOpen },
+                            modifier = Modifier.windowInsetsPadding(
+                                WindowInsets.safeDrawing.only(
+                                    WindowInsetsSides.Top + WindowInsetsSides.End,
+                                ),
+                            ),
+                        )
+                    }
+                }
+
                 is Destination.AutomationSession -> {
                     val pair = automationData.session(current.projectId, current.sessionId)
                     if (pair == null) {
@@ -826,6 +942,7 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                 }
                     }
                 }
+              }
               }
             }
 
@@ -1006,6 +1123,48 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
             },
             onDismiss = { newProject = false },
         )
+    }
+    LaunchedEffect(pmJob?.doneSessionId) {
+        if (pmJob?.doneSessionId != null) {
+            kotlinx.coroutines.delay(400)
+            viewModel.dismissPmJob()
+        }
+    }
+    pmJob?.let { job ->
+        val error = job.error
+        if (error != null) {
+            AlertDialog(
+                onDismissRequest = { viewModel.dismissPmJob() },
+                title = { Text(job.title, color = Palette.Text) },
+                text = { Text(error, color = Palette.TextDim) },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.dismissPmJob() }) {
+                        Text(stringResource(R.string.action_ok), color = Palette.Accent)
+                    }
+                },
+            )
+        } else if (job.doneSessionId == null) {
+            AlertDialog(
+                onDismissRequest = {},
+                title = { Text(job.title, color = Palette.Text) },
+                text = {
+                    Column {
+                        Text(job.step, color = Palette.TextDim, style = MaterialTheme.typography.bodySmall)
+                        Spacer(Modifier.height(12.dp))
+                        LinearProgressIndicator(
+                            progress = { (job.percent / 100f).coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {
+                    TextButton(onClick = { viewModel.cancelPmBind() }) {
+                        Text(stringResource(R.string.pr_review_job_cancel), color = Palette.TextDim)
+                    }
+                },
+            )
+        }
     }
     prReviewJob?.let { job ->
         val error = job.error

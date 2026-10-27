@@ -638,9 +638,13 @@ fun BranchPickerDialog(
 
     branchCatalogGuestPath: String? = null,
 
+    readOnly: Boolean = false,
+
     onDismiss: () -> Unit,
 
     onSwitched: (String) -> Unit,
+
+    onViewBranch: ((String) -> Unit)? = null,
 
 ) {
 
@@ -669,7 +673,16 @@ fun BranchPickerDialog(
     }
 
     LaunchedEffect(guestPath) {
-        dirty = withContext(Dispatchers.IO) { GitWorkspace.isDirty(context, guestPath) }
+        dirty = if (readOnly) false else withContext(Dispatchers.IO) { GitWorkspace.isDirty(context, guestPath) }
+    }
+
+    fun applyViewBranch(branch: String) {
+        scope.launch {
+            BranchRecentsStore.remember(context, guestPath, branch)
+            onViewBranch?.invoke(branch)
+            onSwitched(branch)
+            onDismiss()
+        }
     }
 
     val recent = remember(guestPath) { BranchRecentsStore.load(context, guestPath) }
@@ -725,7 +738,7 @@ fun BranchPickerDialog(
 
 
 
-    if (pendingBranch != null && dirty) {
+    if (!readOnly && pendingBranch != null && dirty) {
 
         AlertDialog(
 
@@ -826,7 +839,8 @@ fun BranchPickerDialog(
                     loadState = branchLoadState,
                     orderedBranches = ordered,
                     onPickBranch = { branch ->
-                        if (dirty) pendingBranch = branch
+                        if (readOnly) applyViewBranch(branch)
+                        else if (dirty) pendingBranch = branch
                         else applyCheckout(branch, CheckoutMode.FAIL_IF_DIRTY)
                     },
                     onRetry = { refreshNonce++ },
@@ -839,7 +853,8 @@ fun BranchPickerDialog(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable(enabled = checkingOutBranch == null) {
-                                if (dirty) pendingBranch = branch
+                                if (readOnly) applyViewBranch(branch)
+                                else if (dirty) pendingBranch = branch
                                 else applyCheckout(branch, CheckoutMode.FAIL_IF_DIRTY)
                             }
                             .padding(vertical = 10.dp),

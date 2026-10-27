@@ -215,9 +215,10 @@ class AcpClient(
     private val agent: AcpAgent,
     val workspaceGuestDir: String,
     private val automationPromptPrefix: (() -> String)? = null,
-    private val extraPromptPrefix: (() -> String)? = null,
+    private val extraPromptPrefix: ((userText: String) -> String)? = null,
     private val automationReadOnlyGuestRoot: String? = null,
     private val automationGuardrails: (() -> AutomationGuardrailContext?)? = null,
+    private val pmMode: Boolean = false,
 ) {
 
     private val automationMode: Boolean = automationPromptPrefix != null
@@ -916,6 +917,7 @@ class AcpClient(
             agent.id,
             workspaceGuestDir,
             automationMode = automationMode,
+            pmMode = pmMode,
         )
 
     private suspend fun openSession(updateListed: Boolean = true) {
@@ -1143,7 +1145,7 @@ class AcpClient(
                 pendingWireContext = null
             }
             val prefix = automationPromptPrefix?.invoke()?.takeIf { it.isNotBlank() }
-                ?: extraPromptPrefix?.invoke()?.takeIf { it.isNotBlank() }
+                ?: extraPromptPrefix?.invoke(text)?.takeIf { it.isNotBlank() }
             prefix?.let {
                 append(it)
                 append("\n\n---\n\n")
@@ -1944,6 +1946,15 @@ class AcpClient(
     }
 
     private fun handlePermissionRequest(id: Any, params: JSONObject?) {
+        if (pmMode && automationReadOnlyGuestRoot != null &&
+            com.termfold.app.pm.PmWriteToolPolicy.isWriteLike(params)
+        ) {
+            appendSystemError(
+                context.getString(com.termfold.app.R.string.automation_read_only_linked),
+            )
+            respondPermission(id, null)
+            return
+        }
         val blocked = AutomationReadOnlyPolicy.firstBlockedPath(
             automationReadOnlyGuestRoot,
             AutomationReadOnlyPolicy.pathsFromPermissionParams(params),

@@ -50,6 +50,7 @@ import com.termfold.app.ui.theme.folderTint
 enum class WorkflowsSection(@param:StringRes val labelRes: Int) {
     AUTOMATION(R.string.workflows_tab_automation),
     PR_REVIEWER(R.string.workflows_tab_pr_reviewer),
+    PRODUCT_MANAGER(R.string.workflows_tab_product_manager),
     MORE(R.string.workflows_tab_more),
 }
 
@@ -81,12 +82,14 @@ fun WorkflowsScreen(
                                 when (section) {
                                     WorkflowsSection.AUTOMATION -> 0
                                     WorkflowsSection.PR_REVIEWER -> 1
+                                    WorkflowsSection.PRODUCT_MANAGER -> 2
                                     WorkflowsSection.MORE -> 3
                                 },
                             ),
                             icon = when (section) {
                                 WorkflowsSection.AUTOMATION -> TermFoldIcons.Sparkle
                                 WorkflowsSection.PR_REVIEWER -> TermFoldIcons.GitBranch
+                                WorkflowsSection.PRODUCT_MANAGER -> TermFoldIcons.Sparkle
                                 WorkflowsSection.MORE -> TermFoldIcons.More
                             },
                         )
@@ -115,12 +118,17 @@ fun WorkflowsSectionScreen(
     codingFolders: List<Folder>,
     prReviews: List<com.termfold.app.prreview.PrReviewSession> = emptyList(),
     prReviewError: String? = null,
+    pmSessions: List<com.termfold.app.pm.PmSession> = emptyList(),
+    pmError: String? = null,
     onBack: () -> Unit,
     onOpenProject: (String) -> Unit,
     onOpenProjectOptions: (String) -> Unit,
     onAddProject: () -> Unit,
     onOpenPrReview: (String) -> Unit,
     onStartPrReview: (String) -> Unit,
+    onOpenPmSession: (String) -> Unit = {},
+    onStartPmDiscovery: (String, String) -> Unit = { _, _ -> },
+    onStartPmRelease: (String, String, String, String) -> Unit = { _, _, _, _ -> },
     useGrid: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -141,6 +149,17 @@ fun WorkflowsSectionScreen(
             onBack = onBack,
             onOpenSession = onOpenPrReview,
             onStart = onStartPrReview,
+            useGrid = useGrid,
+            modifier = modifier,
+        )
+        WorkflowsSection.PRODUCT_MANAGER -> PmSessionListScreen(
+            sessions = pmSessions,
+            codingFolders = codingFolders,
+            pmError = pmError,
+            onBack = onBack,
+            onOpenSession = onOpenPmSession,
+            onStartDiscovery = onStartPmDiscovery,
+            onStartRelease = onStartPmRelease,
             useGrid = useGrid,
             modifier = modifier,
         )
@@ -381,7 +400,7 @@ fun AutomationProjectDetailScreen(
 }
 
 @Composable
-private fun WorkflowsSubscreenHeader(
+internal fun WorkflowsSubscreenHeader(
     onBack: () -> Unit,
     title: String,
     onAdd: (() -> Unit)? = null,

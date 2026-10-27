@@ -96,6 +96,9 @@ val LocalWorkspaceEditorOpen = compositionLocalOf { false }
 /** Guest path prefix of linked coding project; writes under this tree are blocked in automation. */
 val LocalAutomationReadOnlyGuestRoot = compositionLocalOf<String?> { null }
 
+/** PM Discovery: git view branch label for the files panel subtitle. */
+val LocalPmViewBranchLabel = compositionLocalOf<String?> { null }
+
 /**
  * The project's files beside whatever is on screen (a chat, a shell or the folder's session
  * list): a file tree in a sidebar, and an editor over the content when a file is opened.
@@ -505,11 +508,14 @@ private fun FileTree(
                     style = MaterialTheme.typography.titleMedium,
                     color = Palette.Text,
                 )
+                val pmViewBranch = LocalPmViewBranchLabel.current
                 Text(
-                    if (sessionWorkspaceScope) {
-                        stringResource(R.string.files_session_workspace_subtitle, folderName)
-                    } else {
-                        folderName
+                    when {
+                        pmViewBranch != null ->
+                            stringResource(R.string.pm_files_viewing_read_only, pmViewBranch)
+                        sessionWorkspaceScope ->
+                            stringResource(R.string.files_session_workspace_subtitle, folderName)
+                        else -> folderName
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = Palette.TextFaint,

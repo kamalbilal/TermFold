@@ -88,7 +88,7 @@ fun PrReviewAgentSessionScreen(
         sessionKeyOverride = PrReviewKeys.acpSessionKey(session.id),
         guestDirOverride = guestDir,
         hideBranchPicker = true,
-        promptPrefix = { PrReviewPrompt.prefix(session) },
+        promptPrefix = { _ -> PrReviewPrompt.prefix(session) },
         reviewChrome = {
             PrReviewReportChrome(
                 report = prReviewReportFromSessionJson(session.lastReportJson),

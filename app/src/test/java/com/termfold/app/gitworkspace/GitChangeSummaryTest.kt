@@ -38,6 +38,20 @@ class GitChangeSummaryTest {
     }
 
     @Test
+    fun directoryPathspecAddsTrailingSlash() {
+        assertEquals("scripts/", directoryPathspec("scripts/"))
+        assertEquals("scripts/", directoryPathspec("scripts"))
+    }
+
+    @Test
+    fun parseGitNameOnlyOutputSkipsBlankLines() {
+        assertEquals(
+            listOf("scripts/a.js", "scripts/b.js"),
+            parseGitNameOnlyOutput("scripts/a.js\n\nscripts/b.js\n"),
+        )
+    }
+
+    @Test
     fun buildChangeFilesUsesStagedFlagForStatus() {
         val entries = listOf(PorcelainEntry("x.kt", 'A', ' '))
         val files = buildChangeFiles(entries, staged = true, numstat = mapOf("x.kt" to (5 to 0)))

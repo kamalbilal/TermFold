@@ -10,6 +10,10 @@ import kotlinx.coroutines.Dispatchers
 
 import kotlinx.coroutines.ensureActive
 
+import kotlinx.coroutines.sync.Mutex
+
+import kotlinx.coroutines.sync.withLock
+
 import kotlinx.coroutines.withContext
 
 import java.io.File
@@ -34,6 +38,9 @@ object GitWorkspace {
     private const val UPSTREAM_REPAIR_SCHEMA = "3"
 
     private val upstreamRepairedGuestPaths = ConcurrentHashMap.newKeySet<String>()
+
+    /** One checkout/stash at a time per repo — parallel `git status` + checkout corrupts the index. */
+    private val checkoutLocks = ConcurrentHashMap<String, Mutex>()
 
     data class ProvisionProgress(val copiedBytes: Long, val totalBytes: Long) {
 
@@ -139,23 +146,63 @@ object GitWorkspace {
         staged: Boolean,
         untracked: Boolean,
     ): String = withContext(Dispatchers.IO) {
+        if (isDirectoryDiffPath(path)) {
+            val files = listChangedFilesInDirectory(context, guestPath, path, staged, untracked)
+            if (files.isEmpty()) return@withContext ""
+            val combined = files.mapNotNull { file ->
+                loadUnifiedDiffSingle(context, guestPath, file, staged, untracked)
+                    .takeIf { it.isNotBlank() }
+            }.joinToString("\n")
+            return@withContext capDiffText(combined)
+        }
+        loadUnifiedDiffSingle(context, guestPath, path, staged, untracked)
+    }
+
+    private fun loadUnifiedDiffSingle(
+        context: Context,
+        guestPath: String,
+        path: String,
+        staged: Boolean,
+        untracked: Boolean,
+    ): String {
         val quoted = shellQuote(path)
         val args = when {
             staged -> "diff -U3 --cached -- $quoted"
-            untracked -> "diff --no-index -U3 /dev/null $quoted"
+            // `--` keeps /dev/null from being parsed as a path under the repo (e.g. scripts/null).
+            untracked -> "diff --no-index -U3 -- /dev/null $quoted"
             else -> "diff -U3 -- $quoted"
         }
         val (code, out) = runGit(context, guestPath, args)
-        if (code != 0 && out.isBlank()) return@withContext ""
-        val capped = if (out.length > MAX_DIFF_CHARS) {
+        if (code != 0 && out.isBlank()) return ""
+        return capDiffText(out)
+    }
+
+    private fun listChangedFilesInDirectory(
+        context: Context,
+        guestPath: String,
+        path: String,
+        staged: Boolean,
+        untracked: Boolean,
+    ): List<String> {
+        val dirSpec = directoryPathspec(path)
+        val args = when {
+            staged -> "diff --cached --name-only -- $dirSpec"
+            untracked -> "ls-files -o --exclude-standard -- $dirSpec"
+            else -> "diff --name-only -- $dirSpec"
+        }
+        val (code, out) = runGit(context, guestPath, args)
+        if (code != 0) return emptyList()
+        return parseGitNameOnlyOutput(out)
+    }
+
+    private const val MAX_DIFF_CHARS = 512 * 1024
+
+    private fun capDiffText(out: String): String =
+        if (out.length > MAX_DIFF_CHARS) {
             out.take(MAX_DIFF_CHARS) + "\n\n… diff truncated …"
         } else {
             out
         }
-        capped
-    }
-
-    private const val MAX_DIFF_CHARS = 512 * 1024
 
     suspend fun listBranches(context: Context, guestPath: String): List<String> = withContext(Dispatchers.IO) {
 
@@ -248,37 +295,70 @@ object GitWorkspace {
         mode: CheckoutMode,
 
     ): Result<Unit> = withContext(Dispatchers.IO) {
+        val lock = checkoutLocks.getOrPut(guestPath) { Mutex() }
+        lock.withLock {
+            val dirty = isDirty(context, guestPath)
 
-        val dirty = isDirty(context, guestPath)
-
-        if (dirty && mode == CheckoutMode.FAIL_IF_DIRTY) {
-
-            return@withContext Result.failure(IllegalStateException("dirty"))
-
-        }
-
-        if (dirty && mode == CheckoutMode.STASH_THEN_SWITCH) {
-
-            val (stashCode, stashOut) = runGit(context, guestPath, "stash push -u -m termfold-checkout")
-
-            if (stashCode != 0) {
-
-                return@withContext Result.failure(IllegalStateException(stashOut.takeLast(400)))
-
+            if (dirty && mode == CheckoutMode.FAIL_IF_DIRTY) {
+                return@withLock Result.failure(IllegalStateException("dirty"))
             }
 
+            if (dirty && mode == CheckoutMode.STASH_THEN_SWITCH) {
+                val (stashCode, stashOut) = stashBeforeCheckout(context, guestPath)
+                if (stashCode != 0) {
+                    return@withLock Result.failure(IllegalStateException(stashOut.takeLast(400)))
+                }
+            }
+
+            if (dirty && mode == CheckoutMode.FORCE) {
+                prepareGitWrite(context, guestPath)
+                runGit(context, guestPath, "reset --hard")
+                runGit(context, guestPath, "clean -fd")
+            }
+
+            switchToBranch(context, guestPath, branch)
         }
+    }
 
-        if (dirty && mode == CheckoutMode.FORCE) {
+    /** Clear stale locks and refresh the index before mutating commands (stash, checkout). */
+    private fun prepareGitWrite(context: Context, guestPath: String) {
+        runShell(
+            context,
+            "cd ${shellQuote(guestPath)} && rm -f .git/index.lock && git update-index -q --refresh 2>/dev/null || true",
+        )
+    }
 
-            runGit(context, guestPath, "reset --hard")
-
-            runGit(context, guestPath, "clean -fd")
-
+    private fun stashBeforeCheckout(context: Context, guestPath: String): Pair<Int, String> {
+        fun attempt(includeUntracked: Boolean): Pair<Int, String> {
+            prepareGitWrite(context, guestPath)
+            val cmd = if (includeUntracked) {
+                "stash push -u -m termfold-checkout"
+            } else {
+                "stash push -m termfold-checkout"
+            }
+            return runGit(context, guestPath, cmd)
         }
+        var (code, out) = attempt(includeUntracked = true)
+        if (code != 0 && indexWriteFailure(out)) {
+            prepareGitWrite(context, guestPath)
+            val retry = attempt(includeUntracked = true)
+            code = retry.first
+            out = retry.second
+        }
+        if (code != 0 && indexWriteFailure(out)) {
+            // Huge or awkward untracked trees can break `stash -u`; still switch with tracked work stashed.
+            val trackedOnly = attempt(includeUntracked = false)
+            code = trackedOnly.first
+            out = trackedOnly.second
+        }
+        return code to out
+    }
 
-        return@withContext switchToBranch(context, guestPath, branch)
-
+    private fun indexWriteFailure(gitOutput: String): Boolean {
+        val lower = gitOutput.lowercase()
+        return lower.contains("could not write index") ||
+            lower.contains("index.lock") ||
+            lower.contains("unable to write new index")
     }
 
     private suspend fun switchToBranch(context: Context, guestPath: String, branch: String): Result<Unit> =
@@ -308,6 +388,7 @@ object GitWorkspace {
                     IllegalStateException("branch '$localName' not found in this repository"),
                 )
             }
+            prepareGitWrite(context, guestPath)
             var lastOut = ""
             for (args in attempts) {
                 val (code, out) = runGit(context, guestPath, args)
@@ -402,6 +483,94 @@ object GitWorkspace {
 
     private fun refExists(context: Context, guestPath: String, ref: String): Boolean =
         runGit(context, guestPath, "rev-parse --verify ${shellQuote(ref)}").first == 0
+
+    suspend fun verifyGitRef(context: Context, guestPath: String, ref: String): Boolean =
+        withContext(Dispatchers.IO) {
+            if (refExists(context, guestPath, ref)) return@withContext true
+            if (!ref.contains('/') && refExists(context, guestPath, "refs/heads/$ref")) return@withContext true
+            false
+        }
+
+    suspend fun showFileAtRef(
+        context: Context,
+        guestPath: String,
+        ref: String,
+        path: String,
+    ): Result<String> = withContext(Dispatchers.IO) {
+        if (!verifyGitRef(context, guestPath, ref)) {
+            return@withContext Result.failure(IllegalArgumentException("Unknown ref: $ref"))
+        }
+        val (code, out) = runGit(
+            context,
+            guestPath,
+            "show ${shellQuote("$ref:$path")}",
+        )
+        if (code == 0) Result.success(out) else Result.failure(IllegalStateException(out.takeLast(400)))
+    }
+
+    suspend fun logAtRef(
+        context: Context,
+        guestPath: String,
+        ref: String,
+        maxCount: Int,
+    ): Result<String> = withContext(Dispatchers.IO) {
+        if (!verifyGitRef(context, guestPath, ref)) {
+            return@withContext Result.failure(IllegalArgumentException("Unknown ref: $ref"))
+        }
+        val (code, out) = runGit(
+            context,
+            guestPath,
+            "log ${shellQuote(ref)} -n $maxCount --oneline",
+        )
+        if (code == 0) Result.success(out) else Result.failure(IllegalStateException(out.takeLast(400)))
+    }
+
+    suspend fun listFilesAtRef(
+        context: Context,
+        guestPath: String,
+        ref: String,
+        treePath: String,
+        maxCount: Int = 40,
+    ): Result<List<String>> = withContext(Dispatchers.IO) {
+        if (!verifyGitRef(context, guestPath, ref)) {
+            return@withContext Result.failure(IllegalArgumentException("Unknown ref: $ref"))
+        }
+        val recurse = if (treePath.isBlank()) "" else "-r "
+        val pathspec = if (treePath.isBlank()) {
+            ""
+        } else {
+            " -- ${shellQuote(treePath.trimEnd('/'))}"
+        }
+        val (code, out) = runGit(
+            context,
+            guestPath,
+            "ls-tree ${recurse}--name-only ${shellQuote(ref)}$pathspec",
+        )
+        if (code != 0) return@withContext Result.failure(IllegalStateException(out.takeLast(400)))
+        val paths = out.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .take(maxCount.coerceIn(1, 200))
+            .toList()
+        Result.success(paths)
+    }
+
+    suspend fun diffRefs(
+        context: Context,
+        guestPath: String,
+        base: String,
+        head: String,
+    ): Result<String> = withContext(Dispatchers.IO) {
+        if (!verifyGitRef(context, guestPath, base) || !verifyGitRef(context, guestPath, head)) {
+            return@withContext Result.failure(IllegalArgumentException("Unknown ref in diff range"))
+        }
+        val (code, out) = runGit(
+            context,
+            guestPath,
+            "diff ${shellQuote("$base..$head")} --stat",
+        )
+        if (code == 0) Result.success(out) else Result.failure(IllegalStateException(out.takeLast(400)))
+    }
 
     private fun rememberGoldenGuestPath(context: Context, sessionGuestPath: String, goldenGuestPath: String) {
         runGit(

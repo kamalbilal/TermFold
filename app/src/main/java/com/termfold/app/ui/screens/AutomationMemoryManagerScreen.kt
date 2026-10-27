@@ -49,6 +49,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.termfold.app.R
 import com.termfold.app.automation.memory.AutomationMemoryRepository
+import com.termfold.app.pm.memory.PmMemoryRepository
 import com.termfold.app.automation.memory.MemoryChunkEntity
 import com.termfold.app.automation.memory.SessionEventEntity
 import com.termfold.app.ui.components.BareIconButton
@@ -68,6 +69,7 @@ import kotlinx.coroutines.withContext
 sealed class AutomationMemoryManagerMode {
     data object GlobalNav : AutomationMemoryManagerMode()
     data class SessionPrivate(val sessionKey: String) : AutomationMemoryManagerMode()
+    data class PmSession(val sessionId: String) : AutomationMemoryManagerMode()
 }
 
 @Composable
@@ -100,9 +102,14 @@ private fun AutomationMemoryManagerContent(
 ) {
     val context = LocalContext.current
     val repo = remember { AutomationMemoryRepository(context) }
+    val pmSessionId = (mode as? AutomationMemoryManagerMode.PmSession)?.sessionId
+    val pmRepo = remember(pmSessionId) {
+        pmSessionId?.let { PmMemoryRepository(context, it) }
+    }
     val scope = rememberCoroutineScope()
     val global = mode is AutomationMemoryManagerMode.GlobalNav
     val sessionKey = (mode as? AutomationMemoryManagerMode.SessionPrivate)?.sessionKey
+    val isPm = pmRepo != null
 
     var search by remember { mutableStateOf("") }
     var siteFilter by remember { mutableStateOf("") }
@@ -123,9 +130,21 @@ private fun AutomationMemoryManagerContent(
             stringResource(R.string.automation_memory_global_title)
         is AutomationMemoryManagerMode.SessionPrivate ->
             stringResource(R.string.automation_memory_session_title)
+        is AutomationMemoryManagerMode.PmSession ->
+            stringResource(R.string.pm_session_memory_title)
     }
 
     suspend fun queryChunks(): List<MemoryChunkEntity> {
+        if (pmRepo != null) {
+            return if (semantic && search.isNotBlank()) {
+                pmRepo.search(search, limit = 50).let { rows ->
+                    if (kindFilter.isBlank()) rows
+                    else rows.filter { it.kind == kindFilter }
+                }
+            } else {
+                pmRepo.listMemoryChunks(kindFilter = kindFilter, textFilter = search)
+            }
+        }
         val loaded = if (semantic && search.isNotBlank()) {
             val raw = if (global) {
                 repo.searchGlobalNav(
@@ -159,7 +178,7 @@ private fun AutomationMemoryManagerContent(
     }
 
     LaunchedEffect(sessionKey, tab, search) {
-        if (global || tab != 1 || sessionKey == null) return@LaunchedEffect
+        if (isPm || global || tab != 1 || sessionKey == null) return@LaunchedEffect
         while (isActive) {
             val loaded = withContext(Dispatchers.IO) {
                 repo.listSessionEvents(sessionKey, textFilter = search)
@@ -208,8 +227,12 @@ private fun AutomationMemoryManagerContent(
                     onClick = {
                         creating = true
                         editing = MemoryChunkEntity(
-                            automationSessionId = if (global) "" else sessionKey.orEmpty(),
-                            siteKey = siteFilter.ifBlank { "example.com" },
+                            automationSessionId = when {
+                                isPm -> pmSessionId.orEmpty()
+                                global -> ""
+                                else -> sessionKey.orEmpty()
+                            },
+                            siteKey = if (isPm) "pm" else siteFilter.ifBlank { "example.com" },
                             kind = "note",
                         )
                         error = null
@@ -219,7 +242,7 @@ private fun AutomationMemoryManagerContent(
             }
         }
 
-        if (!global) {
+        if (!global && !isPm) {
             PrimaryTabRow(selectedTabIndex = tab) {
                 Tab(
                     selected = tab == 0,
@@ -435,7 +458,9 @@ private fun AutomationMemoryManagerContent(
             onSave = { updated ->
                 scope.launch {
                     saving = true
-                    val result = withContext(Dispatchers.IO) { repo.saveMemoryChunk(updated) }
+                    val result = withContext(Dispatchers.IO) {
+                        pmRepo?.saveMemoryChunk(updated) ?: repo.saveMemoryChunk(updated)
+                    }
                     saving = false
                     result.fold(
                         onSuccess = {
@@ -451,7 +476,10 @@ private fun AutomationMemoryManagerContent(
             onDelete = if (!creating && formChunk.id != 0L) {
                 {
                     scope.launch {
-                        withContext(Dispatchers.IO) { repo.deleteMemoryChunk(formChunk.id) }
+                        withContext(Dispatchers.IO) {
+                            if (pmRepo != null) pmRepo.deleteMemoryChunk(formChunk.id)
+                            else repo.deleteMemoryChunk(formChunk.id)
+                        }
                         editing = null
                         creating = false
                         reloadChunks()

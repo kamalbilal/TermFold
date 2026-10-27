@@ -57,6 +57,10 @@ object BrowserBridge {
     @Volatile
     var automationSessionKey: String? = null
 
+    /** Active Product Manager session id for pm_memory_* tools. */
+    @Volatile
+    var pmSessionId: String? = null
+
     /** Active coding-agent session compose key (workspace chat); lazy headless browser profile. */
     @Volatile
     var codingSessionKey: String? = null
@@ -122,6 +126,7 @@ object BrowserBridge {
             }.getOrDefault(0))
             .put("token", token)
             .put("automation_session_key", automationSessionKey ?: AutomationSessionContext.activeKey ?: "")
+            .put("pm_session_id", pmSessionId ?: com.termfold.app.pm.PmSessionContext.activeSessionId ?: "")
             .put("agent_session_key", codingSessionKey ?: "")
         file.writeText(body.toString())
         file.setReadable(false, false)
@@ -206,6 +211,13 @@ object BrowserBridge {
     }
 
     private suspend fun execute(context: Context, action: String, args: JSONObject): JSONObject {
+        if (action.startsWith("pm_memory_")) {
+            val requiredId = pmSessionId
+            if (requiredId != null && com.termfold.app.pm.PmSessionContext.activeSessionId != requiredId) {
+                return JSONObject().put("error", "Browser command is bound to another PM session")
+            }
+            return com.termfold.app.pm.memory.PmMemoryBridge.handle(context, action, args)
+        }
         if (action.startsWith("memory_")) {
             val requiredKey = automationSessionKey
             if (requiredKey != null && AutomationSessionContext.activeKey != requiredKey) {

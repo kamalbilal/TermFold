@@ -59,6 +59,18 @@ internal fun parseNumstat(lines: List<String>): Map<String, Pair<Int, Int>> {
     return map
 }
 
+/** True when [path] is a directory row from `git status` (e.g. `scripts/`). */
+internal fun isDirectoryDiffPath(path: String): Boolean = path.endsWith("/")
+
+/** Pathspec for listing every file under a directory in git commands. */
+internal fun directoryPathspec(path: String): String {
+    val trimmed = path.trimEnd('/')
+    return if (trimmed.isEmpty()) "." else "$trimmed/"
+}
+
+internal fun parseGitNameOnlyOutput(output: String): List<String> =
+    output.lines().map { it.trim() }.filter { it.isNotBlank() }
+
 internal fun buildChangeFiles(
     entries: List<PorcelainEntry>,
     staged: Boolean,

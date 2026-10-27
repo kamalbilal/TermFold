@@ -106,9 +106,19 @@ object ShellSetup {
         fun asset(name: String) = context.assets.open(name).use { it.readBytes().decodeToString() }.replace("\r\n", "\n")
         writeExecutable(File(rootfs, BROWSER_TOOL.trimStart('/')), asset("termfold-browser.js"))
         writeExecutable(File(rootfs, AUTOMATION_MEMORY_TOOL.trimStart('/')), asset("termfold-automation-memory.js"))
+        writeExecutable(File(rootfs, PM_MEMORY_TOOL.trimStart('/')), asset("termfold-pm-memory.js"))
         writeIfChanged(
             File(rootfs, "root/.claude/skills/termfold-automation/SKILL.md"),
             asset("termfold-automation-skill.md"),
+        )
+        val pmSkill = asset("termfold-pm-skill.md")
+        writeIfChanged(
+            File(rootfs, "root/.claude/skills/termfold-product-manager/SKILL.md"),
+            pmSkill,
+        )
+        writeIfChanged(
+            File(rootfs, "root/.cursor/skills/termfold-product-manager/SKILL.md"),
+            pmSkill,
         )
         val skill = asset("termfold-browser-skill.md")
         writeIfChanged(File(rootfs, "root/.claude/skills/termfold-browser/SKILL.md"), skill)
@@ -152,6 +162,7 @@ object ShellSetup {
     /** Guest path of the browser command; chat sessions start it as an MCP server. */
     const val BROWSER_TOOL = "/usr/local/bin/termfold-browser"
     const val AUTOMATION_MEMORY_TOOL = "/usr/local/bin/termfold-automation-memory"
+    const val PM_MEMORY_TOOL = "/usr/local/bin/termfold-pm-memory"
 
     private fun writeIfChanged(file: File, content: String) {
         if (file.isFile && file.readText() == content) return

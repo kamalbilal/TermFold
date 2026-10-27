@@ -168,7 +168,7 @@ fun AgentSessionScreen(
     filesOpen: Boolean = false,
     onToggleFiles: () -> Unit = {},
     automationPromptPrefix: (() -> String)? = null,
-    promptPrefix: (() -> String)? = null,
+    promptPrefix: ((userText: String) -> String)? = null,
     previewProjectDirOverride: String? = null,
     automationReadOnlyGuestRoot: String? = null,
     automationSessionKey: String? = null,
@@ -176,6 +176,10 @@ fun AgentSessionScreen(
     sessionKeyOverride: String? = null,
     guestDirOverride: String? = null,
     hideBranchPicker: Boolean = false,
+    branchChipOverride: String? = null,
+    onBranchChipClick: (() -> Unit)? = null,
+    onPmSessionMemory: (() -> Unit)? = null,
+    pmMode: Boolean = false,
     onReviewDone: (() -> Unit)? = null,
     onReviewAnother: (() -> Unit)? = null,
     reviewChrome: (@Composable () -> Unit)? = null,
@@ -254,7 +258,7 @@ fun AgentSessionScreen(
         return
     }
 
-    val client = remember(key, guestDir) {
+    val client = remember(key, guestDir, automationReadOnlyGuestRoot, pmMode) {
         val existing = AcpSessions.client(key)
         if (existing != null && existing.workspaceGuestDir == guestDir) {
             existing
@@ -271,6 +275,7 @@ fun AgentSessionScreen(
                     extraPromptPrefix = promptPrefix,
                     automationReadOnlyGuestRoot = automationReadOnlyGuestRoot,
                     automationGuardrails = automationGuardrails,
+                    pmMode = pmMode,
                 ),
             )
         }
@@ -431,6 +436,7 @@ fun AgentSessionScreen(
             } else {
                 null
             },
+            onPmSessionMemory = onPmSessionMemory,
             auxTerminalTabs = if (isCursor) auxTerminalTabs.toList() else emptyList(),
             onOpenTerminal = if (isCursor) {
                 { tabId ->
@@ -583,9 +589,15 @@ fun AgentSessionScreen(
                 onSteer = { client.steer(it) },
                 onRemoveQueued = { client.removeQueued(it) },
                 onCancel = { client.cancel() },
-                branchName = if (isCursor && !hideBranchPicker) branchLabel else null,
-                branchUncommitted = isCursor && !hideBranchPicker && isGitWorkspace && branchDirty,
-                onBranchClick = if (isCursor && !hideBranchPicker) { { showBranchPicker = true } } else null,
+                branchName = branchChipOverride
+                    ?: if (isCursor && !hideBranchPicker) branchLabel else null,
+                branchUncommitted = if (branchChipOverride != null) {
+                    false
+                } else {
+                    isCursor && !hideBranchPicker && isGitWorkspace && branchDirty
+                },
+                onBranchClick = onBranchChipClick
+                    ?: if (isCursor && !hideBranchPicker) { { showBranchPicker = true } } else null,
                 editMessage = editingMessage,
                 onCancelEdit = { editingMessage = null },
                 onSubmitEdit = { text, images, files ->
@@ -783,6 +795,7 @@ private fun SessionHeader(
     onMcp: (() -> Unit)? = null,
     onAutomationSessionMemory: (() -> Unit)? = null,
     onAutomationNavMemory: (() -> Unit)? = null,
+    onPmSessionMemory: (() -> Unit)? = null,
     onOpenTerminal: ((tabId: String?) -> Unit)? = null,
     auxTerminalTabs: List<AuxTerminalTab> = emptyList(),
     onRequestCloseAuxTerminalTab: ((tabId: String) -> Unit)? = null,
@@ -870,6 +883,7 @@ private fun SessionHeader(
                 onRestart = onRestart,
                 onAutomationSessionMemory = onAutomationSessionMemory,
                 onAutomationNavMemory = onAutomationNavMemory,
+                onPmSessionMemory = onPmSessionMemory,
                 stickyUserMessagesEnabled = stickyUserMessagesEnabled,
                 onStickyUserMessagesEnabledChange = onStickyUserMessagesEnabledChange,
             )
@@ -895,6 +909,7 @@ private fun SessionHeaderOverflowMenu(
     onRestart: (() -> Unit)?,
     onAutomationSessionMemory: (() -> Unit)?,
     onAutomationNavMemory: (() -> Unit)?,
+    onPmSessionMemory: (() -> Unit)? = null,
     stickyUserMessagesEnabled: Boolean = true,
     onStickyUserMessagesEnabledChange: (Boolean) -> Unit = {},
 ) {
@@ -1049,6 +1064,23 @@ private fun SessionHeaderOverflowMenu(
                     onClick = {
                         expanded = false
                         onAutomationSessionMemory()
+                    },
+                )
+            }
+            if (onPmSessionMemory != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.pm_session_memory_menu), color = Palette.Text) },
+                    leadingIcon = {
+                        Icon(
+                            TermFoldIcons.Sparkle,
+                            contentDescription = null,
+                            tint = Palette.TextDim,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onPmSessionMemory()
                     },
                 )
             }
