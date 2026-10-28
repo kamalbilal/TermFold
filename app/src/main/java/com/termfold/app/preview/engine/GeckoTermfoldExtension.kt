@@ -1,7 +1,9 @@
 package com.termfold.app.preview.engine
 
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.mozilla.geckoview.GeckoResult
@@ -28,6 +30,7 @@ object GeckoTermfoldExtension {
     private val pending = ConcurrentHashMap<String, (JSONObject) -> Unit>()
     private val sessions = java.util.Collections.newSetFromMap(ConcurrentHashMap<GeckoSession, Boolean>())
     private val runtimeRef = AtomicReference<GeckoRuntime?>(null)
+    private val activeSession = AtomicReference<GeckoSession?>(null)
 
     fun ensureBuiltIn(runtime: GeckoRuntime) {
         runtimeRef.set(runtime)
@@ -104,11 +107,27 @@ object GeckoTermfoldExtension {
 
     fun unregisterSession(session: GeckoSession) {
         sessions.remove(session)
+        if (activeSession.compareAndSet(session, null)) {
+            val runtime = runtimeRef.get() ?: return
+            runCatching { runtime.webExtensionController.setTabActive(session, false) }
+        }
+    }
+
+    /** Routes extension `tabs` APIs to this Gecko session before automation RPC. */
+    fun activateSession(session: GeckoSession) {
+        val runtime = runtimeRef.get() ?: return
+        val previous = activeSession.getAndSet(session)
+        if (previous != null && previous !== session) {
+            runCatching { runtime.webExtensionController.setTabActive(previous, false) }
+            runCatching { previous.setActive(false) }
+        }
+        runCatching { runtime.webExtensionController.setTabActive(session, true) }
+        session.setActive(true)
+        session.setFocused(true)
     }
 
     private fun wireSession(runtime: GeckoRuntime, session: GeckoSession) {
         val ext = extensionRef.get() ?: return
-        runtime.webExtensionController.setTabActive(session, true)
         session.webExtensionController.setMessageDelegate(
             ext,
             object : WebExtension.MessageDelegate {},
@@ -145,17 +164,37 @@ object GeckoTermfoldExtension {
         pending.remove(id)
     }
 
-    suspend fun request(payload: JSONObject, timeoutMs: Long = BrowserBridgeTimeouts.EXTENSION_RPC_MS): JSONObject? {
+    suspend fun request(
+        payload: JSONObject,
+        timeoutMs: Long = BrowserBridgeTimeouts.EXTENSION_RPC_MS,
+        session: GeckoSession? = null,
+    ): JSONObject? {
+        if (session != null) {
+            withContext(Dispatchers.Main.immediate) {
+                activateSession(session)
+            }
+        }
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (extension() == null && System.currentTimeMillis() < deadline) {
+            kotlinx.coroutines.delay(50)
+        }
         if (extension() == null) {
             return JSONObject().put("error", "engine_not_ready")
         }
-        val port = nativePort.get()
+        var port = nativePort.get()
+        if (port == null) {
+            while (nativePort.get() == null && System.currentTimeMillis() < deadline) {
+                kotlinx.coroutines.delay(50)
+            }
+            port = nativePort.get()
+        }
         if (port == null) {
             return JSONObject().put("error", "extension_port_missing")
         }
         val id = UUID.randomUUID().toString()
+        val remaining = (deadline - System.currentTimeMillis()).coerceAtLeast(1L)
         return try {
-            withTimeout(timeoutMs) {
+            withTimeout(remaining) {
                 suspendCancellableCoroutine { cont ->
                     registerResponse(id) { response ->
                         if (cont.isActive) cont.resume(response)

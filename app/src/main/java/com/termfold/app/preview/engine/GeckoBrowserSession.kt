@@ -8,16 +8,17 @@ import org.mozilla.geckoview.GeckoView
 
 /**
  * One isolated Gecko profile ([storageContextId]) for preview or headless agent work.
- * [geckoView] is null for registry-only sessions (automation/coding without UI).
+ * The same instance is reused when the preview GeckoView attaches so we never open two
+ * sessions on one profile (that froze the compositor and crashed the app).
  */
 class GeckoBrowserSession(
     private val appContext: Context,
     val storageContextId: String,
-    val geckoView: GeckoView? = null,
-    private val onTitle: ((String) -> Unit)? = null,
-    private val onProgress: ((Int) -> Unit)? = null,
-    private val onHistory: ((canBack: Boolean, canForward: Boolean) -> Unit)? = null,
-    private val onLoadError: ((String?) -> Unit)? = null,
+    geckoView: GeckoView? = null,
+    onTitle: ((String) -> Unit)? = null,
+    onProgress: ((Int) -> Unit)? = null,
+    onHistory: ((canBack: Boolean, canForward: Boolean) -> Unit)? = null,
+    onLoadError: ((String?) -> Unit)? = null,
 ) {
     val session: GeckoSession
     val surface: GeckoBrowserSurface
@@ -25,8 +26,15 @@ class GeckoBrowserSession(
     @Volatile private var canGoBack = false
     @Volatile private var canGoForward = false
     @Volatile var progress: Int = 100
+    private val loadProgress = GeckoLoadProgress()
     @Volatile var loadError: String? = null
     @Volatile private var displayBound = false
+    @Volatile private var closed = false
+    private var view: GeckoView? = geckoView
+    private var onTitle: ((String) -> Unit)? = onTitle
+    private var onProgress: ((Int) -> Unit)? = onProgress
+    private var onHistory: ((canBack: Boolean, canForward: Boolean) -> Unit)? = onHistory
+    private var onLoadError: ((String?) -> Unit)? = onLoadError
 
     init {
         val runtime = GeckoRuntimeHolder.getOrCreate(appContext)
@@ -37,29 +45,32 @@ class GeckoBrowserSession(
         session.open(runtime)
         session.progressDelegate = object : GeckoSession.ProgressDelegate {
             override fun onPageStart(session: GeckoSession, url: String) {
+                loadProgress.onPageStart(url)
+                progress = loadProgress.value
+                this@GeckoBrowserSession.onProgress?.invoke(progress)
                 if (url.isNotBlank() && url != "about:blank") {
                     com.termfold.app.preview.network.NetworkCaptureStore.onMainFrameNavigation(storageContextId)
                 }
             }
 
             override fun onPageStop(session: GeckoSession, success: Boolean) {
-                progress = 100
-                onProgress?.invoke(100)
+                progress = loadProgress.onPageStop()
+                this@GeckoBrowserSession.onProgress?.invoke(progress)
                 com.termfold.app.preview.network.NetworkRulesHub.bindSession(storageContextId)
                 if (!success) {
                     loadError = loadError ?: "Page load failed"
-                    onLoadError?.invoke(loadError)
+                    this@GeckoBrowserSession.onLoadError?.invoke(loadError)
                 }
             }
 
-            override fun onProgressChange(session: GeckoSession, progress: Int) {
-                this@GeckoBrowserSession.progress = progress
-                onProgress?.invoke(progress)
+            override fun onProgressChange(session: GeckoSession, geckoProgress: Int) {
+                progress = loadProgress.onProgressChange(geckoProgress)
+                this@GeckoBrowserSession.onProgress?.invoke(progress)
             }
         }
         session.contentDelegate = object : GeckoSession.ContentDelegate {
             override fun onTitleChange(session: GeckoSession, title: String?) {
-                if (!title.isNullOrBlank()) onTitle?.invoke(title)
+                if (!title.isNullOrBlank()) this@GeckoBrowserSession.onTitle?.invoke(title)
             }
         }
         session.navigationDelegate = object : GeckoSession.NavigationDelegate {
@@ -72,7 +83,7 @@ class GeckoBrowserSession(
                 currentUrl = url
                 if (url != null && url != "about:blank") {
                     loadError = null
-                    onLoadError?.invoke(null)
+                    this@GeckoBrowserSession.onLoadError?.invoke(null)
                     com.termfold.app.preview.GeckoConsoleLog.clear(storageContextId)
                 }
             }
@@ -85,32 +96,77 @@ class GeckoBrowserSession(
                 val index = historyList.currentIndex
                 canGoBack = index > 0
                 canGoForward = index >= 0 && index < historyList.size - 1
-                onHistory?.invoke(canGoBack, canGoForward)
+                this@GeckoBrowserSession.onHistory?.invoke(canGoBack, canGoForward)
             }
         }
         // UI sessions bind in bindToDisplay() once GeckoView is on screen; binding too early paints blank.
-        surface = GeckoBrowserSurface(session, geckoView, { currentUrl }, { canGoBack to canGoForward }, storageContextId)
+        surface = GeckoBrowserSurface(
+            session,
+            geckoView,
+            { currentUrl },
+            { canGoBack to canGoForward },
+            storageContextId,
+            onBeforeDraw = { bindToDisplay() },
+        )
         GeckoTermfoldExtension.registerSession(session)
         com.termfold.app.preview.network.NetworkRulesHub.bindSession(storageContextId)
         com.termfold.app.preview.network.NetworkRulesHub.pushToExtension()
     }
 
+    fun setUiCallbacks(
+        onTitle: ((String) -> Unit)? = null,
+        onProgress: ((Int) -> Unit)? = null,
+        onHistory: ((canBack: Boolean, canForward: Boolean) -> Unit)? = null,
+        onLoadError: ((String?) -> Unit)? = null,
+    ) {
+        this.onTitle = onTitle
+        this.onProgress = onProgress
+        this.onHistory = onHistory
+        this.onLoadError = onLoadError
+    }
+
+    fun clearUiCallbacks() = setUiCallbacks()
+
+    /** Point this session at a preview [GeckoView] without opening a second engine. */
+    fun attachGeckoView(view: GeckoView) {
+        if (closed) return
+        if (this.view === view) {
+            surface.bindView(view)
+            return
+        }
+        runCatching { this.view?.releaseSession() }
+        displayBound = false
+        this.view = view
+        surface.bindView(view)
+    }
+
+    fun detachGeckoView() {
+        runCatching { view?.releaseSession() }
+        displayBound = false
+        view = null
+        surface.bindView(null)
+    }
+
     /** Attach session to [GeckoView] after it is in the window; safe to call repeatedly. */
     fun bindToDisplay() {
-        val view = geckoView ?: return
+        if (closed) return
+        val view = view ?: return
         if (displayBound) return
         view.setSession(session)
         displayBound = true
     }
 
     fun stopLoading() {
-        session.stop()
+        if (!closed) session.stop()
     }
 
     fun loadUrl(url: String) {
+        if (closed) return
         currentUrl = url
         loadError = null
-        progress = 0
+        loadProgress.onNavigate()
+        progress = loadProgress.value
+        onProgress?.invoke(progress)
         val projectFile = com.termfold.app.preview.PreviewFiles.bytesForUrl(appContext, url)
         if (projectFile != null) {
             session.load(
@@ -125,9 +181,15 @@ class GeckoBrowserSession(
     }
 
     fun release() {
-        GeckoTermfoldExtension.unregisterSession(session)
-        geckoView?.releaseSession()
-        displayBound = false
-        session.close()
+        if (closed) return
+        closed = true
+        runCatching {
+            GeckoTermfoldExtension.unregisterSession(session)
+            view?.releaseSession()
+            displayBound = false
+            view = null
+            surface.bindView(null)
+            session.close()
+        }
     }
 }

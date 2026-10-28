@@ -3,6 +3,7 @@ const nativePort = browser.runtime.connectNative("termfold_browser");
 
 let rulesBySession = {};
 const tabToSession = {};
+const sessionToTab = {};
 const cookieStoreToSession = {};
 let lastBoundSessionKey = "";
 const handled = {};
@@ -53,8 +54,95 @@ function firstMatch(sessionKey, url) {
 function bindTab(tab, sessionKey) {
   if (!tab || tab.id === undefined || !sessionKey) return;
   tabToSession[tab.id] = sessionKey;
+  sessionToTab[sessionKey] = tab.id;
   if (tab.cookieStoreId) cookieStoreToSession[tab.cookieStoreId] = sessionKey;
   lastBoundSessionKey = sessionKey;
+}
+
+function resolveTabForSession(sessionKey, cb) {
+  if (sessionKey && sessionToTab[sessionKey] !== undefined) {
+    cb(sessionToTab[sessionKey]);
+    return;
+  }
+  browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
+    const tab = tabs && tabs[0];
+    cb(tab && tab.id);
+  });
+}
+
+function isMissingContentScriptError(err) {
+  const s = String(err || "");
+  return (
+    s.indexOf("Receiving end does not exist") >= 0 ||
+    s.indexOf("Could not establish connection") >= 0
+  );
+}
+
+function ensureContentScripts(tabId) {
+  return browser.tabs
+    .executeScript(tabId, { file: "inject-tf.js", runAt: "document_end", allFrames: false })
+    .catch(() => [])
+    .then(() =>
+      browser.tabs.executeScript(tabId, { file: "content.js", runAt: "document_end", allFrames: false }),
+    )
+    .catch(() => []);
+}
+
+function runTfDirect(tabId, expr) {
+  return ensureContentScripts(tabId)
+    .then(() =>
+      browser.tabs.executeScript(tabId, {
+        code:
+          "(function(){try{if(!window.__tf)return {error:'helper_not_ready'};var r=window.__tf." +
+          expr +
+          ";return {ok:true,json:JSON.stringify(r===undefined?null:r)};}catch(e){return {error:String(e)};}})();",
+        runAt: "document_end",
+      }),
+    )
+    .then((results) => (results && results[0]) || { error: "empty_tf_response" });
+}
+
+function deliverAutomation(messageId, payload) {
+  const sessionKey = payload.sessionKey || lastBoundSessionKey;
+  resolveTabForSession(sessionKey, (tabId) => {
+    if (tabId === undefined) {
+      nativePort.postMessage({ id: messageId, error: "no_active_tab" });
+      return;
+    }
+    if (sessionKey) bindTab({ id: tabId }, sessionKey);
+    const finish = (response) => nativePort.postMessage({ id: messageId, ...response });
+
+    const attempt = (retried) => {
+      browser.tabs
+        .sendMessage(tabId, payload)
+        .then(finish)
+        .catch((e) => {
+          if (!retried && isMissingContentScriptError(e)) {
+            ensureContentScripts(tabId)
+              .then(() => attempt(true))
+              .catch(() => fallbackDirect(tabId, payload, finish, e));
+            return;
+          }
+          fallbackDirect(tabId, payload, finish, e);
+        });
+    };
+    attempt(false);
+  });
+}
+
+function fallbackDirect(tabId, payload, finish, priorErr) {
+  if (payload.op === "tf" && payload.expr) {
+    runTfDirect(tabId, payload.expr).then(finish).catch((e) => finish({ error: String(e) }));
+    return;
+  }
+  if (payload.op === "eval" && payload.code) {
+    ensureContentScripts(tabId)
+      .then(() => browser.tabs.sendMessage(tabId, payload))
+      .then(finish)
+      .catch((e) => finish({ error: String(priorErr || e) }));
+    return;
+  }
+  finish({ error: String(priorErr) });
 }
 
 function resolveSession(details) {
@@ -381,28 +469,14 @@ nativePort.onMessage.addListener((message) => {
   }
   if (payload.op === "bind_session") {
     const sessionKey = payload.sessionKey;
-    lastBoundSessionKey = sessionKey || lastBoundSessionKey;
-    browser.tabs
-      .query({ active: true, currentWindow: true })
-      .then((tabs) => {
-        bindTab(tabs && tabs[0], sessionKey);
-        nativePort.postMessage({ id: message.id, ok: true });
-      })
-      .catch((e) => nativePort.postMessage({ id: message.id, error: String(e) }));
+    if (sessionKey) lastBoundSessionKey = sessionKey;
+    resolveTabForSession(sessionKey, (tabId) => {
+      if (tabId !== undefined && sessionKey) bindTab({ id: tabId }, sessionKey);
+      nativePort.postMessage({ id: message.id, ok: true });
+    });
     return;
   }
-  browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
-    const tab = tabs && tabs[0];
-    if (!tab || tab.id === undefined) {
-      nativePort.postMessage({ id: message.id, error: "no_active_tab" });
-      return;
-    }
-    if (payload.sessionKey) bindTab(tab, payload.sessionKey);
-    browser.tabs
-      .sendMessage(tab.id, payload)
-      .then((response) => nativePort.postMessage({ id: message.id, ...response }))
-      .catch((e) => nativePort.postMessage({ id: message.id, error: String(e) }));
-  });
+  deliverAutomation(message.id, payload);
 });
 
 if (browser.tabs && browser.tabs.onCreated) {
@@ -415,8 +489,12 @@ if (browser.tabs && browser.tabs.onCreated) {
 
 function onBeforeRequest(details) {
   if (isInternalUrl(details.url)) return {};
-  if (details.type === "main_frame" && details.tabId >= 0 && lastBoundSessionKey && !tabToSession[details.tabId]) {
-    tabToSession[details.tabId] = lastBoundSessionKey;
+  if (details.type === "main_frame" && details.tabId >= 0) {
+    const boundKey = resolveSession(details) || lastBoundSessionKey;
+    if (boundKey) {
+      tabToSession[details.tabId] = boundKey;
+      sessionToTab[boundKey] = details.tabId;
+    }
   }
   const sessionKey = resolveSession(details) || lastBoundSessionKey;
   captureStart(sessionKey, details);

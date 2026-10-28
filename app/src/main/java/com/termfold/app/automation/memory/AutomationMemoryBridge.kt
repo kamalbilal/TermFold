@@ -2,6 +2,7 @@ package com.termfold.app.automation.memory
 
 import android.content.Context
 import com.termfold.app.automation.AutomationSessionContext
+import com.termfold.app.memory.AgentMemorySessionContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -9,7 +10,8 @@ object AutomationMemoryBridge {
 
     fun handle(context: Context, action: String, args: JSONObject): JSONObject {
         val sessionKey = AutomationSessionContext.activeKey
-            ?: return err("No active automation session")
+            ?: AgentMemorySessionContext.activeKey
+            ?: return err("No active agent session for memory")
         val givenKey = args.optString("session_key")
         if (givenKey.isNotBlank() && givenKey != sessionKey) {
             return err("Automation session mismatch")
@@ -21,6 +23,34 @@ object AutomationMemoryBridge {
                 val limit = args.optInt("limit", 5).coerceIn(1, 10)
                 val rows = repo.searchSessionMemory(sessionKey, query, limit)
                 okChunks(rows)
+            }
+            "memory_session_write" -> {
+                val kind = args.optString("kind").ifBlank { return err("kind required") }
+                val title = args.optString("title").ifBlank { return err("title required") }
+                val body = args.optString("body")
+                val searchText = args.optString("search_text", "$title $body")
+                val siteKey = args.optString("site_key", "")
+                repo.writeSessionMemory(sessionKey, kind, title, body, searchText, siteKey).fold(
+                    onSuccess = { JSONObject().put("ok", true) },
+                    onFailure = { JSONObject().put("error", it.message ?: "rejected") },
+                )
+            }
+            "memory_session_get" -> {
+                val id = args.optLong("id")
+                if (id <= 0L) return err("id required")
+                val chunk = repo.getMemoryChunk(id) ?: return err("Unknown chunk")
+                if (chunk.automationSessionId != sessionKey) return err("Chunk not in this session")
+                JSONObject()
+                    .put("ok", true)
+                    .put(
+                        "chunk",
+                        JSONObject()
+                            .put("id", chunk.id)
+                            .put("kind", chunk.kind)
+                            .put("title", chunk.title)
+                            .put("body", chunk.body)
+                            .put("site_key", chunk.siteKey),
+                    )
             }
             "memory_session_recent" -> {
                 val limit = args.optInt("limit", 8).coerceIn(1, 20)
@@ -78,6 +108,7 @@ object AutomationMemoryBridge {
         rows.forEach { chunk ->
             array.put(
                 JSONObject()
+                    .put("id", chunk.id)
                     .put("kind", chunk.kind)
                     .put("title", chunk.title)
                     .put("body", chunk.body)

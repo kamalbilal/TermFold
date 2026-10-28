@@ -13,10 +13,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -137,10 +141,10 @@ private fun DiffUnifiedLine(
             modifier = Modifier.width(gutterWidth).padding(start = if (compact) 2.dp else 4.dp),
         )
         Text(prefix.toString(), style = textStyle, color = fg, modifier = Modifier.width(prefixWidth))
-        Text(
-            cell.text.ifEmpty { " " },
-            style = textStyle,
-            color = fg,
+        DiffLineText(
+            cell = cell,
+            textStyle = textStyle,
+            fg = fg,
             modifier = Modifier
                 .weight(1f)
                 .padding(end = 8.dp),
@@ -200,10 +204,10 @@ private fun DiffHalfPane(
             color = fg,
             modifier = Modifier.width(10.dp),
         )
-        Text(
-            cell.text.ifEmpty { " " },
-            style = textStyle,
-            color = fg,
+        DiffLineText(
+            cell = cell,
+            textStyle = textStyle,
+            fg = fg,
             modifier = Modifier.padding(end = 4.dp),
         )
     }
@@ -215,3 +219,51 @@ private fun cellColors(kind: DiffLineKind): Pair<androidx.compose.ui.graphics.Co
         DiffLineKind.REMOVE -> GitDiffColors.removeBg to GitDiffColors.removeFg
         else -> Palette.Bg to GitDiffColors.contextFg
     }
+
+@Composable
+private fun DiffLineText(
+    cell: SideBySideCell,
+    textStyle: TextStyle,
+    fg: androidx.compose.ui.graphics.Color,
+    modifier: Modifier = Modifier,
+) {
+    val display = cell.text.ifEmpty { " " }
+    val spans = cell.inlineSpans
+    val hasEmphasis = spans != null && spans.any { it.emphasized }
+    if (!hasEmphasis) {
+        Text(display, style = textStyle, color = fg, modifier = modifier)
+        return
+    }
+    val wordBg = when (cell.kind) {
+        DiffLineKind.REMOVE -> GitDiffColors.removeWordBg
+        DiffLineKind.ADD -> GitDiffColors.addWordBg
+        else -> null
+    }
+    val wordFg = when (cell.kind) {
+        DiffLineKind.REMOVE -> GitDiffColors.removeWordFg
+        DiffLineKind.ADD -> GitDiffColors.addWordFg
+        else -> fg
+    }
+    Text(
+        buildAnnotatedString {
+            spans.orEmpty().forEach { seg ->
+                if (seg.text.isEmpty()) return@forEach
+                if (seg.emphasized && wordBg != null) {
+                    withStyle(
+                        SpanStyle(
+                            background = wordBg,
+                            color = wordFg,
+                            fontWeight = FontWeight.Bold,
+                        ),
+                    ) { append(seg.text) }
+                } else {
+                    append(seg.text)
+                }
+            }
+            if (length == 0) append(" ")
+        },
+        style = textStyle,
+        color = fg,
+        modifier = modifier,
+    )
+}

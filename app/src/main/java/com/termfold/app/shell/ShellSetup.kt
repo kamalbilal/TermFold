@@ -96,6 +96,8 @@ object ShellSetup {
 
     private const val NOTE_START = "<!-- termfold-browser:start -->"
     private const val NOTE_END = "<!-- termfold-browser:end -->"
+    private const val PROJECT_RULES_NOTE_START = "<!-- termfold-project-rules:start -->"
+    private const val PROJECT_RULES_NOTE_END = "<!-- termfold-project-rules:end -->"
 
     /**
      * The agent side of the preview browser: the `termfold-browser` command (also an MCP server),
@@ -107,6 +109,7 @@ object ShellSetup {
         writeExecutable(File(rootfs, BROWSER_TOOL.trimStart('/')), asset("termfold-browser.js"))
         writeExecutable(File(rootfs, AUTOMATION_MEMORY_TOOL.trimStart('/')), asset("termfold-automation-memory.js"))
         writeExecutable(File(rootfs, PM_MEMORY_TOOL.trimStart('/')), asset("termfold-pm-memory.js"))
+        writeExecutable(File(rootfs, PR_REVIEW_TOOL.trimStart('/')), asset("termfold-pr-review.js"))
         writeIfChanged(
             File(rootfs, "root/.claude/skills/termfold-automation/SKILL.md"),
             asset("termfold-automation-skill.md"),
@@ -120,10 +123,20 @@ object ShellSetup {
             File(rootfs, "root/.cursor/skills/termfold-product-manager/SKILL.md"),
             pmSkill,
         )
+        writeIfChanged(
+            File(rootfs, "root/.claude/skills/termfold-project-rules/SKILL.md"),
+            asset("termfold-project-rules-skill.md"),
+        )
+        writeIfChanged(
+            File(rootfs, "root/.claude/skills/termfold-agent-memory/SKILL.md"),
+            asset("termfold-agent-memory-skill.md"),
+        )
         val skill = asset("termfold-browser-skill.md")
         writeIfChanged(File(rootfs, "root/.claude/skills/termfold-browser/SKILL.md"), skill)
         // The other agents get the same guide, without the skill header.
         val note = NOTE_START + "\n" + skill.substringAfter("\n---\n").trim() + "\n" + NOTE_END + "\n"
+        val projectRulesNote = PROJECT_RULES_NOTE_START + "\n" +
+            asset("termfold-project-rules-skill.md").trim() + "\n" + PROJECT_RULES_NOTE_END + "\n"
         AGENT_NOTES.forEach { path ->
             val file = File(rootfs, path)
             val current = if (file.isFile) file.readText() else ""
@@ -136,6 +149,23 @@ object ShellSetup {
                     else -> "\n\n"
                 }
                 current + gap + note
+            }
+            writeIfChanged(file, updated)
+        }
+        AGENT_NOTES.forEach { path ->
+            val file = File(rootfs, path)
+            val current = if (file.isFile) file.readText() else ""
+            val updated = if (current.contains(PROJECT_RULES_NOTE_START) && current.contains(PROJECT_RULES_NOTE_END)) {
+                current.substringBefore(PROJECT_RULES_NOTE_START) +
+                    projectRulesNote +
+                    current.substringAfter(PROJECT_RULES_NOTE_END).trimStart('\n')
+            } else {
+                val gap = when {
+                    current.isEmpty() || current.endsWith("\n\n") -> ""
+                    current.endsWith("\n") -> "\n"
+                    else -> "\n\n"
+                }
+                current + gap + projectRulesNote
             }
             writeIfChanged(file, updated)
         }
@@ -163,6 +193,7 @@ object ShellSetup {
     const val BROWSER_TOOL = "/usr/local/bin/termfold-browser"
     const val AUTOMATION_MEMORY_TOOL = "/usr/local/bin/termfold-automation-memory"
     const val PM_MEMORY_TOOL = "/usr/local/bin/termfold-pm-memory"
+    const val PR_REVIEW_TOOL = "/usr/local/bin/termfold-pr-review"
 
     private fun writeIfChanged(file: File, content: String) {
         if (file.isFile && file.readText() == content) return

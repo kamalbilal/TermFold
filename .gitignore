@@ -20,5 +20,9 @@ app/src/main/assets/ubuntu-*.bin
 
 .termfold/
 
+# Signing secrets live under .termfold/ (gitignored) — see .termfold/README-signing.txt
+!.termfold/
+!.termfold/README-signing.txt
+
 # Ad-hoc APK copies at repo root (use app/build/outputs/apk/ for builds).
 TermFold-*.apk

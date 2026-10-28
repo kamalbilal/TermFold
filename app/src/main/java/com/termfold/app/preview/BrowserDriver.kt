@@ -82,7 +82,23 @@ class BrowserDriver(
 
     private val surface: BrowserSurface get() = ui.browserSurface()
 
-    override suspend fun run(action: String, args: JSONObject): JSONObject = withContext(Dispatchers.Main) {
+    private companion object {
+        const val TEMP_SHOTS = "/tmp/termfold-screenshots"
+        const val SNAPSHOT_DIR = "/tmp/termfold-browser"
+        const val SNAPSHOT_LIMIT = 60
+        const val KEEP_TEMP_SHOTS = 100
+        val TF_BRIDGE_FALLBACK_ERRORS = setOf(
+            "helper_not_ready",
+            "engine_not_ready",
+            "extension_port_missing",
+            "extension_rpc_timeout",
+            "empty_response",
+            "Receiving end does not exist",
+            "Could not establish connection",
+        )
+    }
+
+    override suspend fun run(action: String, args: JSONObject): JSONObject = withContext(Dispatchers.Main.immediate) {
         ui.ensureResumed()
         surface.onResume()
         resolveTab(args)?.let { return@withContext it }
@@ -134,10 +150,32 @@ class BrowserDriver(
         refreshCaptcha()
         val errors = ui.consoleErrorsSince(0)
         val failed = ui.failedRequestCount()
-        val controls = ui.visibleControlCount()
+        var controls = ui.visibleControlCount()
+        val titleRaw = js("JSON.stringify(document.title)", BrowserBridgeTimeouts.READY_STATE_EVAL_MS)
+        var title = if (evalResponseFailed(titleRaw)) {
+            ""
+        } else {
+            BrowserJsResults.parseEvalString(titleRaw)
+        }
+        if (title.isBlank() || evalResponseFailed(titleRaw)) {
+            val snap = call("snapshot()")
+            if (snap != null && !snap.has("error")) {
+                title = snap.optString("title").ifBlank { title }
+                if (controls <= 0) {
+                    controls = snap.optJSONArray("items")?.length() ?: 0
+                    ui.setVisibleControls(controls)
+                }
+            }
+        } else if (controls <= 0) {
+            val snap = call("snapshot()")
+            if (snap != null && !snap.has("error")) {
+                controls = snap.optJSONArray("items")?.length() ?: 0
+                ui.setVisibleControls(controls)
+            }
+        }
         val json = JSONObject()
             .put("url", surface.url().orEmpty())
-            .put("title", runCatching { JSONTokener(js("document.title")).nextValue() as? String }.getOrNull().orEmpty())
+            .put("title", title)
             .put("viewport", ui.viewportName())
             .put("console_errors", errors.coerceAtLeast(0))
             .put("failed_requests", failed.coerceAtLeast(0))
@@ -249,8 +287,8 @@ class BrowserDriver(
     }
 
     private suspend fun refreshCaptcha() {
-        val raw = js("(function(){${BrowserPageScript.HELPER};return window.__tf.captchaDetect();})()")
-        ui.updateCaptchaFromPage(raw == "true")
+        val data = call("captchaDetect()")
+        ui.updateCaptchaFromPage(data?.optBoolean("value", false) == true)
     }
 
     private suspend fun open(args: JSONObject): JSONObject {
@@ -260,28 +298,35 @@ class BrowserDriver(
         BrowserNavPolicy.checkAgentOpen(url)?.let { return err(it) }
         if (args.optBoolean("new_tab", false)) {
             val id = ui.navigateNewTab(url) ?: return err("Could not open a new tab (tab limit reached).")
-            awaitLoad()
+            awaitLoad(url)
             ui.loadError()?.let { return err("Could not open ${Preview.display(url)}: $it.") }
-            return ok("Opened tab $id. " + pageLine())
+            return ok("Opened tab $id. " + openedLine(url))
+        }
+        if (Preview.sameBrowseTarget(url, surface.url().orEmpty())) {
+            return ok("Opened. " + openedLine(url))
         }
         ui.navigate(url)
-        awaitLoad()
+        awaitLoad(url)
+        if (!Preview.sameBrowseTarget(url, surface.url().orEmpty())) {
+            delay(400)
+            awaitLoad(url)
+        }
         ui.loadError()?.let { return err("Could not open ${Preview.display(url)}: $it. If it is a dev server, is it running?") }
-        ui.httpError()?.let { return err("${Preview.display(url)} answered $it. " + pageLine()) }
-        return ok("Opened. " + pageLine())
+        ui.httpError()?.let { return err("${Preview.display(url)} answered $it. " + openedLine(url)) }
+        return ok("Opened. " + openedLine(url))
     }
 
     private suspend fun history(step: () -> String?): JSONObject {
         step()?.let { return err(it) }
         awaitLoad()
-        return ok(pageLine())
+        return ok(openedLine())
     }
 
     private suspend fun viewport(args: JSONObject): JSONObject {
         val mode = args.optString("mode").lowercase()
         if (!ui.setViewport(mode)) return err("Viewport must be fit, phone or desktop.")
         awaitLoad()
-        return ok("Viewport is now $mode. " + pageLine())
+        return ok("Viewport is now $mode. " + openedLine())
     }
 
     // ---- Reading -----------------------------------------------------------------------------
@@ -599,7 +644,8 @@ class BrowserDriver(
                 }
                 else -> {
                     val has = call("has(${spec(args)})")
-                    if (has?.optBoolean("found") == true && ui.progress() >= 100) return ok("Found $what. " + pageLine())
+                    val ready = ui.progress() >= 100 || ui.progress() >= 95
+                    if (has?.optBoolean("found") == true && ready) return ok("Found $what. " + pageLine())
                 }
             }
             delay(300)
@@ -682,6 +728,14 @@ class BrowserDriver(
 
     // ---- Screenshots -------------------------------------------------------------------------
 
+    private suspend fun capturePageBitmap(): Bitmap? {
+        val gecko = surface as? GeckoBrowserSurface
+        gecko?.captureScreenshot()?.let { return it }
+        val bitmap = surface.createScreenshotBitmap() ?: return null
+        surface.drawScreenshot(Canvas(bitmap))
+        return bitmap
+    }
+
     private suspend fun screenshot(args: JSONObject): JSONObject {
         BrowserBridge.setLabel("Taking a screenshot")
         delay(80)
@@ -694,8 +748,7 @@ class BrowserDriver(
             if (!file.isFile) return err("Baseline not found: $guest")
             val baseBmp = android.graphics.BitmapFactory.decodeFile(file.absolutePath)
                 ?: return err("Could not read baseline image.")
-            var shot = surface.createScreenshotBitmap() ?: return err("The browser is not on screen.")
-            surface.drawScreenshot(Canvas(shot))
+            var shot = capturePageBitmap() ?: return err("The browser is not on screen.")
             val match = pictureHash(baseBmp) == pictureHash(shot)
             baseBmp.recycle()
             shot.recycle()
@@ -711,14 +764,13 @@ class BrowserDriver(
             if (region == null || region.has("error")) return err("Could not find that element to take a picture of it.")
             delay(150)
         }
-        var bitmap = surface.createScreenshotBitmap() ?: return err("The browser is not on screen.")
-        surface.drawScreenshot(Canvas(bitmap))
+        var bitmap = capturePageBitmap() ?: return err("The browser is not on screen.")
         var tries = 0
         while (isBlank(bitmap) && tries < 4) {
             tries++
             delay(250L * tries)
-            bitmap.eraseColor(0)
-            surface.drawScreenshot(Canvas(bitmap))
+            bitmap.recycle()
+            bitmap = capturePageBitmap() ?: return err("The browser is not on screen.")
         }
         if (region != null) {
             val scale = bitmap.width / region.optDouble("vw", bitmap.width.toDouble()).coerceAtLeast(1.0)
@@ -886,10 +938,13 @@ class BrowserDriver(
     }
 
     private fun toPx(point: JSONObject): Pair<Float, Float> {
-        val vw = point.optDouble("vw", surface.width().toDouble()).toFloat().takeIf { it > 0 } ?: surface.width().toFloat()
-        val scale = surface.width() / vw
-        val x = (point.optDouble("x").toFloat() * scale).coerceIn(1f, surface.width() - 1f)
-        val y = (point.optDouble("y").toFloat() * scale).coerceIn(1f, surface.height() - 1f)
+        val surfaceW = surface.width().coerceAtLeast(1)
+        val vw = point.optDouble("vw", surfaceW.toDouble()).toFloat().coerceAtLeast(1f)
+        val scale = surfaceW / vw
+        val maxX = surface.width().coerceAtLeast(1).toFloat()
+        val maxY = surface.height().coerceAtLeast(1).toFloat()
+        val x = (point.optDouble("x").toFloat() * scale).coerceIn(1f, maxX - 1f)
+        val y = (point.optDouble("y").toFloat() * scale).coerceIn(1f, maxY - 1f)
         return x to y
     }
 
@@ -928,7 +983,10 @@ class BrowserDriver(
     )
 
     private suspend fun pageLine(): String {
-        val title = runCatching { JSONTokener(js("document.title")).nextValue() as? String }.getOrNull().orEmpty()
+        val title = runCatching {
+            JSONTokener(js("document.title", BrowserBridgeTimeouts.READY_STATE_EVAL_MS))
+                .nextValue() as? String
+        }.getOrNull().orEmpty()
         return "Page: " + title.ifBlank { "(untitled)" } + " · " + (surface.url()?.let(Preview::display) ?: "")
     }
 
@@ -950,27 +1008,80 @@ class BrowserDriver(
         delay(150)
     }
 
-    private suspend fun awaitLoad() {
-        delay(250)
-        val until = SystemClock.uptimeMillis() + 25_000
-        while (SystemClock.uptimeMillis() < until) {
-            if (ui.loadError() != null) return
-            if (ui.progress() >= 100) {
-                val ready = runCatching { JSONTokener(js("document.readyState")).nextValue() as? String }.getOrNull()
-                if (ready == "complete" || ready == "interactive") break
-            }
-            delay(150)
-        }
-        delay(200)
+    private fun openedLine(requested: String? = null): String {
+        val shown = surface.url()?.takeUnless { it.isBlank() } ?: requested.orEmpty()
+        return "Page: " + Preview.display(shown)
     }
 
-    private suspend fun js(code: String): String = surface.evaluateJavascript(code)
+    private suspend fun awaitLoad(requested: String? = null) {
+        delay(80)
+        val until = SystemClock.uptimeMillis() + 8_000
+        while (SystemClock.uptimeMillis() < until) {
+            if (ui.loadError() != null) return
+            val url = surface.url()?.takeUnless { it.isBlank() || it == "about:blank" } ?: run {
+                delay(50)
+                continue
+            }
+            if (requested != null && !Preview.sameBrowseTarget(requested, url)) {
+                delay(50)
+                continue
+            }
+            when {
+                ui.progress() >= 100 -> {
+                    delay(200)
+                    return
+                }
+                ui.progress() >= 90 && requested != null -> {
+                    delay(300)
+                    if (Preview.sameBrowseTarget(requested, surface.url().orEmpty())) return
+                }
+            }
+            delay(50)
+        }
+    }
+
+    private suspend fun js(
+        code: String,
+        timeoutMs: Long = BrowserBridgeTimeouts.EXTENSION_RPC_MS,
+    ): String = surface.evaluateJavascript(code, timeoutMs)
+
+    private fun bridgeErrorNeedsPageFallback(err: String): Boolean =
+        err.isNotBlank() && (
+            err in TF_BRIDGE_FALLBACK_ERRORS ||
+                TF_BRIDGE_FALLBACK_ERRORS.any { token -> err.contains(token) }
+            )
+
+    private fun evalResponseFailed(raw: String): Boolean {
+        val t = raw.trim()
+        if (t.isEmpty() || t == "null") return true
+        return bridgeErrorNeedsPageFallback(t) ||
+            (t.startsWith("{") && t.contains("\"error\""))
+    }
 
     /** Calls a helper in the page (installing it first) and parses the JSON it returns. */
     private suspend fun call(expression: String): JSONObject? {
-        val raw = js("(function(){${BrowserPageScript.HELPER};try{return JSON.stringify(window.__tf.$expression);}catch(e){return JSON.stringify({error:String(e)});}})()")
-        val text = runCatching { JSONTokener(raw).nextValue() as? String }.getOrNull() ?: return null
-        return runCatching { JSONObject(text) }.getOrNull()
+        val geckoSurface = surface as? GeckoBrowserSurface
+        if (geckoSurface != null) {
+            val viaTf = geckoSurface.callTf(expression)
+            val err = viaTf?.optString("error").orEmpty()
+            if (err.isEmpty()) return viaTf
+            if (bridgeErrorNeedsPageFallback(err)) {
+                return callTfViaPageEval(geckoSurface, expression) ?: viaTf
+            }
+            return viaTf
+        }
+        val raw = js(
+            "(function(){${BrowserPageScript.HELPER};try{return JSON.stringify(window.__tf.$expression);}catch(e){return JSON.stringify({error:String(e)});}})()",
+        )
+        return BrowserJsResults.parseHelperCall(raw)
+    }
+
+    /** Runs `window.__tf` in the page context when the content-script bridge is not ready. */
+    private suspend fun callTfViaPageEval(gecko: GeckoBrowserSurface, expression: String): JSONObject? {
+        val script =
+            "(function(){${BrowserPageScript.HELPER};try{return JSON.stringify(window.__tf.$expression);}catch(e){return JSON.stringify({error:String(e)});}})()"
+        val raw = gecko.evaluateJavascript(script, BrowserBridgeTimeouts.EXTENSION_RPC_MS)
+        return BrowserJsResults.parseHelperCall(raw)
     }
 
     private fun ok(text: String) = JSONObject().put("text", text)
@@ -1004,12 +1115,5 @@ class BrowserDriver(
         val shots = dir.listFiles { f -> f.isFile && f.name.startsWith("browser-") }?.sortedByDescending { it.lastModified() } ?: return
         val dayAgo = System.currentTimeMillis() - 24L * 3600 * 1000
         shots.forEachIndexed { i, f -> if (i >= KEEP_TEMP_SHOTS || f.lastModified() < dayAgo) f.delete() }
-    }
-
-    private companion object {
-        const val TEMP_SHOTS = "/tmp/termfold-screenshots"
-        const val SNAPSHOT_DIR = "/tmp/termfold-browser"
-        const val SNAPSHOT_LIMIT = 60
-        const val KEEP_TEMP_SHOTS = 100
     }
 }

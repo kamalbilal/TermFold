@@ -23,6 +23,8 @@ class PrReviewPromptTest {
         assertTrue(text.contains("fix-npe"))
         assertTrue(text.contains("which finding ids to fix"))
         assertTrue(text.contains(".termfold-pr-review/pr.diff"))
+        assertTrue(text.contains("submit_pr_review_report"))
+        assertTrue(text.contains("termfold-pr-review"))
         assertTrue(text.contains("pr-review-report"))
         assertTrue(text.contains("linux-guest"))
         assertTrue(text.contains("ios only if files.txt"))

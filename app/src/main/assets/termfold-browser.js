@@ -48,7 +48,7 @@ function call(action, args) {
         });
       },
     );
-    req.setTimeout(120000, () => req.destroy(new Error('TermFold did not answer in time.')));
+    req.setTimeout(180000, () => req.destroy(new Error('TermFold did not answer in time.')));
     req.on('error', (e) => reject(new Error('Could not reach the TermFold browser (' + e.message + '). Is the TermFold app open?')));
     req.end(body);
   });

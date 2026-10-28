@@ -1,6 +1,8 @@
 package com.termfold.app.preview.engine
 
+import android.content.ComponentCallbacks2
 import android.content.Context
+import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.webkit.WebView
@@ -8,6 +10,7 @@ import com.termfold.app.preview.BrowserBridge
 import com.termfold.app.preview.BrowserDriver
 import com.termfold.app.preview.DriverUi
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
@@ -27,6 +30,7 @@ data class BrowserSessionEntry(
     @Volatile var tier: BrowserPowerTier = BrowserPowerTier.IDLE_WARM,
     @Volatile var uiAttached: Boolean = false,
     val casual: Boolean = false,
+    val gecko: GeckoBrowserSession? = null,
     private val headlessTeardown: (() -> Unit)? = null,
 ) {
     fun teardown() {
@@ -43,11 +47,13 @@ data class BrowserSessionEntry(
  * independent of whether the preview pane is visible.
  */
 object BrowserSessionRegistry {
-    private const val MAX_WARM = 3
+    private const val MAX_WARM = 2
     private val entries = ConcurrentHashMap<String, BrowserSessionEntry>()
     private val inFlight = ConcurrentHashMap<String, Mutex>()
 
     fun get(key: String): BrowserSessionEntry? = entries[key]
+
+    fun isUiAttached(key: String): Boolean = entries[key]?.uiAttached == true
 
     fun controllerFor(key: String?): BrowserBridge.Controller? {
         if (key.isNullOrBlank()) return null
@@ -60,15 +66,22 @@ object BrowserSessionRegistry {
             return JSONObject().put("error", "No browser session registered for key \"$key\".")
         }
         val gate = inFlight.getOrPut(key) { Mutex() }
-        if (!gate.tryLock()) {
-            return JSONObject().put("error", "session_busy")
+        val locked = withTimeoutOrNull(BrowserBridgeTimeouts.EXCLUSIVE_WAIT_MS) {
+            gate.lock()
+            true
+        } == true
+        if (!locked) {
+            return JSONObject().put(
+                "error",
+                "The browser is still finishing the previous command. Wait a few seconds and try again.",
+            )
         }
         return try {
-            entry.tier = BrowserPowerTier.RUNNING
+            entries[key]?.tier = BrowserPowerTier.RUNNING
             block()
         } finally {
             gate.unlock()
-            entry.tier = BrowserPowerTier.IDLE_WARM
+            entries[key]?.tier = BrowserPowerTier.IDLE_WARM
         }
     }
 
@@ -99,13 +112,88 @@ object BrowserSessionRegistry {
         inFlight.remove(key)
     }
 
+    /** Drop idle headless Gecko sessions when the system is low on RAM. */
+    fun onTrimMemory(level: Int) {
+        if (level < ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) return
+        val work = Runnable { trimMemoryOnMain(level) }
+        if (Looper.myLooper() == Looper.getMainLooper()) work.run()
+        else Handler(Looper.getMainLooper()).post(work)
+    }
+
+    private fun trimMemoryOnMain(level: Int) {
+        checkMainThread()
+        val keys = entries.keys.toList()
+        for (key in keys) {
+            val entry = entries[key] ?: continue
+            if (isBusy(key)) continue
+            val evictCasual = entry.casual
+            val evictIdleHeadless =
+                level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL &&
+                    !entry.uiAttached &&
+                    entry.tier == BrowserPowerTier.IDLE_WARM
+            if (evictCasual || evictIdleHeadless) {
+                evict(entry)
+                entries.remove(key)
+                inFlight.remove(key)
+            }
+        }
+    }
+
     fun releaseCoding(composeKey: String) {
         release(PreviewUrlRouter.sessionKeyForCoding(composeKey))
+    }
+
+    fun geckoFor(storageContextId: String): GeckoBrowserSession? = entries[storageContextId]?.gecko
+
+    /**
+     * Bind the registry's single Gecko session to the preview view. Never opens a second
+     * engine for the same profile.
+     */
+    fun bindPreview(
+        context: Context,
+        storageContextId: String,
+        geckoView: org.mozilla.geckoview.GeckoView,
+        onTitle: ((String) -> Unit)?,
+        onProgress: ((Int) -> Unit)?,
+        onHistory: ((canBack: Boolean, canForward: Boolean) -> Unit)?,
+    ): GeckoBrowserSession {
+        checkMainThread()
+        val entry = entries.getOrPut(storageContextId) {
+            createHeadlessEntry(context, storageContextId, storageContextId)
+        }
+        val gecko = entry.gecko ?: run {
+            val created = GeckoBrowserSession(context.applicationContext, storageContextId)
+            entries[storageContextId] = entry.copy(gecko = created, surface = created.surface)
+            created
+        }
+        gecko.setUiCallbacks(onTitle = onTitle, onProgress = onProgress, onHistory = onHistory)
+        gecko.attachGeckoView(geckoView)
+        return gecko
+    }
+
+    fun unbindPreview(storageContextId: String) {
+        checkMainThread()
+        val entry = entries[storageContextId] ?: return
+        entry.gecko?.clearUiCallbacks()
+        entry.gecko?.detachGeckoView()
+    }
+
+    private fun isBusy(key: String): Boolean {
+        val entry = entries[key] ?: return false
+        return entry.tier == BrowserPowerTier.RUNNING || (inFlight[key]?.isLocked == true)
     }
 
     fun attachUi(key: String, surface: BrowserSurface, controller: BrowserBridge.Controller) {
         checkMainThread()
         val previous = entries[key]
+        if (previous?.uiAttached == true) {
+            entries[key] = previous.copy(
+                controller = controller,
+                surface = surface,
+                uiAttached = true,
+            )
+            return
+        }
         previous?.releaseHeadlessResources()
         entries[key] = BrowserSessionEntry(
             key = key,
@@ -116,24 +204,46 @@ object BrowserSessionRegistry {
             tier = previous?.tier ?: BrowserPowerTier.IDLE_WARM,
             uiAttached = true,
             casual = false,
+            gecko = previous?.gecko,
             headlessTeardown = null,
         )
     }
 
-    /** Preview went away: run agent commands on a headless Gecko session again (same profile). */
+    /** Preview pane left composition: keep the same Gecko session, drop only the view. */
     fun restoreHeadless(context: Context, key: String) {
         checkMainThread()
         val previous = entries[key] ?: return
-        if (!previous.uiAttached) return
-        val url = previous.surface.url()
-        val storageId = previous.storageContextId
-        val fresh = createHeadlessEntry(
-            context,
-            key,
-            storageContextId = storageId,
-            initialUrl = url,
+        val gecko = previous.gecko
+        previous.gecko?.clearUiCallbacks()
+        if (previous.uiAttached) {
+            previous.gecko?.detachGeckoView()
+        } else if ((gecko?.surface?.width() ?: 0) > 0) {
+            return
+        }
+        if (gecko == null) {
+            entries[key] = createHeadlessEntry(
+                context,
+                key,
+                storageContextId = previous.storageContextId,
+                initialUrl = previous.surface.url(),
+            )
+            return
+        }
+        val app = context.applicationContext
+        val offscreen = bindHeadlessGeckoView(app, gecko)
+        val driverStub = WebView(app).apply { visibility = View.GONE }
+        val driver = BrowserDriver(app, HeadlessGeckoDriverUi(gecko, driverStub))
+        val headlessTeardown: () -> Unit = {
+            runCatching { driverStub.destroy() }
+            runCatching { offscreen.releaseSession() }
+        }
+        entries[key] = previous.copy(
+            controller = driver,
+            surface = gecko.surface,
+            uiAttached = false,
+            gecko = gecko,
+            headlessTeardown = headlessTeardown,
         )
-        entries[key] = fresh
     }
 
     private fun createHeadlessEntry(
@@ -151,6 +261,7 @@ object BrowserSessionRegistry {
             storageContextId,
             geckoView = null,
         )
+        val offscreen = bindHeadlessGeckoView(app, gecko)
         if (!initialUrl.isNullOrBlank() && initialUrl != "about:blank") {
             gecko.loadUrl(initialUrl)
         }
@@ -159,18 +270,35 @@ object BrowserSessionRegistry {
         }
         val stubUi = HeadlessGeckoDriverUi(gecko, driverStub)
         val driver = BrowserDriver(app, stubUi)
-        val teardown = {
-            gecko.release()
-            driverStub.destroy()
-        }
         return BrowserSessionEntry(
             key = key,
             controller = driver,
             surface = gecko.surface,
             storageContextId = storageContextId,
             casual = casual,
-            headlessTeardown = teardown,
+            gecko = gecko,
+            headlessTeardown = {
+                runCatching { driverStub.destroy() }
+                runCatching { offscreen.releaseSession() }
+                Unit
+            },
         )
+    }
+
+    private fun newOffscreenGeckoView(context: Context): org.mozilla.geckoview.GeckoView =
+        org.mozilla.geckoview.GeckoView(context.applicationContext).apply {
+            visibility = View.GONE
+            val w = View.MeasureSpec.makeMeasureSpec(1280, View.MeasureSpec.EXACTLY)
+            val h = View.MeasureSpec.makeMeasureSpec(720, View.MeasureSpec.EXACTLY)
+            measure(w, h)
+            layout(0, 0, 1280, 720)
+        }
+
+    private fun bindHeadlessGeckoView(context: Context, gecko: GeckoBrowserSession): org.mozilla.geckoview.GeckoView {
+        val offscreen = newOffscreenGeckoView(context)
+        gecko.attachGeckoView(offscreen)
+        gecko.bindToDisplay()
+        return offscreen
     }
 
     private fun evictIfNeeded() {
@@ -191,6 +319,7 @@ object BrowserSessionRegistry {
         com.termfold.app.preview.network.NetworkCaptureStore.clear(entry.storageContextId)
         com.termfold.app.preview.network.NetworkCaptureHub.setUiSubscribed(entry.storageContextId, false)
         com.termfold.app.preview.network.NetworkCaptureHub.pushCaptureOff(entry.storageContextId)
+        runCatching { entry.gecko?.release() }
         entry.teardown()
     }
 
@@ -206,6 +335,7 @@ object BrowserSessionRegistry {
         private val driverStub: WebView,
     ) : DriverUi {
         @Volatile private var viewportName: String = "fit"
+        @Volatile private var visibleControls: Int = 0
 
         override fun activeWebView(): WebView = driverStub
         override fun browserSurface(): BrowserSurface = gecko.surface
@@ -226,9 +356,6 @@ object BrowserSessionRegistry {
             val ok = mode.equals("fit", true) || mode.equals("phone", true) || mode.equals("desktop", true)
             if (!ok) return false
             viewportName = mode.lowercase()
-            kotlinx.coroutines.runBlocking {
-                GeckoViewport.apply(gecko.surface, mode)
-            }
             return true
         }
 
@@ -257,8 +384,10 @@ object BrowserSessionRegistry {
         override fun networkGeneration(): Int = BrowserBridge.networkGeneration
         override fun failedRequestCount(): Int =
             com.termfold.app.preview.network.GeckoNetworkLog.failedCount(gecko.storageContextId)
-        override fun visibleControlCount(): Int = 0
-        override fun setVisibleControls(count: Int) {}
+        override fun visibleControlCount(): Int = visibleControls
+        override fun setVisibleControls(count: Int) {
+            visibleControls = count.coerceAtLeast(0)
+        }
         override fun offerUpload(file: java.io.File) {}
         override fun uploadTaken(): Boolean = false
         override fun captchaPending(): Boolean = false
@@ -285,6 +414,7 @@ object BrowserSessionRegistry {
         override fun tabClose(id: Int): Boolean = false
         override fun ensureResumed() {
             gecko.surface.onResume()
+            gecko.bindToDisplay()
         }
     }
 }

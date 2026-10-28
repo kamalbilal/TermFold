@@ -38,6 +38,7 @@ object PrReviewPersistence {
             acpAgentId = optString("acpAgentId", "cursor").ifBlank { "cursor" },
             lastReportJson = optString("lastReportJson", "").ifBlank { null },
             lastParseError = optString("lastParseError", "").ifBlank { null },
+            reportsByUserMessageId = optJSONObject("reportsByUserMessageId")?.toReportsMap() ?: emptyMap(),
         )
 
     private fun PrReviewSession.toJson(): JSONObject =
@@ -55,4 +56,18 @@ object PrReviewPersistence {
             .put("acpAgentId", acpAgentId)
             .put("lastReportJson", lastReportJson ?: "")
             .put("lastParseError", lastParseError ?: "")
+            .put("reportsByUserMessageId", reportsByUserMessageId.toReportsJson())
+
+    private fun JSONObject.toReportsMap(): Map<Long, String> = buildMap {
+        keys().forEach { key ->
+            val value = optString(key, "").ifBlank { null } ?: return@forEach
+            put(key.toLong(), value)
+        }
+    }
+
+    private fun Map<Long, String>.toReportsJson(): JSONObject {
+        val obj = JSONObject()
+        forEach { (id, json) -> obj.put(id.toString(), json) }
+        return obj
+    }
 }

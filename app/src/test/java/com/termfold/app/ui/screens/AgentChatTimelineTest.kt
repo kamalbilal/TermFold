@@ -210,6 +210,27 @@ class AgentChatTimelineTest {
     }
 
     @Test
+    fun turnFootersInsertsFooterPerUserTurn() {
+        val items = listOf(
+            AcpItem.UserMessage(1L, "a", emptyList()),
+            AcpItem.AgentText(2L, "x"),
+            AcpItem.UserMessage(3L, "b", emptyList()),
+        )
+        val entries = buildAgentChatTimelineEntries(
+            items = items,
+            collapsedTools = emptyMap(),
+            expandedToolFiles = emptyMap(),
+            contextFolds = emptyMap(),
+            workspaceDir = "/root/ws",
+            showLiveToolDiffs = true,
+            presentationCache = emptyMap(),
+            turnFooters = true,
+        )
+        assertTrue(entries.any { it is AgentChatLazyEntry.TurnFooter && it.userMessageId == 1L })
+        assertTrue(entries.any { it is AgentChatLazyEntry.TurnFooter && it.userMessageId == 3L })
+    }
+
+    @Test
     fun buildMapRespectsUserOverride() {
         val items = itemsWithUserThenTools(tool(id = 1L, status = "completed", fileDiffs = oneFileDiff))
         val map = buildToolCallCollapsedMap(

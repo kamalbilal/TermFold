@@ -1,6 +1,8 @@
 package com.termfold.app.pm
 
 import android.content.Context
+import com.termfold.app.memory.AgentMemoryGuidance
+import com.termfold.app.memory.AgentMemoryWorkflow
 import com.termfold.app.pm.memory.PmMemoryRepository
 
 object PmPrompt {
@@ -15,6 +17,8 @@ object PmPrompt {
         userQuery: String = "",
     ): String = buildString {
         appendLine("<$ANCHOR>")
+        appendLine(AgentMemoryGuidance.promptBlock(AgentMemoryWorkflow.PM))
+        appendLine()
         appendLine(instructions(session))
         appendLine()
         appendLine(sessionFacts(session))

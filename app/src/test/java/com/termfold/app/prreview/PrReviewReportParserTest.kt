@@ -92,12 +92,24 @@ class PrReviewReportParserTest {
     }
 
     @Test
-    fun thoughtOnlyIsSkipped() {
+    fun unfinishedTurnWithoutFenceIsSkipped() {
+        val items = listOf(
+            AcpItem.UserMessage(1, "start review", emptyList()),
+            AcpItem.Thought(2, "Reading the PR facts pack"),
+            AcpItem.AgentText(3, "Reading the rest of the diff."),
+        )
+        assertEquals(PrReviewParse.Skipped, PrReviewReportParser.parseTurnSlice(items, turnFinished = false))
+        assertEquals(PrReviewParse.Missing, PrReviewReportParser.parseTurnSlice(items, turnFinished = true))
+    }
+
+    @Test
+    fun thoughtWithFenceParses() {
         val items = listOf(
             AcpItem.UserMessage(1, "review", emptyList()),
             AcpItem.Thought(2, "```pr-review-report\n$validJson\n```"),
         )
-        assertEquals(PrReviewParse.Skipped, PrReviewReportParser.parseTurn(items))
+        val parsed = PrReviewReportParser.parseTurn(items) as PrReviewParse.Ok
+        assertEquals("Adds login.", parsed.report.summary)
     }
 
     @Test
@@ -119,6 +131,20 @@ class PrReviewReportParserTest {
         val text = "```pr-review-report\n$first\n```\nthen\n```pr-review-report\n$second\n```"
         val parsed = PrReviewReportParser.parseAgentText(text) as PrReviewParse.Ok
         assertEquals("second", parsed.report.summary)
+    }
+
+    @Test
+    fun trailingCommaJsonParses() {
+        val json = validJson.replace("\"openQuestions\": []", "\"openQuestions\": [],")
+        val parsed = PrReviewReportParser.parseJson(json) as PrReviewParse.Ok
+        assertEquals("Adds login.", parsed.report.summary)
+    }
+
+    @Test
+    fun jsonFenceAliasParses() {
+        val text = "```json\n$validJson\n```"
+        val parsed = PrReviewReportParser.parseAgentText(text) as PrReviewParse.Ok
+        assertEquals("Adds login.", parsed.report.summary)
     }
 
     @Test

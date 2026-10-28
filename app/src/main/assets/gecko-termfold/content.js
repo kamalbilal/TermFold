@@ -52,6 +52,9 @@ function evalInPageContext(code) {
   });
 }
 
+if (!globalThis.__termfoldTfBridgeInstalled) {
+  globalThis.__termfoldTfBridgeInstalled = true;
+
 browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || !message.op) {
     sendResponse({ error: "unknown_op" });
@@ -75,9 +78,10 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     const fn = new Function("return window.__tf." + expr + ";");
     const result = fn();
-    sendResponse({ ok: true, json: JSON.stringify(result) });
+    sendResponse({ ok: true, json: JSON.stringify(result === undefined ? null : result) });
   } catch (e) {
     sendResponse({ error: String(e) });
   }
   return true;
 });
+}

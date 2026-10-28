@@ -219,6 +219,30 @@ class AutomationMemoryRepository(
         store.boxFor<SessionEventEntity>().remove(id)
     }
 
+    fun writeSessionMemory(
+        automationSessionId: String,
+        kind: String,
+        title: String,
+        body: String,
+        searchText: String,
+        siteKey: String = "",
+    ): Result<Unit> {
+        val blob = "$title $body $searchText"
+        if (looksLikeSecret(blob)) {
+            return Result.failure(IllegalArgumentException("Avoid credentials in memory; use session secrets"))
+        }
+        upsertChunk(
+            automationSessionId = automationSessionId,
+            siteKey = siteKey,
+            kind = kind,
+            title = title,
+            searchText = searchText,
+            body = body,
+            global = false,
+        )
+        return Result.success(Unit)
+    }
+
     fun writeGlobalNav(siteKey: String, kind: String, title: String, body: String, searchText: String): Result<Unit> {
         if (Companion.looksLikeSecret("$title $body $searchText")) {
             return Result.failure(IllegalArgumentException("Global navigation memory cannot contain credentials"))

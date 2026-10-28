@@ -47,6 +47,19 @@ object Preview {
     /** The last page shown per project (or "" for none), so reopening picks up where it was. */
     private val lastUrl = HashMap<String, String>()
 
+    /**
+     * Show the preview for an agent command without reloading if it is already open.
+     */
+    fun revealForAgent() {
+        _state.update { current ->
+            when {
+                current.open && !current.minimized -> current
+                current.open -> current.copy(minimized = false)
+                else -> current.copy(open = true, nonce = current.nonce + 1)
+            }
+        }
+    }
+
     fun open(url: String? = null, projectDir: String? = null) {
         _state.update { current ->
             val project = projectDir ?: current.projectDir
@@ -100,6 +113,25 @@ object Preview {
         return runCatching { URLDecoder.decode(path.replace("+", "%2B"), "UTF-8") }.getOrNull()
     }
 
+    /** True when both addresses are the same page (YouTube short links, http/https, www). */
+    fun sameBrowseTarget(a: String, b: String): Boolean {
+        if (a.isBlank() || b.isBlank()) return false
+        if (a == b) return true
+        fun youtubeId(u: String): String? {
+            val lower = u.lowercase()
+            Regex("(?:youtu\\.be/|youtube\\.com/embed/)([\\w-]+)").find(lower)?.groupValues?.get(1)?.let { return it }
+            if (lower.contains("youtube.")) {
+                Regex("[?&]v=([\\w-]+)").find(lower)?.groupValues?.get(1)?.let { return it }
+            }
+            return null
+        }
+        val ya = youtubeId(a)
+        val yb = youtubeId(b)
+        if (ya != null && ya == yb) return true
+        fun strip(u: String) = u.removePrefix("https://").removePrefix("http://").removePrefix("www.").trimEnd('/')
+        return strip(a).equals(strip(b), ignoreCase = true)
+    }
+
     /** What the address bar shows: ~/projects/app/index.html for files, the URL otherwise. */
     fun display(url: String): String {
         val guest = guestPathOf(url) ?: return url.removePrefix("http://").removePrefix("https://").trimEnd('/')
@@ -115,6 +147,12 @@ object Preview {
         val text = input.trim()
         return when {
             text.isEmpty() -> ""
+            text.startsWith("file://", ignoreCase = true) -> {
+                var path = text.substring(7)
+                if (path.startsWith("//")) path = path.removePrefix("//")
+                if (!path.startsWith("/")) path = "/$path"
+                fileUrl(URLDecoder.decode(path, "UTF-8"))
+            }
             Regex("^:?\\d{2,5}(/.*)?$").matches(text) -> "http://localhost:" + text.removePrefix(":")
             Regex("^(localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1])(:\\d+)?(/.*)?$", RegexOption.IGNORE_CASE).matches(text) ->
                 "http://" + text.replace("0.0.0.0", "localhost")

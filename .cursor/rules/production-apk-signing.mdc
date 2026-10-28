@@ -1,0 +1,35 @@
+---
+description: How to build production com.termfold.app release APK and signing (no secrets in repo)
+alwaysApply: true
+---
+
+# Production APK signing (com.termfold.app)
+
+## Where secrets live (never commit)
+
+| Item | Path |
+|------|------|
+| Release keystore | `.termfold/termfold-release.jks` (preferred) or `termfold-release.jks` at repo root |
+| Passwords | `.termfold/signing.properties` via `bash tools/save-signing-config.sh`, or `local.properties`, or env |
+| Template | `local.properties.example`, `.termfold/README-signing.txt` |
+
+Use the **same** `termfold-release.jks` that signs GitHub/Play releases. A new `tools/make-keystore.ps1` key will **not** update an existing store install without uninstall.
+
+## Build commands
+
+- **Store-matching signed release** (requires keystore + passwords):
+  `bash tools/build-production-apk.sh`
+- **Fallback** (no keystore on machine): `./gradlew :app:assembleAppRelease` signs with **debug** key — sideload only; does **not** replace Play/GitHub install in place.
+
+Output: `app/build/outputs/apk/app/release/TermFold-app-release.apk` (`applicationId` `com.termfold.app`).
+
+Install keeping data (same signature): `adb install -r app/build/outputs/apk/app/release/TermFold-app-release.apk`
+
+## Release vs debug behavior
+
+- `appRelease`: R8 minify + shrink; browser needs keeps in `app/proguard-rules.pro` (`com.termfold.app.preview.**`, Gecko delegates).
+- `appDebug`: no minify; browser works without extra keeps.
+
+## Do not store signing material in
+
+- Git, OpenSpec, session_memory_write, or chat logs. TermFold MCP `session_secret_*` is for automation browser credentials, not Android release keys.

@@ -18,8 +18,8 @@ android {
         // runs in the untrusted_app domain and execve is denied outright. This is exactly why
         // Termux itself pins targetSdk=28. Without it the bundled PRoot cannot start at all.
         targetSdk = 28
-        versionCode = 18
-        versionName = "2.3"
+        versionCode = 19
+        versionName = "2.3.1"
     }
 
     androidResources {
@@ -41,12 +41,18 @@ android {
             //   termfold.keyPassword=...     / TERMFOLD_KEY_PASSWORD
             val local = Properties()
             rootProject.file("local.properties").takeIf { it.isFile }?.inputStream()?.use { stream -> local.load(stream) }
+            rootProject.file(".termfold/signing.properties").takeIf { it.isFile }?.inputStream()?.use { stream ->
+                local.load(stream)
+            }
             fun secret(key: String, env: String): String? =
                 local.getProperty(key) ?: System.getenv(env)
 
-            val keystore = rootProject.file("termfold-release.jks")
+            val keystore = sequenceOf(
+                rootProject.file(".termfold/termfold-release.jks"),
+                rootProject.file("termfold-release.jks"),
+            ).firstOrNull { it.isFile }
             val storePass = secret("termfold.storePassword", "TERMFOLD_STORE_PASSWORD")
-            if (keystore.isFile && storePass != null) {
+            if (keystore != null && storePass != null) {
                 storeFile = keystore
                 storePassword = storePass
                 keyAlias = "termfold"
@@ -88,7 +94,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfigs.getByName("release").takeIf { it.storeFile != null }?.let { signingConfig = it }
+            // Unsigned release APKs cannot be installed ("package appears to be invalid"). Use the
+            // release keystore when present; otherwise sign with the debug key for local testing only.
+            signingConfig = when {
+                releaseSigning.storeFile != null -> releaseSigning
+                else -> signingConfigs.getByName("debug")
+            }
         }
     }
 

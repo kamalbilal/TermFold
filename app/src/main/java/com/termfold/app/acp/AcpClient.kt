@@ -174,6 +174,8 @@ data class AcpUiState(
     /** True while a prompt is being worked on — drives the thinking indicators. */
     val agentBusy: Boolean = false,
     val pendingPermission: AcpPendingPermission? = null,
+    val pendingAskQuestion: AcpPendingAskQuestion? = null,
+    val askQuestionsByUserMessageId: Map<Long, AskQuestionTurnSnapshot> = emptyMap(),
     val authMethods: List<String> = emptyList(),
     val errorDetail: String = "",
     /** What the agent said it accepts in prompts; unsupported content is sent as file links. */
@@ -214,14 +216,25 @@ class AcpClient(
     private val sessionKey: String,
     private val agent: AcpAgent,
     val workspaceGuestDir: String,
-    private val automationPromptPrefix: (() -> String)? = null,
+    private val automationPromptPrefix: ((userText: String) -> String)? = null,
+    private val agentMemoryPrefix: ((userText: String) -> String)? = null,
     private val extraPromptPrefix: ((userText: String) -> String)? = null,
+    private val projectRulesPrefix: (() -> String)? = null,
+    private val agentMemoryTools: Boolean = false,
     private val automationReadOnlyGuestRoot: String? = null,
     private val automationGuardrails: (() -> AutomationGuardrailContext?)? = null,
     private val pmMode: Boolean = false,
+    private val prReviewMode: Boolean = false,
 ) {
 
     private val automationMode: Boolean = automationPromptPrefix != null
+
+    /** False for clients created before project-rules wiring; forces recreation in the session screen. */
+    internal fun hasProjectRulesHook(): Boolean = projectRulesPrefix != null
+
+    internal fun usesAgentMemoryTools(): Boolean = agentMemoryTools
+
+    internal fun usesPrReviewMode(): Boolean = prReviewMode
 
     private val _state = MutableStateFlow(AcpUiState())
     val state: StateFlow<AcpUiState> = _state.asStateFlow()
@@ -289,7 +302,18 @@ class AcpClient(
         process = null
         agentSessionId = null
         failPending("Agent restarted")
-        _state.update { it.copy(phase = AcpPhase.CONNECTING, errorDetail = "", pendingPermission = null) }
+        _state.update { state ->
+            state.copy(
+                phase = AcpPhase.CONNECTING,
+                errorDetail = "",
+                pendingPermission = null,
+                pendingAskQuestion = null,
+                askQuestionsByUserMessageId = askQuestionsScrubStalePending(
+                    state.askQuestionsByUserMessageId,
+                    null,
+                ),
+            )
+        }
         scope.launch {
             try {
                 begin()
@@ -918,6 +942,8 @@ class AcpClient(
             workspaceGuestDir,
             automationMode = automationMode,
             pmMode = pmMode,
+            prReviewMode = prReviewMode,
+            agentMemoryTools = agentMemoryTools,
         )
 
     private suspend fun openSession(updateListed: Boolean = true) {
@@ -980,6 +1006,7 @@ class AcpClient(
         images: List<AcpBlock.Image>,
         files: List<AcpBlock.TextFile> = emptyList(),
     ) {
+        if (_state.value.pendingAskQuestion != null) return
         // A turn still ending (just stopped, say) must answer before the next prompt goes.
         if (turnInFlight) enqueue(text, images, files) else sendNow(text, images, files)
     }
@@ -997,6 +1024,7 @@ class AcpClient(
         images: List<AcpBlock.Image>,
         files: List<AcpBlock.TextFile>,
     ) {
+        if (_state.value.pendingAskQuestion != null) return
         if (!ensureWireSessionForSend()) return
         if (_state.value.checkpoints.wireResyncing) {
             enqueue(text, images, files)
@@ -1141,25 +1169,21 @@ class AcpClient(
         files: List<AcpBlock.TextFile>,
     ): JSONArray? {
         val caps = _state.value
-        val wireText = buildString {
-            pendingWireContext?.let { ctx ->
-                append(ctx)
-                append("\n\n---\n\n")
-                pendingWireContext = null
-            }
-            val prefix = automationPromptPrefix?.invoke()?.takeIf { it.isNotBlank() }
-                ?: extraPromptPrefix?.invoke(text)?.takeIf { it.isNotBlank() }
-            prefix?.let {
-                append(it)
-                append("\n\n---\n\n")
-            }
-            val body = if (automationMode) {
-                AutomationSpecCommand.requestFromPrompt(text)?.let(AutomationSpecCommand::toWirePrompt) ?: text
-            } else {
-                text
-            }
-            append(body)
+        val wireCtx = pendingWireContext
+        pendingWireContext = null
+        val body = if (automationMode) {
+            AutomationSpecCommand.requestFromPrompt(text)?.let(AutomationSpecCommand::toWirePrompt) ?: text
+        } else {
+            text
         }
+        val wireText = composeWirePromptText(
+            pendingWireContext = wireCtx,
+            automationPrefix = automationPromptPrefix?.invoke(body),
+            agentMemoryPrefix = agentMemoryPrefix?.invoke(body),
+            extraPrefix = extraPromptPrefix?.invoke(text),
+            projectRulesPrefix = projectRulesPrefix?.invoke(),
+            userText = body,
+        )
         val content = JSONArray()
         if (wireText.isNotBlank()) content.put(JSONObject().put("type", "text").put("text", wireText))
 
@@ -1273,6 +1297,7 @@ class AcpClient(
             turnInFlight = turnInFlight,
             agentBusy = ui.agentBusy,
             pendingPermission = ui.pendingPermission != null,
+            pendingAskQuestion = ui.pendingAskQuestion != null,
             wireResyncing = ui.checkpoints.wireResyncing,
         )
     }
@@ -1287,6 +1312,7 @@ class AcpClient(
 
     /** Keeps a message for when the current turn ends. */
     fun enqueue(text: String, images: List<AcpBlock.Image>, files: List<AcpBlock.TextFile>) {
+        if (_state.value.pendingAskQuestion != null) return
         val item = AcpQueuedPrompt(++queueCounter, text, images, files)
         _state.update { it.copy(queued = it.queued + item) }
         // Writing a new message after Stop means carrying on: the queue runs again.
@@ -1491,6 +1517,7 @@ class AcpClient(
         val sessionId = agentSessionId
         stoppedByUser = true
         steerId = null
+        abandonPendingAskQuestion(sendCancelledRpc = true)
         if (!sessionId.isNullOrBlank()) {
             scope.launch { notify("session/cancel", JSONObject().put("sessionId", sessionId)) }
         }
@@ -1658,6 +1685,10 @@ class AcpClient(
             val kept = state.items.filter { it.id < ghostFrom }
             state.copy(
                 items = kept,
+                askQuestionsByUserMessageId = askQuestionsPrunedToTimeline(
+                    kept,
+                    state.askQuestionsByUserMessageId,
+                ),
                 checkpoints = state.checkpoints.copy(
                     ghostFromItemId = null,
                     preTurnByMessageId = prunePreTurnMap(kept, state.checkpoints.preTurnByMessageId),
@@ -1674,6 +1705,10 @@ class AcpClient(
             val kept = state.items.filter { it.id < userMessageId }
             state.copy(
                 items = kept,
+                askQuestionsByUserMessageId = askQuestionsPrunedToTimeline(
+                    kept,
+                    state.askQuestionsByUserMessageId,
+                ),
                 checkpoints = state.checkpoints.copy(
                     ghostFromItemId = null,
                     preTurnByMessageId = prunePreTurnMap(kept, state.checkpoints.preTurnByMessageId),
@@ -1821,8 +1856,115 @@ class AcpClient(
         _state.update { it.copy(pendingPermission = null) }
     }
 
+    fun answerPendingAskQuestion(answers: List<AskQuestionAnswer>) {
+        val pending = _state.value.pendingAskQuestion ?: return
+        if (!askQuestionAnswersValid(pending.questions, answers)) return
+        val result = AcpAskQuestionParser.buildAnsweredResult(answers)
+        respondAskQuestionRpc(pending.requestId, result)
+        commitAskSnapshot(pending, AskQuestionPhase.Answered, answers)
+    }
+
+    fun skipPendingAskQuestion() {
+        val pending = _state.value.pendingAskQuestion ?: return
+        val result = AcpAskQuestionParser.buildSkippedResult()
+        respondAskQuestionRpc(pending.requestId, result)
+        commitAskSnapshot(pending, AskQuestionPhase.Skipped, null)
+    }
+
+    private fun respondAskQuestionRpc(requestId: Any, result: JSONObject) {
+        writeLine(
+            JSONObject()
+                .put("jsonrpc", "2.0")
+                .put("id", requestId)
+                .put("result", result)
+                .toString(),
+        )
+        _state.update { it.copy(pendingAskQuestion = null) }
+    }
+
+    private fun abandonPendingAskQuestion(sendCancelledRpc: Boolean) {
+        val pending = _state.value.pendingAskQuestion ?: return
+        if (sendCancelledRpc && writer != null) {
+            respondAskQuestionRpc(pending.requestId, AcpAskQuestionParser.buildCancelledResult())
+        } else {
+            _state.update { it.copy(pendingAskQuestion = null) }
+        }
+        commitAskSnapshot(pending, AskQuestionPhase.Cancelled, null)
+    }
+
+    private fun commitAskSnapshot(
+        pending: AcpPendingAskQuestion,
+        phase: AskQuestionPhase,
+        answers: List<AskQuestionAnswer>?,
+    ) {
+        val snapshot = AskQuestionTurnSnapshot(
+            toolCallId = pending.toolCallId,
+            title = pending.title,
+            questions = pending.questions,
+            phase = phase,
+            answers = answers,
+        )
+        _state.update {
+            it.copy(
+                pendingAskQuestion = null,
+                askQuestionsByUserMessageId = it.askQuestionsByUserMessageId + (pending.userMessageId to snapshot),
+            )
+        }
+        persistTimeline()
+    }
+
+    private fun latestUserMessageId(): Long? =
+        _state.value.items.filterIsInstance<AcpItem.UserMessage>().lastOrNull()?.id
+
+    private fun handleAskQuestion(id: Any, params: JSONObject?) {
+        if (agent.id != "cursor") {
+            respondError(id, "cursor/ask_question requires Cursor agent")
+            return
+        }
+        if (_state.value.pendingAskQuestion != null) {
+            respondError(id, "Another question is pending")
+            return
+        }
+        val parsed = AcpAskQuestionParser.parseRequest(params)
+        if (parsed == null) {
+            respondError(id, "Invalid ask_question payload")
+            return
+        }
+        val userMessageId = latestUserMessageId()
+        if (userMessageId == null) {
+            writeLine(
+                JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", id)
+                    .put("result", AcpAskQuestionParser.buildCancelledResult())
+                    .toString(),
+            )
+            return
+        }
+        val pending = AcpPendingAskQuestion(
+            requestId = id,
+            toolCallId = parsed.toolCallId,
+            title = parsed.title,
+            questions = parsed.questions,
+            userMessageId = userMessageId,
+        )
+        val snapshot = AskQuestionTurnSnapshot(
+            toolCallId = parsed.toolCallId,
+            title = parsed.title,
+            questions = parsed.questions,
+            phase = AskQuestionPhase.Pending,
+        )
+        _state.update {
+            it.copy(
+                pendingAskQuestion = pending,
+                askQuestionsByUserMessageId = it.askQuestionsByUserMessageId + (userMessageId to snapshot),
+            )
+        }
+    }
+
     /** Ends the agent process. The stored agent install survives; only the process tree dies. */
     fun close() {
+        abandonPendingAskQuestion(sendCancelledRpc = true)
         persistTimeline()
         closedByUser = true
         idleDisconnected = false
@@ -1844,6 +1986,7 @@ class AcpClient(
         idleDisconnected = true
         running.set(false)
         failPending("Idle disconnect")
+        abandonPendingAskQuestion(sendCancelledRpc = true)
         runCatching { process?.destroy() }
         process = null
         writer = null
@@ -1852,6 +1995,7 @@ class AcpClient(
                 phase = AcpPhase.CLOSED,
                 agentBusy = false,
                 pendingPermission = null,
+                pendingAskQuestion = null,
                 queued = emptyList(),
                 items = state.items + AcpItem.Notice(nextItemId(), noticeText),
             )
@@ -1916,6 +2060,7 @@ class AcpClient(
                 val id = message.get("id")
                 when (method) {
                     "session/request_permission" -> handlePermissionRequest(id, message.optJSONObject("params"))
+                    "cursor/ask_question" -> handleAskQuestion(id, message.optJSONObject("params"))
                     "fs/read_text_file", "fs/write_text_file" -> respondError(
                         id,
                         "TermFold does not expose the host filesystem",
@@ -2369,16 +2514,28 @@ class AcpClient(
             it.copy(
                 items = snapshot.items,
                 checkpoints = AcpTimelineCodec.durableCheckpoints(snapshot.checkpoints),
+                askQuestionsByUserMessageId = askQuestionsScrubStalePending(
+                    snapshot.askQuestionsByUserMessageId,
+                    null,
+                ),
+                pendingAskQuestion = null,
             )
         }
     }
 
     private fun persistTimeline() {
-        val state = _state.value
+        var state = _state.value
+        val prunedAsks = askQuestionsPrunedToTimeline(state.items, state.askQuestionsByUserMessageId)
+        if (prunedAsks != state.askQuestionsByUserMessageId) {
+            _state.update { it.copy(askQuestionsByUserMessageId = prunedAsks) }
+            state = _state.value
+        }
+        val durableAsks = prunedAsks.filterValues { it.phase != AskQuestionPhase.Pending }
         val snapshot = AcpPersistedTimeline(
             items = state.items,
             checkpoints = AcpTimelineCodec.durableCheckpoints(state.checkpoints),
             pendingWireContext = pendingWireContext,
+            askQuestionsByUserMessageId = durableAsks,
         )
         runCatching {
             AcpTimelineStore.save(context, sessionKey, snapshot)

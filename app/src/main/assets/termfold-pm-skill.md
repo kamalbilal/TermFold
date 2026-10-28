@@ -39,6 +39,12 @@ For product questions, write a Decision memo and a fenced JSON block:
 }
 ```
 
+## PM memory workflow
+
+1. **Read** — On a new product question or thin context: `pm_memory_search` with a query from the user's goal.
+2. **Write** — After decisions or material findings: `pm_memory_write` (not chat-only).
+3. **Get** — `pm_memory_get` when you need the full body of a search hit.
+
 ## Tools (MCP `termfold-pm-memory`)
 
 - `pm_memory_search` — this PM session only

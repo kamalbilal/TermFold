@@ -99,18 +99,20 @@ fun AutomationAgentSessionScreen(
                     constraintsFile = constraintsHostFile,
                 )
             },
-            automationPromptPrefix = {
+            automationPromptPrefix = { userQuery ->
                 AutomationPromptAssembler.assemble(
                     context = context,
                     projectId = project.id,
                     sessionId = session.id,
                     linkedFolder = linkedFolder,
                     currentHost = Preview.state.value.url?.substringAfter("://")?.substringBefore('/'),
+                    userQuery = userQuery,
                 )
             },
             previewProjectDirOverride = previewDir,
             automationReadOnlyGuestRoot = readOnlyGuest,
             automationSessionKey = sessionKey,
+            projectRulesFolder = linkedFolder,
         )
     }
 }

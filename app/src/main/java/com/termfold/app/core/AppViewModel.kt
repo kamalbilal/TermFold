@@ -43,6 +43,7 @@ import com.termfold.app.prreview.PrReviewParse
 import com.termfold.app.prreview.PrReviewPaths
 import com.termfold.app.prreview.PrReviewSession
 import com.termfold.app.prreview.PrReviewTurnSync
+import com.termfold.app.acp.AcpItem
 import com.termfold.app.shell.DistroMigration
 import com.termfold.app.shell.Projects
 import com.termfold.app.shell.ShellRuntime
@@ -928,10 +929,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun saveReviewParse(sessionId: String, parse: PrReviewParse) {
+    fun saveReviewParse(sessionId: String, userMessageId: Long, parse: PrReviewParse) {
         viewModelScope.launch {
             val session = prReviews.value.session(sessionId) ?: return@launch
-            upsertReviewSession(PrReviewTurnSync.apply(session, parse))
+            upsertReviewSession(PrReviewTurnSync.apply(session, parse, userMessageId))
+        }
+    }
+
+    fun syncPrReviewReportsToTimeline(sessionId: String, items: List<AcpItem>, localReports: Map<Long, String>) {
+        viewModelScope.launch {
+            val session = prReviews.value.session(sessionId) ?: return@launch
+            val merged = session.reportsByUserMessageId + localReports
+            val next = PrReviewTurnSync.realignToTimeline(session.copy(reportsByUserMessageId = merged), items)
+            if (next != session) upsertReviewSession(next)
         }
     }
 

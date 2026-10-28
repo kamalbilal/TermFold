@@ -10,9 +10,11 @@ object AcpWakePolicy {
         turnInFlight: Boolean,
         agentBusy: Boolean,
         pendingPermission: Boolean,
+        pendingAskQuestion: Boolean,
         wireResyncing: Boolean,
     ): Boolean {
         if (pendingPermission) return true
+        if (pendingAskQuestion) return true
         if (wireResyncing) return true
         if (turnInFlight || agentBusy) return true
         return false

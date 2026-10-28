@@ -15,7 +15,12 @@ object PrReviewPrompt {
         appendLine()
         appendLine("Do not use the browser or look up docs on the web unless the user explicitly asks to verify online.")
         appendLine()
-        appendLine("Emit exactly one fenced JSON block with language tag ${PrReviewReportParser.FENCE} using schemaVersion 1:")
+        appendLine(
+            "When the review is ready, call MCP tool **${PrReviewReportBridge.MCP_TOOL_NAME}** (termfold-pr-review) " +
+                "with the full schemaVersion 1 report object before asking which finding ids to fix.",
+        )
+        appendLine("Use strict JSON in the tool: double quotes, no trailing commas, escape newlines in strings.")
+        appendLine("schemaVersion 1 shape:")
         appendLine("{")
         appendLine("  \"schemaVersion\": 1,")
         appendLine("  \"summary\": \"what this PR does\",")
@@ -30,6 +35,11 @@ object PrReviewPrompt {
         appendLine("  \"coverage\": { \"reviewed\": [\"paths\"], \"skipped\": [\"paths\"] },")
         appendLine("  \"missingTests\": [], \"openQuestions\": []")
         appendLine("}")
+        appendLine("If the tool returns an error, fix the report and call it again. Do not paste the full report JSON in chat after a successful submit.")
+        appendLine(
+            "Legacy fallback only if the tool is unavailable: one fenced block with language tag ${PrReviewReportParser.FENCE} " +
+                "(not plain ```json).",
+        )
         appendLine("Write for a busy human, not a compiler. Use short, everyday words.")
         appendLine("summary: one or two plain sentences — what changed, and what could break.")
         appendLine("title: a simple headline (no jargon unless you immediately explain it).")
@@ -37,7 +47,7 @@ object PrReviewPrompt {
         appendLine("suggestion: \"How to fix\" in one short sentence.")
         appendLine("missingTests and openQuestions: same — short and concrete.")
         appendLine("Each finding has exactly one surface. Use ios only if files.txt includes iOS paths; otherwise omit ios findings.")
-        appendLine("After the JSON, ask which finding ids to fix (all, a subset, or none), in plain words.")
+        appendLine("After a successful submit, ask which finding ids to fix (all, a subset, or none), in plain words.")
         appendLine("Do not apply code changes until the user chooses ids. Do not push.")
         appendLine("Never modify the golden project tree; this workspace is the isolated PR copy.")
     }

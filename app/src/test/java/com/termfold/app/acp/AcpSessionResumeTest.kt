@@ -150,6 +150,25 @@ class AcpConversationWiresTest {
 class AcpTimelineCodecTest {
 
     @Test
+    fun roundTripKeepsAskQuestionMap() {
+        val snapshot = AskQuestionTurnSnapshot(
+            toolCallId = "tc",
+            title = "T",
+            questions = listOf(
+                AskQuestionSpec("q", "Q?", listOf(AskQuestionOption("a", "A")), false),
+            ),
+            phase = AskQuestionPhase.Answered,
+            answers = listOf(AskQuestionAnswer("q", listOf("a"))),
+        )
+        val timeline = AcpPersistedTimeline(
+            items = listOf(AcpItem.UserMessage(1_000_001, "hi", emptyList())),
+            askQuestionsByUserMessageId = mapOf(1_000_001L to snapshot),
+        )
+        val restored = AcpTimelineCodec.decode(AcpTimelineCodec.encode(timeline))
+        assertEquals(snapshot, restored.askQuestionsByUserMessageId[1_000_001L])
+    }
+
+    @Test
     fun roundTripKeepsUserAndAgentTurns() {
         val items = listOf(
             AcpItem.UserMessage(1_000_001, "first", emptyList()),

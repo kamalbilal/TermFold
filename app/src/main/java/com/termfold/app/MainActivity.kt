@@ -829,7 +829,12 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                                     destination = Destination.PrReviewSession(id)
                                 }
                             },
-                            onSaveParse = { parse -> viewModel.saveReviewParse(session.id, parse) },
+                            onSaveParse = { userMessageId, parse ->
+                                viewModel.saveReviewParse(session.id, userMessageId, parse)
+                            },
+                            onSyncReportsToTimeline = { items, reports ->
+                                viewModel.syncPrReviewReportsToTimeline(session.id, items, reports)
+                            },
                             filesOpen = filesOpen,
                             onToggleFiles = { filesOpen = !filesOpen },
                             modifier = Modifier.windowInsetsPadding(

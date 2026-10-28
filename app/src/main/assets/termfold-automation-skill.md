@@ -2,9 +2,21 @@
 
 Use with **termfold-browser** during Automation sessions. Never use Cursor built-in web search or WebFetch — open pages in the in-app browser instead.
 
+## Memory workflow (mandatory habit)
+
+1. **Read before you guess** — On a new task or when context is thin:
+   - `session_memory_search` with a query from the user's goal.
+   - If you know the site hostname, also `nav_memory_search` with that `site_key` and a UI/flow query.
+2. **Write what you learned** — After a useful discovery or decision:
+   - **This session only** → `session_memory_write` (kinds: goal, finding, decision, error, note, …).
+   - **Reusable clicks/menus on a site** → `nav_memory_write` with `site_key` = hostname (navigation only).
+3. **Secrets** → `session_secret_put` / `session_secret_get` only. Never put passwords in memory chunks or global nav.
+
+TermFold also prepends a short memory summary each turn; still run search when the task is new or specific.
+
 ## Tools (MCP `termfold-automation-memory`)
 
-- `session_memory_search` — recall prior steps in this session
+- `session_memory_search` / `session_memory_write` / `session_memory_get` — private to this automation session
 - `session_log_recent` — recent browser events
 - `nav_memory_search` / `nav_memory_write` — global navigation hints (never store passwords globally)
 - `session_secret_put` / `session_secret_get` — session-only credentials

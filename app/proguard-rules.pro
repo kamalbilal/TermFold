@@ -26,7 +26,26 @@
 
 # GeckoView JNI and reflection.
 -keep class org.mozilla.geckoview.** { *; }
+-keep class org.mozilla.gecko.** { *; }
 -dontwarn org.mozilla.**
+
+# Built-in gecko-termfold bridge + preview engine: Gecko calls session/extension delegates from
+# native code; R8 must not strip or rename them (release-only crashes when opening browser).
+-keep class com.termfold.app.preview.** { *; }
+-keep class com.termfold.app.preview.engine.** { *; }
+-keepclassmembers class * implements org.mozilla.geckoview.GeckoSession$ProgressDelegate { *; }
+-keepclassmembers class * implements org.mozilla.geckoview.GeckoSession$ContentDelegate { *; }
+-keepclassmembers class * implements org.mozilla.geckoview.GeckoSession$NavigationDelegate { *; }
+-keepclassmembers class * implements org.mozilla.geckoview.GeckoSession$HistoryDelegate { *; }
+-keepclassmembers class * implements org.mozilla.geckoview.WebExtension$MessageDelegate { *; }
+-keepclassmembers class * implements org.mozilla.geckoview.WebExtension$PortDelegate { *; }
+
+# SnakeYAML (transitive) references java.beans, which Android does not ship.
+-dontwarn java.beans.BeanInfo
+-dontwarn java.beans.FeatureDescriptor
+-dontwarn java.beans.IntrospectionException
+-dontwarn java.beans.Introspector
+-dontwarn java.beans.PropertyDescriptor
 
 # The file editor's page calls back into these through addJavascriptInterface.
 -keepclassmembers class * {

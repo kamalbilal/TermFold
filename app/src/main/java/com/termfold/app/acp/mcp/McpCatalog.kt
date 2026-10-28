@@ -38,6 +38,8 @@ object McpCatalog {
         cursorAgent: Boolean,
         automationMode: Boolean = false,
         pmMode: Boolean = false,
+        prReviewMode: Boolean = false,
+        agentMemoryTools: Boolean = false,
     ): List<McpServerEntry> {
 
         val merged = linkedMapOf<String, McpServerEntry>()
@@ -57,11 +59,14 @@ object McpCatalog {
         }
 
         builtinBrowser(context)?.let { merged[it.name] = it }
-        if (automationMode) {
+        if (automationMode || agentMemoryTools) {
             builtinAutomationMemory(context)?.let { merged[it.name] = it }
         }
         if (pmMode) {
             builtinPmMemory(context)?.let { merged[it.name] = it }
+        }
+        if (prReviewMode) {
+            builtinPrReview(context)?.let { merged[it.name] = it }
         }
 
         return merged.values.toList().sortedWith(compareBy({ it.source.ordinal }, { it.name.lowercase() }))
@@ -76,6 +81,8 @@ object McpCatalog {
         workspaceGuestDir: String,
         automationMode: Boolean = false,
         pmMode: Boolean = false,
+        prReviewMode: Boolean = false,
+        agentMemoryTools: Boolean = false,
     ): JSONArray {
 
         val cursorAgent = agentId == "cursor"
@@ -84,7 +91,7 @@ object McpCatalog {
 
         val array = JSONArray()
 
-        list(context, workspaceGuestDir, cursorAgent, automationMode, pmMode).forEach { entry ->
+        list(context, workspaceGuestDir, cursorAgent, automationMode, pmMode, prReviewMode, agentMemoryTools).forEach { entry ->
 
             val configDefault = !entry.configDisabled
 
@@ -153,6 +160,27 @@ object McpCatalog {
         return McpServerEntry(
             key = McpJson.keyFor(McpSource.BUILTIN, "termfold-pm-memory"),
             name = "termfold-pm-memory",
+            source = McpSource.BUILTIN,
+            transport = McpTransport.Stdio(
+                command = node,
+                args = listOf(tool, "mcp"),
+                env = emptyMap(),
+            ),
+            configPath = null,
+            authHints = emptyList(),
+            configDisabled = false,
+        )
+    }
+
+    private fun builtinPrReview(context: Context): McpServerEntry? {
+        val rootfs = ShellPaths.rootfsDir(context)
+        val node = "/opt/node/bin/node"
+        val tool = ShellSetup.PR_REVIEW_TOOL
+        if (!File(rootfs, node.trimStart('/')).exists() || !File(rootfs, tool.trimStart('/')).isFile) return null
+        BrowserBridge.start(context)
+        return McpServerEntry(
+            key = McpJson.keyFor(McpSource.BUILTIN, "termfold-pr-review"),
+            name = "termfold-pr-review",
             source = McpSource.BUILTIN,
             transport = McpTransport.Stdio(
                 command = node,

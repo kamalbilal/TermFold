@@ -2,6 +2,7 @@ package com.termfold.app.prreview
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PrReviewPersistenceTest {
@@ -77,6 +78,31 @@ class PrReviewPersistenceTest {
     }
 
     @Test
+    fun roundTripReportsByUserMessageId() {
+        val jsonOne =
+            """{"schemaVersion":1,"summary":"one","risk":"low","findings":[],"coverage":{"reviewed":[],"skipped":[]},"missingTests":[],"openQuestions":[]}"""
+        val jsonTwo =
+            """{"schemaVersion":1,"summary":"two","risk":"low","findings":[],"coverage":{"reviewed":[],"skipped":[]},"missingTests":[],"openQuestions":[]}"""
+        val original = PrReviewData(
+            sessions = listOf(
+                PrReviewSession(
+                    id = "s1",
+                    name = "Fix login",
+                    url = "https://github.com/owner/repo/pull/12",
+                    owner = "owner",
+                    repo = "repo",
+                    number = 12,
+                    headBranch = "fix-login",
+                    folderId = "folder-1",
+                    reportsByUserMessageId = mapOf(1L to jsonOne, 3L to jsonTwo),
+                ),
+            ),
+        )
+        val decoded = PrReviewPersistence.decode(PrReviewPersistence.encode(original))
+        assertEquals(original, decoded)
+    }
+
+    @Test
     fun upsertKeepsPosition() {
         val first = PrReviewSession(
             id = "a",
@@ -119,6 +145,7 @@ class PrReviewPersistenceTest {
         assertEquals("ws-2", next.workspaceId)
         assertNull(next.lastReportJson)
         assertNull(next.lastParseError)
+        assertTrue(next.reportsByUserMessageId.isEmpty())
         assertEquals("cursor", next.acpAgentId)
     }
 }

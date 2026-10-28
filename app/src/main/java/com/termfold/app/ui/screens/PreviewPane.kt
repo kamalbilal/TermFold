@@ -501,7 +501,10 @@ fun PreviewPane(
             tabHost.attachWebView(activeTabId, view)
         }
         val driverWebView = if (useGeckoEngine) {
-            driverStubWebView ?: return@LaunchedEffect
+            driverStubWebView ?: WebView(context).also { stub ->
+                stub.visibility = View.GONE
+                driverStubWebView = stub
+            }
         } else {
             webView!!
         }
@@ -524,7 +527,7 @@ fun PreviewPane(
                     val target = Viewport.entries.firstOrNull { it.name.equals(mode, true) } ?: return false
                     viewportName = target.name
                     if (useGeckoEngine) {
-                        kotlinx.coroutines.runBlocking {
+                        scope.launch {
                             GeckoViewport.apply(surface, target.name.lowercase())
                         }
                         return true
@@ -658,7 +661,11 @@ fun PreviewPane(
                     return closed
                 }
                 override fun ensureResumed() {
-                    if (!useGeckoEngine) webView?.onResume()
+                    if (useGeckoEngine) {
+                        geckoHost?.bindToDisplay()
+                    } else {
+                        webView?.onResume()
+                    }
                 }
             },
         )
@@ -673,6 +680,7 @@ fun PreviewPane(
     LaunchedEffect(driver, visible) {
         val d = driver ?: return@LaunchedEffect
         val sessionKey = BrowserBridge.automationSessionKey
+            ?: BrowserBridge.codingSessionKey?.let { PreviewUrlRouter.sessionKeyForCoding(it) }
         if (visible) {
             if (sessionKey != null) {
                 val surface = previewSurface()
@@ -691,9 +699,8 @@ fun PreviewPane(
                 }
             }
             BrowserBridge.controller = d
-        } else {
-            sessionKey?.let { BrowserSessionRegistry.restoreHeadless(context.applicationContext, it) }
-            if (BrowserBridge.controller === d) BrowserBridge.controller = null
+        } else if (BrowserBridge.controller === d) {
+            BrowserBridge.controller = null
         }
     }
     // Keep the page interactive whenever it is on screen, including while the agent is idle or the
@@ -703,8 +710,11 @@ fun PreviewPane(
         if (parked || !visible) view.onPause() else view.onResume()
     }
 
-    DisposableEffect(Unit) {
-        onDispose { if (BrowserBridge.controller === driver) BrowserBridge.controller = null }
+    DisposableEffect(storageContextId) {
+        onDispose {
+            if (BrowserBridge.controller === driver) BrowserBridge.controller = null
+            BrowserSessionRegistry.restoreHeadless(context.applicationContext, storageContextId)
+        }
     }
 
     BackHandler(enabled = networkOpen && useGeckoEngine) { networkOpen = false }

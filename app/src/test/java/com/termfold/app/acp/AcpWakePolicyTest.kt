@@ -13,6 +13,7 @@ class AcpWakePolicyTest {
                 turnInFlight = false,
                 agentBusy = false,
                 pendingPermission = false,
+                pendingAskQuestion = false,
                 wireResyncing = false,
             ),
         )
@@ -25,6 +26,7 @@ class AcpWakePolicyTest {
                 turnInFlight = true,
                 agentBusy = false,
                 pendingPermission = false,
+                pendingAskQuestion = false,
                 wireResyncing = false,
             ),
         )
@@ -33,6 +35,7 @@ class AcpWakePolicyTest {
                 turnInFlight = false,
                 agentBusy = true,
                 pendingPermission = false,
+                pendingAskQuestion = false,
                 wireResyncing = false,
             ),
         )
@@ -41,6 +44,7 @@ class AcpWakePolicyTest {
                 turnInFlight = false,
                 agentBusy = false,
                 pendingPermission = true,
+                pendingAskQuestion = false,
                 wireResyncing = false,
             ),
         )
@@ -49,6 +53,16 @@ class AcpWakePolicyTest {
                 turnInFlight = false,
                 agentBusy = false,
                 pendingPermission = false,
+                pendingAskQuestion = true,
+                wireResyncing = false,
+            ),
+        )
+        assertTrue(
+            AcpWakePolicy.keepsCpuAwake(
+                turnInFlight = false,
+                agentBusy = false,
+                pendingPermission = false,
+                pendingAskQuestion = false,
                 wireResyncing = true,
             ),
         )

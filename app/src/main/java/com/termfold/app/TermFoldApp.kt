@@ -19,4 +19,9 @@ class TermFoldApp : Application() {
             com.termfold.app.notify.SessionWatcher.onBell(this, key, title)
         }
     }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        com.termfold.app.preview.engine.BrowserSessionRegistry.onTrimMemory(level)
+    }
 }

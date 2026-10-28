@@ -36,7 +36,7 @@ return {root:document,error:null};}
 function captchaDetect(root){root=root||document;var txt=(root.body&&root.body.innerText||'').toLowerCase();
 if(/verify you are human|complete the security check|unusual traffic|are you a robot/.test(txt))return true;
 var ifr=root.querySelectorAll('iframe');for(var i=0;i<ifr.length;i++){var s=(ifr[i].src||'').toLowerCase();if(/recaptcha|hcaptcha|challenges\\.cloudflare\\.com|captcha/.test(s))return true;}
-var nodes=root.querySelectorAll('[aria-label],[title],[class],[id]');for(var j=0;j<nodes.length;j++){var a=(nodes[j].getAttribute('aria-label')||nodes[j].title||nodes[j].className||nodes[j].id||'').toLowerCase();if(a.indexOf('captcha')>=0)return true;}
+var nodes=root.querySelectorAll('[aria-label],[title],[class],[id]');for(var j=0;j<nodes.length;j++){var a=String(nodes[j].getAttribute('aria-label')||nodes[j].title||nodes[j].className||nodes[j].id||'').toLowerCase();if(a.indexOf('captcha')>=0)return true;}
 return false;}
 function snapshot(o){o=o||{};var fr=resolveFrame(o);if(fr.error)return {error:fr.error};
 var root=fr.root;if(o.scope){root=find(o.scope,fr.root);if(!root)return {error:'scope not found'};}

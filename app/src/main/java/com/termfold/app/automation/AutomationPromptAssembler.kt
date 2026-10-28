@@ -3,6 +3,8 @@ package com.termfold.app.automation
 import android.content.Context
 import com.termfold.app.automation.memory.AutomationMemoryRepository
 import com.termfold.app.core.Folder
+import com.termfold.app.memory.AgentMemoryGuidance
+import com.termfold.app.memory.AgentMemoryWorkflow
 
 object AutomationPromptAssembler {
 
@@ -14,6 +16,7 @@ object AutomationPromptAssembler {
         sessionId: String,
         linkedFolder: Folder?,
         currentHost: String?,
+        userQuery: String = "",
     ): String {
         val sessionKey = AutomationSessionContext.key(projectId, sessionId)
         val docs = AutomationStorage.readMandatoryDocs(context, projectId, sessionId)
@@ -27,12 +30,16 @@ object AutomationPromptAssembler {
         val recent = repo.recentEvents(sessionKey, AutomationInjectCaps.MAX_RECENT_EVENTS).joinToString("\n") { event ->
             "- ${event.type} ${event.url.take(80)} ${event.outcome}: ${event.summary.take(120)}"
         }
-        val memory = repo.searchSessionMemory(sessionKey, currentHost ?: "session", AutomationInjectCaps.MAX_SESSION_CHUNKS)
+        val memoryQuery = userQuery.trim().takeIf { it.isNotBlank() }
+            ?: currentHost?.takeIf { it.isNotBlank() }
+            ?: "session"
+        val memory = repo.searchSessionMemory(sessionKey, memoryQuery, AutomationInjectCaps.MAX_SESSION_CHUNKS)
             .joinToString("\n") {
                 "- ${it.title}: ${it.body.take(AutomationInjectCaps.MAX_CHUNK_CHARS)}"
             }
+        val navQuery = userQuery.trim().takeIf { it.isNotBlank() } ?: "navigation"
         val global = currentHost?.let { host ->
-            repo.searchGlobalNav(host, "navigation", AutomationInjectCaps.MAX_GLOBAL_CHUNKS)
+            repo.searchGlobalNav(host, navQuery, AutomationInjectCaps.MAX_GLOBAL_CHUNKS)
                 .joinToString("\n") {
                     "- ${it.title}: ${it.body.take(AutomationInjectCaps.MAX_CHUNK_CHARS)}"
                 }
@@ -46,6 +53,7 @@ object AutomationPromptAssembler {
                 "Web: do not use built-in web search or WebFetch tools. " +
                     "Use MCP termfold-browser (browser_open, browser_snapshot, browser_click, …) for all web research and pages.",
             )
+            appendLine(AgentMemoryGuidance.promptBlock(AgentMemoryWorkflow.AUTOMATION))
             if (docs.isNotBlank()) {
                 appendLine("## Session documents")
                 appendLine(docs)

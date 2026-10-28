@@ -28,6 +28,7 @@
 
     <application
         android:name=".TermFoldApp"
+        android:largeHeap="true"
         android:allowBackup="false"
         android:networkSecurityConfig="@xml/network_security"
         android:icon="@mipmap/ic_launcher"

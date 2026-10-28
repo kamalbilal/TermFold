@@ -17,12 +17,14 @@ function config() {
 }
 
 function call(action, args) {
-  const { port, token, automation_session_key } = config();
+  const cfg = config();
+  const { port, token } = cfg;
+  const sessionKey = cfg.automation_session_key || cfg.agent_session_key || '';
   const body = Buffer.from(
     JSON.stringify({
       token,
       action,
-      args: Object.assign({ session_key: automation_session_key || '' }, args || {}),
+      args: Object.assign({ session_key: sessionKey }, args || {}),
     }),
   );
   return new Promise((resolve, reject) => {
@@ -53,10 +55,12 @@ function call(action, args) {
 }
 
 const TOOLS = [
-  { name: 'session_memory_search', action: 'memory_session_search', description: 'Semantic search this automation session memory.', props: { query: { type: 'string' }, limit: { type: 'integer' } }, required: ['query'] },
+  { name: 'session_memory_search', action: 'memory_session_search', description: 'Semantic search this automation session (private) memory. Use at task start and when unsure; query from the user goal.', props: { query: { type: 'string' }, limit: { type: 'integer' } }, required: ['query'] },
+  { name: 'session_memory_write', action: 'memory_session_write', description: 'Save a private chunk for this automation session only (goals, findings, decisions). Not for passwords.', props: { kind: { type: 'string' }, title: { type: 'string' }, body: { type: 'string' }, search_text: { type: 'string' }, site_key: { type: 'string' } }, required: ['kind', 'title'] },
+  { name: 'session_memory_get', action: 'memory_session_get', description: 'Fetch one session memory chunk by id from search results.', props: { id: { type: 'integer' } }, required: ['id'] },
   { name: 'session_log_recent', action: 'memory_session_recent', description: 'Recent browser and automation events in this session.', props: { limit: { type: 'integer' } } },
-  { name: 'nav_memory_search', action: 'memory_nav_search', description: 'Search global site navigation memory (no credentials).', props: { site_key: { type: 'string' }, query: { type: 'string' }, limit: { type: 'integer' } }, required: ['site_key', 'query'] },
-  { name: 'nav_memory_write', action: 'memory_nav_write', description: 'Write navigation-only memory for a site (never passwords).', props: { site_key: { type: 'string' }, kind: { type: 'string' }, title: { type: 'string' }, body: { type: 'string' }, search_text: { type: 'string' } }, required: ['site_key', 'kind', 'title'] },
+  { name: 'nav_memory_search', action: 'memory_nav_search', description: 'Search global site navigation memory (no credentials). site_key = hostname.', props: { site_key: { type: 'string' }, query: { type: 'string' }, limit: { type: 'integer' } }, required: ['site_key', 'query'] },
+  { name: 'nav_memory_write', action: 'memory_nav_write', description: 'Save reusable UI/navigation hints for a site for all sessions (never passwords).', props: { site_key: { type: 'string' }, kind: { type: 'string' }, title: { type: 'string' }, body: { type: 'string' }, search_text: { type: 'string' } }, required: ['site_key', 'kind', 'title'] },
   { name: 'session_secret_put', action: 'memory_secret_put', description: 'Store a named secret for this session only.', props: { name: { type: 'string' }, description: { type: 'string' }, payload: { type: 'string' } }, required: ['name', 'payload'] },
   { name: 'session_secret_get', action: 'memory_secret_get', description: 'Retrieve a session secret by name.', props: { name: { type: 'string' } }, required: ['name'] },
 ];

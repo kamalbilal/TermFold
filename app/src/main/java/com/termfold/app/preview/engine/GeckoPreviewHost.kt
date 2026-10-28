@@ -16,7 +16,7 @@ import org.mozilla.geckoview.GeckoView
 /** GeckoView surface for in-app preview. */
 class GeckoPreviewHost(
     appContext: Context,
-    storageContextId: String,
+    private val storageContextId: String,
     onTitle: ((String) -> Unit)? = null,
     onProgress: ((Int) -> Unit)? = null,
     onHistory: ((canBack: Boolean, canForward: Boolean) -> Unit)? = null,
@@ -26,6 +26,7 @@ class GeckoPreviewHost(
 
     val session get() = sessionHost.session
     val surface get() = sessionHost.surface
+    val browserSession get() = sessionHost
 
     init {
         // TextureView composites through Compose clipping; SurfaceView stays blank in clipToBounds.
@@ -33,7 +34,7 @@ class GeckoPreviewHost(
         geckoView.coverUntilFirstPaint(PreviewBrowserTheme.backgroundColor(GeckoRuntimeHolder.preferredDark))
         geckoView.setActivityContextDelegate { unwrapActivity(geckoView.context) }
         PreviewBrowserTheme.applyGeckoViewChrome(geckoView, GeckoRuntimeHolder.preferredDark)
-        sessionHost = GeckoBrowserSession(
+        sessionHost = BrowserSessionRegistry.bindPreview(
             appContext,
             storageContextId,
             geckoView,
@@ -49,7 +50,9 @@ class GeckoPreviewHost(
 
     fun bindToDisplay() = sessionHost.bindToDisplay()
 
-    fun release() = sessionHost.release()
+    fun release() {
+        BrowserSessionRegistry.unbindPreview(storageContextId)
+    }
 
     companion object {
         /**

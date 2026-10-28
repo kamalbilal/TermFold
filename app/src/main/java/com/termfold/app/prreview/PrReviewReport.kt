@@ -64,15 +64,26 @@ object PrReviewReportParser {
     }
 
     /** [turnItems] must start with the user message for this turn. */
-    fun parseTurnSlice(turnItems: List<AcpItem>): PrReviewParse {
+    fun parseTurnSlice(turnItems: List<AcpItem>, turnFinished: Boolean = true): PrReviewParse {
         if (turnItems.isEmpty() || turnItems.first() !is AcpItem.UserMessage) return PrReviewParse.Skipped
-        val agentText = turnItems
-            .drop(1)
-            .filterIsInstance<AcpItem.AgentText>()
-            .joinToString("") { it.text }
+        val agentText = combinedModelText(turnItems)
         if (agentText.isBlank()) return PrReviewParse.Skipped
-        return parseAgentText(agentText)
+        val parsed = parseAgentText(agentText)
+        if (!turnFinished && parsed is PrReviewParse.Missing) return PrReviewParse.Skipped
+        return parsed
     }
+
+    internal fun combinedModelText(turnItems: List<AcpItem>): String =
+        turnItems
+            .drop(1)
+            .mapNotNull { item ->
+                when (item) {
+                    is AcpItem.AgentText -> item.text
+                    is AcpItem.Thought -> item.text
+                    else -> null
+                }
+            }
+            .joinToString("\n")
 
     /** Drops fenced report JSON so chat is not a second copy of the cards. */
     fun stripFences(text: String): String {
@@ -91,8 +102,12 @@ object PrReviewReportParser {
         }
     }
 
-    fun extractFence(text: String): String? {
-        val open = "```$FENCE"
+    fun extractFence(text: String): String? =
+        extractFencedPayload(text, FENCE)
+            ?: extractFencedPayload(text, "json")?.takeIf(::looksLikePrReviewJson)
+
+    private fun extractFencedPayload(text: String, tag: String): String? {
+        val open = "```$tag"
         var search = 0
         var last: String? = null
         while (true) {
@@ -105,8 +120,30 @@ object PrReviewReportParser {
         }
     }
 
+    private fun looksLikePrReviewJson(raw: String): Boolean {
+        val n = normalizeJsonPayload(raw)
+        return n.contains("\"schemaVersion\"") && n.contains("\"findings\"")
+    }
+
+    internal fun normalizeJsonPayload(raw: String): String {
+        var s = raw.trim()
+        if (s.startsWith("json", ignoreCase = true)) {
+            s = s.removePrefix("json").trimStart()
+        }
+        val start = s.indexOf('{')
+        val end = s.lastIndexOf('}')
+        if (start >= 0 && end > start) {
+            s = s.substring(start, end + 1)
+        }
+        return removeTrailingCommas(s)
+    }
+
+    private fun removeTrailingCommas(json: String): String =
+        json.replace(Regex(",\\s*([}\\]])"), "$1")
+
     fun parseJson(raw: String): PrReviewParse {
-        val obj = runCatching { JSONObject(raw) }.getOrElse {
+        val normalized = normalizeJsonPayload(raw)
+        val obj = runCatching { JSONObject(normalized) }.getOrElse {
             return PrReviewParse.Invalid("Report JSON is not valid.")
         }
         val version = obj.optInt("schemaVersion", 0)

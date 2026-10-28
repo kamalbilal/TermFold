@@ -11,6 +11,7 @@ data class AcpPersistedTimeline(
     val checkpoints: AcpCheckpointUiState = AcpCheckpointUiState(),
     /** Injected on the next prompt after compress / wire resync. */
     val pendingWireContext: String? = null,
+    val askQuestionsByUserMessageId: Map<Long, AskQuestionTurnSnapshot> = emptyMap(),
 )
 
 /** JSON for the TermFold-owned chat timeline, independent of ACP wire session ids. */
@@ -30,6 +31,9 @@ object AcpTimelineCodec {
             .put("items", encodeItems(snapshot.items))
             .put("checkpoints", encodeCheckpoints(durable))
         snapshot.pendingWireContext?.takeIf { it.isNotBlank() }?.let { obj.put("pendingWireContext", it) }
+        if (snapshot.askQuestionsByUserMessageId.isNotEmpty()) {
+            obj.put("askQuestionsByUserMessageId", AskQuestionSnapshotCodec.encodeMap(snapshot.askQuestionsByUserMessageId))
+        }
         return obj.toString()
     }
 
@@ -39,6 +43,7 @@ object AcpTimelineCodec {
             items = decodeItems(root.optJSONArray("items")),
             checkpoints = durableCheckpoints(decodeCheckpoints(root.optJSONObject("checkpoints"))),
             pendingWireContext = root.optString("pendingWireContext").takeIf { it.isNotBlank() },
+            askQuestionsByUserMessageId = AskQuestionSnapshotCodec.decodeMap(root.optJSONObject("askQuestionsByUserMessageId")),
         )
     }
 

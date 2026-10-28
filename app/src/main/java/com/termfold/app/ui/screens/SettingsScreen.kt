@@ -131,6 +131,10 @@ fun SettingsScreen(
             item { AutomationNavMemoryCard(onOpen = { showAutomationNavMemory = true }) }
 
             item { Spacer(Modifier.height(20.dp)) }
+            item { GroupLabel(stringResource(R.string.project_rules_settings_title)) }
+            item { ProjectRulesSettingsEntry(viewModel) }
+
+            item { Spacer(Modifier.height(20.dp)) }
             item { GroupLabel(stringResource(R.string.settings_agent_chat)) }
             item { AgentChatCard() }
 

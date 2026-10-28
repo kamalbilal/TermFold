@@ -13,14 +13,10 @@ data class PmDecisionMemo(
 )
 
 object PmDecisionMemoParser {
-    // ICU on Android requires escaping literal `}` (JVM regex accepts the unescaped form).
-    private val fencedJson = Regex(
-        """```json\s*(\{[\s\S]*?\})\s*```""",
-        RegexOption.IGNORE_CASE,
-    )
+    private const val FENCE_OPEN = "```json"
 
     fun parseFromAgentText(text: String): PmDecisionMemo? {
-        val fenced = fencedJson.find(text)?.groupValues?.getOrNull(1)
+        val fenced = extractFencedJson(text)
         val raw = fenced ?: PmResearchPack.firstJsonObject(text)
         if (raw.isNullOrBlank()) return null
         return runCatching {
@@ -52,5 +48,34 @@ object PmDecisionMemoParser {
             .put("gaps", memo.gaps)
             .toString()
 
-    fun stripFences(text: String): String = fencedJson.replace(text, "").trim()
+    fun stripFences(text: String): String {
+        var remaining = text
+        while (true) {
+            val start = remaining.indexOf(FENCE_OPEN, ignoreCase = true)
+            if (start < 0) return remaining.trim()
+            val after = remaining.substring(start + FENCE_OPEN.length).trimStart()
+            val closeIdx = after.indexOf("```")
+            remaining = if (closeIdx < 0) {
+                remaining.substring(0, start)
+            } else {
+                remaining.substring(0, start) + after.substring(closeIdx + 3)
+            }
+        }
+    }
+
+    private fun extractFencedJson(text: String): String? {
+        var search = 0
+        var last: String? = null
+        while (true) {
+            val start = text.indexOf(FENCE_OPEN, search, ignoreCase = true)
+            if (start < 0) return last
+            val trimmed = text.substring(start + FENCE_OPEN.length).trimStart()
+            val closeIdx = trimmed.indexOf("```")
+            if (closeIdx >= 0) {
+                val payload = trimmed.substring(0, closeIdx).trim()
+                last = PmResearchPack.firstJsonObject(payload) ?: payload.takeIf { it.startsWith("{") }
+            }
+            search = start + FENCE_OPEN.length
+        }
+    }
 }

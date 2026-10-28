@@ -8,6 +8,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,9 +28,16 @@ import com.termfold.app.prreview.PrReviewKeys
 import com.termfold.app.prreview.PrReviewParse
 import com.termfold.app.prreview.PrReviewPaths
 import com.termfold.app.prreview.PrReviewPrompt
-import com.termfold.app.prreview.PrReviewReport
-import com.termfold.app.prreview.PrReviewReportParser
+import com.termfold.app.memory.AgentMemoryWorkflow
+import com.termfold.app.prreview.PrReviewReportBridge
+import com.termfold.app.prreview.PrReviewSessionContext
+import com.termfold.app.preview.BrowserBridge
 import com.termfold.app.prreview.PrReviewSession
+import com.termfold.app.prreview.PrReviewReportParser
+import com.termfold.app.prreview.prReviewChromeFromParse
+import com.termfold.app.prreview.prReviewJsonForTurn
+import com.termfold.app.prreview.prReviewParseErrorFallback
+import com.termfold.app.prreview.prReviewReportsAlignedToTimeline
 import com.termfold.app.ui.theme.Palette
 import kotlinx.coroutines.launch
 
@@ -43,7 +51,8 @@ fun PrReviewAgentSessionScreen(
     onDoneKind: suspend (String) -> DoneKind,
     onApplyDone: (String) -> Unit,
     onPasteAnother: (String) -> Unit,
-    onSaveParse: (PrReviewParse) -> Unit = {},
+    onSaveParse: (userMessageId: Long, parse: PrReviewParse) -> Unit = { _, _ -> },
+    onSyncReportsToTimeline: (items: List<AcpItem>, reports: Map<Long, String>) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
     filesOpen: Boolean = false,
     onToggleFiles: () -> Unit = {},
@@ -55,8 +64,39 @@ fun PrReviewAgentSessionScreen(
     var pasteValue by remember { mutableStateOf("") }
     var agentWasBusy by remember(session.id) { mutableStateOf(false) }
     var lastUserMessageId by remember(session.id) { mutableStateOf<Long?>(null) }
+    var reportsByUserMessageId by remember(session.id) {
+        mutableStateOf(session.reportsByUserMessageId)
+    }
+    LaunchedEffect(session.reportsByUserMessageId) {
+        reportsByUserMessageId = session.reportsByUserMessageId
+    }
     LaunchedEffect(session.id) {
         PrReviewPaths.ensureStub(context, session.id)
+    }
+    val submitListenerOwner = remember(session.id) { Any() }
+    DisposableEffect(session.id) {
+        val owner = submitListenerOwner
+        PrReviewSessionContext.activeSessionId = session.id
+        BrowserBridge.prReviewSessionId = session.id
+        BrowserBridge.writeBrowserConfig(context.applicationContext)
+        PrReviewReportBridge.setOnSubmit(owner) { sid, userMessageId, parse ->
+            if (sid == session.id) {
+                val json = PrReviewReportParser.encode(parse.report).toString()
+                reportsByUserMessageId = reportsByUserMessageId + (userMessageId to json)
+                onSaveParse(userMessageId, parse)
+            }
+        }
+        onDispose {
+            if (PrReviewSessionContext.activeSessionId == session.id) {
+                PrReviewSessionContext.activeSessionId = null
+                PrReviewSessionContext.activeUserMessageId = null
+            }
+            if (BrowserBridge.prReviewSessionId == session.id) {
+                BrowserBridge.prReviewSessionId = null
+            }
+            BrowserBridge.writeBrowserConfig(context.applicationContext)
+            PrReviewReportBridge.clearOnSubmit(owner)
+        }
     }
     val copyGuest = codingFolder?.let { folder ->
         session.workspaceId?.let { WorkspaceStore.guestPath(context, folder, it) }
@@ -91,26 +131,56 @@ fun PrReviewAgentSessionScreen(
         guestDirOverride = guestDir,
         hideBranchPicker = true,
         promptPrefix = { _ -> PrReviewPrompt.prefix(session) },
-        turnFooter = { userMessageId, turnItems ->
-            val parse = PrReviewReportParser.parseTurnSlice(turnItems)
-            val useSessionFallback = userMessageId == lastUserMessageId &&
-                agentChatTurnHasAgentReply(turnItems)
+        agentMemoryWorkflow = AgentMemoryWorkflow.PR_REVIEW,
+        prReviewMode = true,
+        turnFooter = { userMessageId, turnItems, turnFinished ->
+            val parse = PrReviewReportParser.parseTurnSlice(turnItems, turnFinished = turnFinished)
+            val savedJson = prReviewJsonForTurn(
+                userMessageId = userMessageId,
+                turnItems = turnItems,
+                turnFinished = turnFinished,
+                reportsByUserMessageId = reportsByUserMessageId,
+                lastUserMessageId = lastUserMessageId,
+                sessionLastReportJson = session.lastReportJson,
+            )
             val (report, parseError) = prReviewChromeFromParse(
                 parse = parse,
-                fallbackReport = if (useSessionFallback) {
-                    prReviewReportFromSessionJson(session.lastReportJson)
-                } else {
-                    null
-                },
-                fallbackParseError = if (useSessionFallback) session.lastParseError else null,
+                fallbackReport = savedJson?.let { prReviewReportFromSessionJson(it) },
+                fallbackParseError = prReviewParseErrorFallback(
+                    userMessageId = userMessageId,
+                    lastUserMessageId = lastUserMessageId,
+                    reportsByUserMessageId = reportsByUserMessageId,
+                    sessionLastParseError = session.lastParseError,
+                ),
             )
             PrReviewReportChrome(report = report, parseError = parseError)
         },
         rewriteAgentText = PrReviewReportParser::stripFences,
         onAcpSnapshot = { items: List<AcpItem>, busy ->
-            lastUserMessageId = items.filterIsInstance<AcpItem.UserMessage>().lastOrNull()?.id
+            val lastUser = items.filterIsInstance<AcpItem.UserMessage>().lastOrNull()?.id
+            lastUserMessageId = lastUser
+            PrReviewSessionContext.activeUserMessageId = lastUser
+            val aligned = prReviewReportsAlignedToTimeline(items, reportsByUserMessageId)
+            if (aligned != reportsByUserMessageId) {
+                reportsByUserMessageId = aligned
+                onSyncReportsToTimeline(items, aligned)
+            }
             if (agentWasBusy && !busy) {
-                onSaveParse(PrReviewReportParser.parseTurn(items))
+                val turnUserId = lastUserMessageId
+                if (turnUserId != null) {
+                    val turnItems = agentChatItemsForUserTurn(items, turnUserId)
+                    val parse = PrReviewReportParser.parseTurnSlice(turnItems, turnFinished = true)
+                    val alreadySaved = reportsByUserMessageId[turnUserId]
+                    when {
+                        parse is PrReviewParse.Ok -> {
+                            val json = PrReviewReportParser.encode(parse.report).toString()
+                            reportsByUserMessageId = reportsByUserMessageId + (turnUserId to json)
+                            onSaveParse(turnUserId, parse)
+                        }
+                        alreadySaved != null -> onSaveParse(turnUserId, PrReviewParse.Skipped)
+                        else -> onSaveParse(turnUserId, parse)
+                    }
+                }
             }
             agentWasBusy = busy
         },
@@ -190,22 +260,5 @@ fun PrReviewAgentSessionScreen(
                 }
             },
         )
-    }
-}
-
-private fun prReviewChromeFromParse(
-    parse: PrReviewParse,
-    fallbackReport: PrReviewReport?,
-    fallbackParseError: String?,
-): Pair<PrReviewReport?, String?> {
-    if (parse is PrReviewParse.Ok) return parse.report to null
-    if (fallbackReport != null && parse !is PrReviewParse.Invalid) {
-        return fallbackReport to fallbackParseError
-    }
-    return when (parse) {
-        PrReviewParse.Missing -> null to "missing"
-        is PrReviewParse.Invalid -> null to parse.reason
-        PrReviewParse.Skipped -> null to null
-        is PrReviewParse.Ok -> parse.report to null
     }
 }

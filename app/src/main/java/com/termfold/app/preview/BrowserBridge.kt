@@ -61,6 +61,10 @@ object BrowserBridge {
     @Volatile
     var pmSessionId: String? = null
 
+    /** Active PR Review session id for pr_review_* tools. */
+    @Volatile
+    var prReviewSessionId: String? = null
+
     /** Active coding-agent session compose key (workspace chat); lazy headless browser profile. */
     @Volatile
     var codingSessionKey: String? = null
@@ -127,6 +131,10 @@ object BrowserBridge {
             .put("token", token)
             .put("automation_session_key", automationSessionKey ?: AutomationSessionContext.activeKey ?: "")
             .put("pm_session_id", pmSessionId ?: com.termfold.app.pm.PmSessionContext.activeSessionId ?: "")
+            .put(
+                "pr_review_session_id",
+                prReviewSessionId ?: com.termfold.app.prreview.PrReviewSessionContext.activeSessionId ?: "",
+            )
             .put("agent_session_key", codingSessionKey ?: "")
         file.writeText(body.toString())
         file.setReadable(false, false)
@@ -190,7 +198,7 @@ object BrowserBridge {
 
     private fun handle(context: Context, socket: Socket) {
         socket.use { s ->
-            s.soTimeout = 120_000
+            s.soTimeout = 180_000
             val input = BufferedInputStream(s.getInputStream())
             val headers = readHeaders(input) ?: return
             val length = headers["content-length"]?.toIntOrNull() ?: 0
@@ -217,6 +225,19 @@ object BrowserBridge {
                 return JSONObject().put("error", "Browser command is bound to another PM session")
             }
             return com.termfold.app.pm.memory.PmMemoryBridge.handle(context, action, args)
+        }
+        if (action.startsWith("pr_review_")) {
+            val requiredId = prReviewSessionId
+            if (requiredId != null && com.termfold.app.prreview.PrReviewSessionContext.activeSessionId != requiredId) {
+                return JSONObject().put("error", "Browser command is bound to another PR Review session")
+            }
+            if (requiredId != null) {
+                val given = args.optString("session_id")
+                if (given.isNotBlank() && given != requiredId) {
+                    return JSONObject().put("error", "Browser command is bound to another PR Review session")
+                }
+            }
+            return com.termfold.app.prreview.PrReviewReportBridge.handle(action, args)
         }
         if (action.startsWith("memory_")) {
             val requiredKey = automationSessionKey
@@ -249,16 +270,21 @@ object BrowserBridge {
         lastCommand = System.currentTimeMillis()
         _activity.update { it.copy(active = true, label = labelFor(action, args)) }
         var registryKey = resolveRegistryKey(requiredKey, args)
-        if (registryKey == null && requiredKey == null && !codingSessionKey.isNullOrBlank()) {
-            registryKey = withContext(Dispatchers.Main) {
-                BrowserSessionRegistry.ensureCoding(context.applicationContext, codingSessionKey!!).key
+        val codingKey = codingSessionKey?.takeIf { it.isNotBlank() }
+        if (registryKey == null && requiredKey == null && codingKey != null) {
+            registryKey = PreviewUrlRouter.sessionKeyForCoding(codingKey)
+        }
+        if (registryKey != null || codingKey != null) {
+            withContext(Dispatchers.Main) {
+                if (codingKey != null) {
+                    registryKey = BrowserSessionRegistry.ensureCoding(context.applicationContext, codingKey).key
+                }
+                Preview.revealForAgent()
             }
         }
-        val registryDriver = registryKey?.let { BrowserSessionRegistry.controllerFor(it) }
-        // On-screen preview wins over the headless registry profile for the same session.
-        var driver = controller ?: registryDriver
+        val registryDriver = { key: String? -> key?.let { BrowserSessionRegistry.controllerFor(it) } }
+        var driver = registryDriver(registryKey) ?: controller
         if (driver == null) {
-            withContext(Dispatchers.Main) { Preview.open() }
             val nobodyLooking = !com.termfold.app.notify.AppPresence.inForeground
             if (nobodyLooking) com.termfold.app.notify.Notifier.askForBrowser(context)
             val until = System.currentTimeMillis() + if (nobodyLooking) {
@@ -266,11 +292,19 @@ object BrowserBridge {
             } else {
                 BrowserBridgeTimeouts.PREVIEW_ATTACH_MS
             }
-            while (driver == null && System.currentTimeMillis() < until) {
-                delay(100)
-                driver = registryKey?.let { BrowserSessionRegistry.controllerFor(it) } ?: controller
+            while (System.currentTimeMillis() < until) {
+                if (registryKey != null && BrowserSessionRegistry.isUiAttached(registryKey)) {
+                    driver = registryDriver(registryKey)
+                    break
+                }
+                driver = registryDriver(registryKey) ?: controller
+                if (driver != null && (registryKey == null || BrowserSessionRegistry.isUiAttached(registryKey))) {
+                    break
+                }
+                delay(50)
             }
             if (nobodyLooking) com.termfold.app.notify.Notifier.cancelBrowserRequest(context)
+            driver = registryDriver(registryKey) ?: controller ?: driver
         }
         if (driver == null) {
             return JSONObject().put(
@@ -294,7 +328,14 @@ object BrowserBridge {
             } else {
                 withTimeout(BrowserBridgeTimeouts.MCP_COMMAND_MS) { runBlock() }
             }
-        }.getOrElse { JSONObject().put("error", it.message ?: it.javaClass.simpleName) }.also { result ->
+        }.getOrElse { e ->
+            val message = when (e) {
+                is kotlinx.coroutines.TimeoutCancellationException ->
+                    "The browser command timed out. The page may still be loading — try browser_health, then retry."
+                else -> e.message ?: e.javaClass.simpleName
+            }
+            JSONObject().put("error", message)
+        }.also { result ->
             running.decrementAndGet()
             syncCommandInFlight()
             lastCommand = System.currentTimeMillis()

@@ -166,7 +166,7 @@ fun PmAgentSessionScreen(
                 PmPrompt.prefix(context, session, userQuery = query)
             },
             onPmSessionMemory = { showMemory = true },
-            turnFooter = { userMessageId, turnItems ->
+            turnFooter = { userMessageId, turnItems, _ ->
                 Column(Modifier.fillMaxWidth()) {
                     if (userMessageId == firstUserMessageId) {
                         PmSessionChrome(

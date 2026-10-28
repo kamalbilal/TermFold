@@ -138,6 +138,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.termfold.app.ui.theme.Motion
@@ -167,7 +168,7 @@ fun AgentSessionScreen(
     modifier: Modifier = Modifier,
     filesOpen: Boolean = false,
     onToggleFiles: () -> Unit = {},
-    automationPromptPrefix: (() -> String)? = null,
+    automationPromptPrefix: ((userText: String) -> String)? = null,
     promptPrefix: ((userText: String) -> String)? = null,
     previewProjectDirOverride: String? = null,
     automationReadOnlyGuestRoot: String? = null,
@@ -180,20 +181,26 @@ fun AgentSessionScreen(
     onBranchChipClick: (() -> Unit)? = null,
     onPmSessionMemory: (() -> Unit)? = null,
     pmMode: Boolean = false,
+    prReviewMode: Boolean = false,
     onReviewDone: (() -> Unit)? = null,
     onReviewAnother: (() -> Unit)? = null,
     /**
      * Workflow cards/controls after each user turn (below that turn's agent reply).
      * Used by [PmAgentSessionScreen] and [PrReviewAgentSessionScreen]; pass null for plain agent chat.
      */
-    turnFooter: (@Composable (userMessageId: Long, turnItems: List<AcpItem>) -> Unit)? = null,
+    turnFooter: (@Composable (userMessageId: Long, turnItems: List<AcpItem>, turnFinished: Boolean) -> Unit)? = null,
     rewriteAgentText: (String) -> String = { it },
     onAcpSnapshot: ((items: List<AcpItem>, agentBusy: Boolean) -> Unit)? = null,
+    /** Coding folder for project rules (automation: linked folder only; omit when unlinked). */
+    projectRulesFolder: Folder? = folder,
+    agentMemoryWorkflow: com.termfold.app.memory.AgentMemoryWorkflow =
+        com.termfold.app.memory.AgentMemoryWorkflow.CODING,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val key = sessionKeyOverride
         ?: com.termfold.app.gitworkspace.SessionKeys.compose(folder.id, workspaceId, sessionId)
+    val memorySessionKey = automationSessionKey ?: key
     val guestDir = guestDirOverride
         ?: com.termfold.app.gitworkspace.WorkspaceStore.guestPath(context, folder, workspaceId)
     if (guestDir == null) {
@@ -264,9 +271,40 @@ fun AgentSessionScreen(
 
     val automationPrefixState = androidx.compose.runtime.rememberUpdatedState(automationPromptPrefix)
     val extraPrefixState = androidx.compose.runtime.rememberUpdatedState(promptPrefix)
-    val client = remember(key, guestDir, automationReadOnlyGuestRoot, pmMode) {
+    val projectRulesStore = remember { com.termfold.app.projectrules.ProjectRulesStore.get(context) }
+    val projectRulesPrefix: () -> String = remember(key, projectRulesStore) {
+        {
+            val rules = com.termfold.app.projectrules.ProjectRulesContextResolver
+                .enabledRulesForPrompt(projectRulesStore.read(), key)
+            com.termfold.app.projectrules.ProjectRulesPromptAssembler.assemble(rules)
+        }
+    }
+    val projectRulesPrefixState = androidx.compose.runtime.rememberUpdatedState(projectRulesPrefix)
+    val wantsAgentMemoryTools = !pmMode && resolved.id == "cursor"
+    val agentMemoryPrefixProvider: ((String) -> String)? =
+        if (!wantsAgentMemoryTools || automationPromptPrefix != null) {
+            null
+        } else {
+            { userQuery ->
+                com.termfold.app.memory.AgentMemoryPromptAssembler.prefix(
+                    context = context,
+                    memorySessionKey = memorySessionKey,
+                    userQuery = userQuery,
+                    currentHost = com.termfold.app.preview.Preview.state.value.url
+                        ?.substringAfter("://")
+                        ?.substringBefore('/'),
+                    workflow = agentMemoryWorkflow,
+                )
+            }
+        }
+    val agentMemoryPrefixState = androidx.compose.runtime.rememberUpdatedState(agentMemoryPrefixProvider)
+    val client = remember(key, guestDir, automationReadOnlyGuestRoot, pmMode, prReviewMode, wantsAgentMemoryTools) {
         val existing = AcpSessions.client(key)
-        if (existing != null && existing.workspaceGuestDir == guestDir) {
+        if (existing != null && existing.workspaceGuestDir == guestDir &&
+            existing.hasProjectRulesHook() &&
+            existing.usesAgentMemoryTools() == wantsAgentMemoryTools &&
+            existing.usesPrReviewMode() == prReviewMode
+        ) {
             existing
         } else {
             if (existing != null) AcpSessions.close(key)
@@ -278,26 +316,43 @@ fun AgentSessionScreen(
                     agent = resolved,
                     workspaceGuestDir = guestDir,
                     automationPromptPrefix = automationPrefixState.value,
+                    agentMemoryPrefix = agentMemoryPrefixState.value,
                     extraPromptPrefix = { text -> extraPrefixState.value?.invoke(text) ?: "" },
+                    projectRulesPrefix = { projectRulesPrefixState.value() },
                     automationReadOnlyGuestRoot = automationReadOnlyGuestRoot,
                     automationGuardrails = automationGuardrails,
                     pmMode = pmMode,
+                    prReviewMode = prReviewMode,
+                    agentMemoryTools = wantsAgentMemoryTools,
                 ),
             )
         }
     }
 
-    LaunchedEffect(key, guestDir) {
+    LaunchedEffect(key, guestDir, prReviewMode) {
         client.start()
         com.termfold.app.notify.SessionWatcher.onSessionStarted(context.applicationContext)
+        if (prReviewMode) {
+            snapshotFlow {
+                val s = client.state.value
+                s.phase == AcpPhase.READY && !s.agentBusy && s.pendingPermission == null && s.pendingAskQuestion == null
+            }.first { it }
+            client.reloadMcpServers()
+        }
     }
 
-    DisposableEffect(key, automationSessionKey) {
+    DisposableEffect(key, automationSessionKey, pmMode, memorySessionKey) {
+        if (!pmMode) {
+            com.termfold.app.memory.AgentMemorySessionContext.activeKey = memorySessionKey
+        }
         if (automationSessionKey == null) {
             BrowserBridge.codingSessionKey = key
             BrowserBridge.writeBrowserConfig(context.applicationContext)
         }
         onDispose {
+            if (!pmMode && com.termfold.app.memory.AgentMemorySessionContext.activeKey == memorySessionKey) {
+                com.termfold.app.memory.AgentMemorySessionContext.activeKey = null
+            }
             if (automationSessionKey == null) {
                 BrowserBridge.codingSessionKey = null
                 com.termfold.app.preview.engine.BrowserSessionRegistry.releaseCoding(key)
@@ -376,6 +431,14 @@ fun AgentSessionScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    var showProjectRules by remember { mutableStateOf(false) }
+    if (showProjectRules && projectRulesFolder != null) {
+        ProjectRulesSheet(
+            sessionKey = key,
+            folder = projectRulesFolder,
+            onDismiss = { showProjectRules = false },
+        )
+    }
     var stickyUserMessagesEnabled by remember {
         mutableStateOf(com.termfold.app.acp.AcpChatPrefs.stickyUserMessages(context))
     }
@@ -432,12 +495,12 @@ fun AgentSessionScreen(
             } else {
                 null
             },
-            onAutomationSessionMemory = if (automationSessionKey != null) {
+            onAutomationSessionMemory = if (wantsAgentMemoryTools) {
                 { showAutomationSessionMemory = true }
             } else {
                 null
             },
-            onAutomationNavMemory = if (automationSessionKey != null) {
+            onAutomationNavMemory = if (wantsAgentMemoryTools) {
                 { showAutomationNavMemory = true }
             } else {
                 null
@@ -458,6 +521,11 @@ fun AgentSessionScreen(
                 null
             },
             onQuickOpen = { showQuickOpen = true },
+            onProjectRules = if (projectRulesFolder != null) {
+                { showProjectRules = true }
+            } else {
+                null
+            },
         )
 
         val hasConversation = state.items.isNotEmpty() || state.restoring
@@ -478,7 +546,29 @@ fun AgentSessionScreen(
                         client = client,
                         onEditMessage = { editingMessage = it },
                         stickyUserMessagesEnabled = stickyUserMessagesEnabled,
-                        turnFooter = turnFooter,
+                        turnFooter = if (isCursor || turnFooter != null) {
+                            { userMessageId, turnItems, turnFinished ->
+                                Column(
+                                    Modifier.fillMaxWidth(),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    if (isCursor) {
+                                        val lastUserId = state.items.filterIsInstance<AcpItem.UserMessage>().lastOrNull()?.id
+                                        AskQuestionTurnFooter(
+                                            userMessageId = userMessageId,
+                                            lastUserMessageId = lastUserId,
+                                            pending = state.pendingAskQuestion,
+                                            snapshot = state.askQuestionsByUserMessageId[userMessageId],
+                                            onAnswer = { client.answerPendingAskQuestion(it) },
+                                            onSkip = { client.skipPendingAskQuestion() },
+                                        )
+                                    }
+                                    turnFooter?.invoke(userMessageId, turnItems, turnFinished)
+                                }
+                            }
+                        } else {
+                            null
+                        },
                         rewriteAgentText = rewriteAgentText,
                         modifier = Modifier.weight(1f),
                     )
@@ -595,6 +685,7 @@ fun AgentSessionScreen(
                 onSteer = { client.steer(it) },
                 onRemoveQueued = { client.removeQueued(it) },
                 onCancel = { client.cancel() },
+                inputBlocked = state.pendingAskQuestion != null || state.pendingPermission != null,
                 branchName = branchChipOverride
                     ?: if (isCursor && !hideBranchPicker) branchLabel else null,
                 branchUncommitted = if (branchChipOverride != null) {
@@ -706,9 +797,9 @@ fun AgentSessionScreen(
         PastSessionsDialog(client = client, currentId = client.listedSessionId, onDismiss = { showHistory = false })
     }
 
-    if (showAutomationSessionMemory && automationSessionKey != null) {
+    if (showAutomationSessionMemory) {
         AutomationMemoryManagerDialog(
-            mode = AutomationMemoryManagerMode.SessionPrivate(automationSessionKey),
+            mode = AutomationMemoryManagerMode.SessionPrivate(memorySessionKey),
             onDismiss = { showAutomationSessionMemory = false },
         )
     }
@@ -802,6 +893,7 @@ private fun SessionHeader(
     onAutomationSessionMemory: (() -> Unit)? = null,
     onAutomationNavMemory: (() -> Unit)? = null,
     onPmSessionMemory: (() -> Unit)? = null,
+    onProjectRules: (() -> Unit)? = null,
     onOpenTerminal: ((tabId: String?) -> Unit)? = null,
     auxTerminalTabs: List<AuxTerminalTab> = emptyList(),
     onRequestCloseAuxTerminalTab: ((tabId: String) -> Unit)? = null,
@@ -890,6 +982,7 @@ private fun SessionHeader(
                 onAutomationSessionMemory = onAutomationSessionMemory,
                 onAutomationNavMemory = onAutomationNavMemory,
                 onPmSessionMemory = onPmSessionMemory,
+                onProjectRules = onProjectRules,
                 stickyUserMessagesEnabled = stickyUserMessagesEnabled,
                 onStickyUserMessagesEnabledChange = onStickyUserMessagesEnabledChange,
             )
@@ -916,6 +1009,7 @@ private fun SessionHeaderOverflowMenu(
     onAutomationSessionMemory: (() -> Unit)?,
     onAutomationNavMemory: (() -> Unit)?,
     onPmSessionMemory: (() -> Unit)? = null,
+    onProjectRules: (() -> Unit)? = null,
     stickyUserMessagesEnabled: Boolean = true,
     onStickyUserMessagesEnabledChange: (Boolean) -> Unit = {},
 ) {
@@ -957,6 +1051,15 @@ private fun SessionHeaderOverflowMenu(
                     onStickyUserMessagesEnabledChange(!stickyUserMessagesEnabled)
                 },
             )
+            if (onProjectRules != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.project_rules_menu), color = Palette.Text) },
+                    onClick = {
+                        expanded = false
+                        onProjectRules()
+                    },
+                )
+            }
             if (onOpenTerminal != null) {
                 val canCloseTabs = auxTerminalTabs.size > 1
                 if (auxTerminalTabs.isEmpty()) {
@@ -1375,7 +1478,7 @@ private fun Timeline(
     client: AcpClient,
     onEditMessage: (AcpItem.UserMessage) -> Unit,
     stickyUserMessagesEnabled: Boolean = true,
-    turnFooter: (@Composable (userMessageId: Long, turnItems: List<AcpItem>) -> Unit)? = null,
+    turnFooter: (@Composable (userMessageId: Long, turnItems: List<AcpItem>, turnFinished: Boolean) -> Unit)? = null,
     rewriteAgentText: (String) -> String = { it },
     modifier: Modifier = Modifier,
 ) {
@@ -1662,7 +1765,9 @@ private fun Timeline(
                 }
                 is AgentChatLazyEntry.TurnFooter -> item(key = entry.key) {
                     val turnItems = agentChatItemsForUserTurn(items, entry.userMessageId)
-                    turnFooter?.invoke(entry.userMessageId, turnItems)
+                    val lastUserId = items.filterIsInstance<AcpItem.UserMessage>().lastOrNull()?.id
+                    val turnFinished = !(state.agentBusy && entry.userMessageId == lastUserId)
+                    turnFooter?.invoke(entry.userMessageId, turnItems, turnFinished)
                 }
             }
         }
@@ -2504,6 +2609,7 @@ private fun Composer(
     onSteer: (Long) -> Unit,
     onRemoveQueued: (Long) -> Unit,
     onCancel: () -> Unit,
+    inputBlocked: Boolean = false,
     branchName: String? = null,
     branchUncommitted: Boolean = false,
     onBranchClick: (() -> Unit)? = null,
@@ -2586,7 +2692,7 @@ private fun Composer(
         }
     }
 
-    val canSend = input.text.isNotBlank() || images.isNotEmpty() || files.isNotEmpty()
+    val canSend = (input.text.isNotBlank() || images.isNotEmpty() || files.isNotEmpty()) && !inputBlocked
 
     // Slash and @ menus follow the token at the caret (start of field or mid-sentence).
     // The app's own commands come first (resuming is the app's job, not every agent's), then

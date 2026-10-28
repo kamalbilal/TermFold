@@ -14,6 +14,7 @@ data class PrReviewSession(
     val acpAgentId: String = "cursor",
     val lastReportJson: String? = null,
     val lastParseError: String? = null,
+    val reportsByUserMessageId: Map<Long, String> = emptyMap(),
 ) {
     val repoKey: String get() = GitHubOrigin.key(owner, repo)
 
@@ -34,6 +35,7 @@ data class PrReviewSession(
         workspaceId = workspaceId,
         lastReportJson = null,
         lastParseError = null,
+        reportsByUserMessageId = emptyMap(),
     )
 }
 

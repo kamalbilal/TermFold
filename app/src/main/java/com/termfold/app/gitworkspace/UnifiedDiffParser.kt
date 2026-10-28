@@ -13,6 +13,7 @@ data class DiffLine(
     val text: String,
     val oldLineNumber: Int?,
     val newLineNumber: Int?,
+    val inlineSpans: List<InlineDiffSegment>? = null,
 )
 
 data class DiffHunk(
@@ -30,6 +31,7 @@ data class SideBySideCell(
     val lineNumber: Int?,
     val text: String,
     val kind: DiffLineKind,
+    val inlineSpans: List<InlineDiffSegment>? = null,
 )
 
 data class SideBySideRow(
@@ -222,19 +224,30 @@ private fun isContextOnlyRow(row: DiffDisplayRow): Boolean = when (row) {
 
 fun buildSideBySideRows(hunks: List<DiffHunk>): List<Pair<String, List<SideBySideRow>>> =
     hunks.map { hunk ->
-        hunk.header to hunk.lines.map { line ->
+        val lines = applyInlineHighlights(hunk.lines)
+        hunk.header to lines.map { line ->
             when (line.kind) {
                 DiffLineKind.CONTEXT -> SideBySideRow(
                     left = SideBySideCell(line.oldLineNumber, line.text, DiffLineKind.CONTEXT),
                     right = SideBySideCell(line.newLineNumber, line.text, DiffLineKind.CONTEXT),
                 )
                 DiffLineKind.REMOVE -> SideBySideRow(
-                    left = SideBySideCell(line.oldLineNumber, line.text, DiffLineKind.REMOVE),
+                    left = SideBySideCell(
+                        line.oldLineNumber,
+                        line.text,
+                        DiffLineKind.REMOVE,
+                        line.inlineSpans,
+                    ),
                     right = null,
                 )
                 DiffLineKind.ADD -> SideBySideRow(
                     left = null,
-                    right = SideBySideCell(line.newLineNumber, line.text, DiffLineKind.ADD),
+                    right = SideBySideCell(
+                        line.newLineNumber,
+                        line.text,
+                        DiffLineKind.ADD,
+                        line.inlineSpans,
+                    ),
                 )
                 else -> SideBySideRow(null, null)
             }
