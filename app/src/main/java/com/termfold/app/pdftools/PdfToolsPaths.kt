@@ -26,6 +26,8 @@ object PdfToolsPaths {
     }
 
     fun qaReportFile(sessionDir: File): File = File(workDir(sessionDir), "qa/report.json")
+    fun renderManifestFile(sessionDir: File): File = File(workDir(sessionDir), "renders/manifest.json")
+    fun visualReviewFile(sessionDir: File): File = File(workDir(sessionDir), "visual_review.json")
 
     fun inputDir(sessionDir: File): File = File(sessionDir, "input")
     fun workDir(sessionDir: File): File = File(sessionDir, "work")

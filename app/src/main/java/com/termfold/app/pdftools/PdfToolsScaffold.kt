@@ -11,6 +11,7 @@ object PdfToolsScaffold {
         "assets",
         "crops",
         "qa",
+        "renders/deliverable",
     )
 
     private val SESSION_ASSETS = listOf(

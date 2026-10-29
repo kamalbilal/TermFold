@@ -997,6 +997,102 @@ def verify_path_a(session_dir: Path | None, orig: Path | None, generated: Path) 
     return (len(reasons) == 0, reasons)
 
 
+DELIVERABLE_REVIEW_DPI = 150
+
+
+def _load_render_module():
+    import importlib.util
+
+    for rp in (
+        Path("/usr/local/lib/pdfsys/render_pages.py"),
+        Path(__file__).resolve().parent / "render_pages.py",
+    ):
+        if not rp.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location("tf_render", str(rp))
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    return None
+
+
+def render_deliverable(session_dir: Path, which: str = "output", dpi: int = DELIVERABLE_REVIEW_DPI):
+    session_dir = Path(session_dir)
+    if which == "source":
+        pdf = session_dir / "input" / "source.pdf"
+    else:
+        pdf = session_dir / "out" / "output.pdf"
+        if not pdf.is_file():
+            pdf = session_dir / "out" / "letter.pdf"
+    if not pdf.is_file():
+        return out({"ok": False, "error": "PDF missing", "code": "MISSING_PDF"})
+    mod = _load_render_module()
+    if mod is None:
+        return out({"ok": False, "error": "render_pages.py missing", "code": "MISSING_RENDER"})
+    dest = session_dir / "work" / "renders" / "deliverable"
+    paths = mod.render_pdf_pages(pdf, dest, dpi=dpi)
+    if not paths:
+        return out({"ok": False, "error": "Render failed", "code": "RENDER_FAILED"})
+    rel = [str(p.relative_to(session_dir)) for p in paths]
+    manifest = session_dir / "work" / "renders" / "manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {"ok": True, "dpi": dpi, "pdf": str(pdf), "pages": rel, "page_count": len(paths)},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    # New render invalidates prior visual sign-off.
+    review = session_dir / "work" / "visual_review.json"
+    if review.is_file():
+        review.unlink()
+    return out(
+        {
+            "ok": True,
+            "pages": len(paths),
+            "dpi": dpi,
+            "manifest": str(manifest),
+            "images": rel,
+            "hint": "Open each PNG under work/renders/deliverable/ and review layout before pdf_visual_confirm.",
+        }
+    )
+
+
+def visual_review_status(session_dir: Path) -> tuple[bool, list[str]]:
+    session_dir = Path(session_dir)
+    manifest = session_dir / "work" / "renders" / "manifest.json"
+    review = session_dir / "work" / "visual_review.json"
+    reasons: list[str] = []
+    if not manifest.is_file():
+        reasons.append("render_manifest_missing")
+        return False, reasons
+    if not review.is_file():
+        reasons.append("visual_review_missing")
+        return False, reasons
+    try:
+        rdata = json.loads(review.read_text() or "{}")
+        mdata = json.loads(manifest.read_text() or "{}")
+    except Exception:
+        reasons.append("visual_review_invalid")
+        return False, reasons
+    if not rdata.get("ok"):
+        reasons.append("visual_review_not_ok")
+        return False, reasons
+    expected = int(mdata.get("page_count") or 0)
+    reviewed = int(rdata.get("pages_reviewed") or 0)
+    if expected and reviewed < expected:
+        reasons.append("visual_review_incomplete")
+        return False, reasons
+    out_sha = sha256(session_dir / "out" / "output.pdf") if (session_dir / "out" / "output.pdf").is_file() else None
+    if out_sha and rdata.get("output_sha256") and rdata.get("output_sha256") != out_sha:
+        reasons.append("visual_review_stale_output")
+        return False, reasons
+    return True, []
+
+
 def run_qa_session(session_dir: Path) -> dict:
     script = session_dir / "work" / "qa_loop.py"
     if not script.is_file():
@@ -1063,6 +1159,12 @@ def verify(orig: Path | None, generated: Path, report_path: Path, session_dir: P
                 qa_payload = {"pass": qa_pass, "mode": "path_a", "reasons": reasons}
     text = "\n".join((p.extract_text() or "") for p in r.pages)
     ok = qa_pass
+    visual_payload = None
+    if session_dir and session_dir.is_dir():
+        v_ok, v_reasons = visual_review_status(session_dir)
+        visual_payload = {"pass": v_ok, "reasons": v_reasons}
+        if not v_ok:
+            ok = False
     md = [
         "# PDF Tools report",
         "",
@@ -1089,10 +1191,23 @@ def verify(orig: Path | None, generated: Path, report_path: Path, session_dir: P
             md.append(f"- qa report: `{qa_payload.get('report')}`")
         for reason in qa_payload.get("reasons") or []:
             md.append(f"- qa reason: {reason}")
+    if visual_payload is not None:
+        md.append(f"- visual review pass: `{visual_payload.get('pass')}`")
+        for reason in visual_payload.get("reasons") or []:
+            md.append(f"- visual reason: {reason}")
     report_path.write_text("\n".join(md) + "\n")
-    result = {"ok": ok, "output_sha256": gen_hash, "input_sha256": orig_hash, "report": str(report_path), "qa_pass": qa_pass}
+    result = {
+        "ok": ok,
+        "output_sha256": gen_hash,
+        "input_sha256": orig_hash,
+        "report": str(report_path),
+        "qa_pass": qa_pass,
+        "visual_pass": visual_payload.get("pass") if visual_payload else None,
+    }
     if qa_payload is not None:
         result["qa"] = qa_payload
+    if visual_payload is not None:
+        result["visual"] = visual_payload
     out(result)
     if not ok:
         raise SystemExit(1)
@@ -1151,6 +1266,10 @@ def main(argv=None):
     v.add_argument("--session")
     q = sub.add_parser("qa")
     q.add_argument("--session", required=True)
+    rd = sub.add_parser("render-deliverable")
+    rd.add_argument("--session", required=True)
+    rd.add_argument("--which", choices=("output", "source"), default="output")
+    rd.add_argument("--dpi", type=int, default=DELIVERABLE_REVIEW_DPI)
     args = p.parse_args(argv)
     if args.cmd == "probe":
         out(probe())
@@ -1198,6 +1317,8 @@ def main(argv=None):
             out(payload)
             raise SystemExit(1)
         out(payload)
+    elif args.cmd == "render-deliverable":
+        render_deliverable(Path(args.session), which=args.which, dpi=args.dpi)
     else:
         p.error("unknown")
     return 0

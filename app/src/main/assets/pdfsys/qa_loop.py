@@ -41,23 +41,24 @@ def page_count(path: Path) -> int | None:
 
 
 def render_pages(pdf: Path, out_dir: Path) -> list[Path]:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for old in out_dir.glob("page_*.png"):
-        old.unlink(missing_ok=True)
-    paths: list[Path] = []
-    try:
-        import fitz
+    import importlib.util
 
-        doc = fitz.open(str(pdf))
-        for i in range(len(doc)):
-            pix = doc[i].get_pixmap(dpi=DPI)
-            p = out_dir / f"page_{i + 1:03d}.png"
-            pix.save(str(p))
-            paths.append(p)
-        doc.close()
-        return paths
-    except Exception:
-        pass
+    for rp in (
+        Path("/usr/local/lib/pdfsys/render_pages.py"),
+        Path(__file__).resolve().parent / "render_pages.py",
+    ):
+        if not rp.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location("tf_render", str(rp))
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod.render_pdf_pages(pdf, out_dir, dpi=DPI)
+    return _render_pages_fallback(pdf, out_dir)
+
+
+def _render_pages_fallback(pdf: Path, out_dir: Path) -> list[Path]:
+    out_dir.mkdir(parents=True, exist_ok=True)
     pdftoppm = __import__("shutil").which("pdftoppm")
     if not pdftoppm or not pdf.is_file():
         return []

@@ -203,6 +203,15 @@ generate → qa_loop.py
   if pass: notify user
 ```
 
+### 5.5 Visual review gate (deliverable PNGs)
+
+Before telling the user the PDF is ready:
+
+1. `pdfsys render-deliverable --session …` → `work/renders/deliverable/page_NNN.png` @ 150 DPI (PyMuPDF or pdftoppm).
+2. Agent opens/reviews **every** PNG (layout, names, letterhead — no white boxes).
+3. MCP `pdf_visual_confirm` with `ok: true` and `pages_reviewed` → writes `work/visual_review.json` (bound to output sha256).
+4. `pdf_verify` fails if visual review is missing, incomplete, or stale after output changes.
+
 ---
 
 ## 6. Signatures and non-copyable parts

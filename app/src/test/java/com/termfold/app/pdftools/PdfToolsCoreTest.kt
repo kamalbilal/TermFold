@@ -162,6 +162,8 @@ class PdfToolsBridgeTest {
         assertTrue(PdfToolsBridge.handle("pdf_tools_apply", JSONObject().put("plan_id", "p9")).optBoolean("ok"))
         assertTrue(PdfToolsBridge.handle("pdf_tools_model", JSONObject()).optBoolean("ok"))
         assertTrue(PdfToolsBridge.handle("pdf_tools_fields", JSONObject()).optBoolean("ok"))
+        val render = PdfToolsBridge.handle("pdf_tools_render", JSONObject())
+        assertTrue(render.has("error") || render.optBoolean("ok"))
         val overlay = JSONObject().put("id", "x").put("ops", org.json.JSONArray().put(JSONObject().put("kind", "overlay")))
         assertTrue(PdfToolsBridge.handle("pdf_tools_plan", JSONObject().put("plan", overlay)).has("error"))
         PdfToolsSessionContext.clearIf("s1")
@@ -335,7 +337,7 @@ class PdfToolsMcpAssetTest {
             File("src/main/assets/termfold-pdf.js"),
         ).first { it.isFile }
         val text = file.readText()
-        for (name in listOf("pdf_inspect", "pdf_model", "pdf_plan", "pdf_apply", "pdf_verify", "pdf_qa", "pdf_refuse", "pdf_fields")) {
+        for (name in listOf("pdf_inspect", "pdf_model", "pdf_plan", "pdf_apply", "pdf_verify", "pdf_qa", "pdf_render", "pdf_visual_confirm", "pdf_refuse", "pdf_fields")) {
             assertTrue(text.contains(name))
         }
     }

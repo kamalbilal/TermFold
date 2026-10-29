@@ -46,6 +46,7 @@ object PdfToolsGuest {
         writeAsset("pdfsys/pdfsys.py", "usr/local/bin/pdfsys")
         writeAsset("termfold-pdf.js", "usr/local/bin/termfold-pdf")
         writeAsset("pdfsys/qa_loop.py", "usr/local/lib/pdfsys/qa_loop.py")
+        writeAsset("pdfsys/render_pages.py", "usr/local/lib/pdfsys/render_pages.py")
     }
 
     /** Light stack for inspect, toolkit, Path A apply — avoids apt/pip heavy install on every import. */

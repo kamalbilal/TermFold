@@ -119,6 +119,26 @@ const TOOLS = [
     required: [],
   },
   {
+    name: 'pdf_render',
+    action: 'pdf_tools_render',
+    description: 'Rasterize output (or source) PDF to PNG pages under work/renders/deliverable/ for visual review. Returns image paths only, not pixels in chat.',
+    props: {
+      which: { type: 'string' },
+      dpi: { type: 'number' },
+    },
+    required: [],
+  },
+  {
+    name: 'pdf_visual_confirm',
+    action: 'pdf_tools_visual_confirm',
+    description: 'Record that you reviewed every deliverable PNG. Requires ok=true and pages_reviewed. pdf_verify fails without this after render.',
+    props: {
+      ok: { type: 'boolean' },
+      pages_reviewed: { type: 'number' },
+    },
+    required: ['ok', 'pages_reviewed'],
+  },
+  {
     name: 'pdf_refuse',
     action: 'pdf_tools_refuse',
     description: 'Record a refusal for third-party issued or unknown authorization.',

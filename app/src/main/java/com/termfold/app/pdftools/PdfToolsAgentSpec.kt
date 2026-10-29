@@ -29,7 +29,8 @@ Never patch names with white boxes on page images. Never form-fill over a printe
 1. Confirmed values in fields (`employee_name` for person name).
 2. Plan: replace_text, find = exact on-page words, replace = new words.
 3. User Approve (PDF ⋮) → apply → verify.
-4. One–two sentences: file ready.
+4. **Visual gate:** pdf_render → open/review every PNG in work/renders/deliverable/ → pdf_visual_confirm → pdf_verify (must pass).
+5. One–two sentences: file ready.
 
 Skip re-inspect if upload unchanged and inspect data already exists.
 
@@ -39,7 +40,8 @@ Skip re-inspect if upload unchanged and inspect data already exists.
 3. Assets: crop logo/unchanged sigs from page 1 at **300 DPI**; redraw changed employee signature as **SVG or high-DPI transparent PNG** (see pipeline §6).
 4. Write `out/output.pdf` (and `out/letter.pdf` if product expects it).
 5. Run session QA script (§5). If fail, fix template/assets and retry (max 5).
-6. One–two sentences: file ready.
+6. **Visual gate:** render final PDF to PNG (`work/renders/deliverable/`), review every page image, `pdf_visual_confirm`, then `pdf_verify`.
+7. One–two sentences: file ready.
 
 Do **not** use plain text-only rebuild that removes letterhead. Do **not** paint-over old pages for Path B deliverables.
 
@@ -53,8 +55,10 @@ Session layout: input/source.pdf, fields.json, out/output.pdf, work/golden|candi
 
 Libraries (mandatory first turn): run `pdfsys probe`. On MISSING_DEPS or false modules, install before any MCP step — basic: pypdf, reportlab, tesseract, poppler (`ensureBasicLibraries` / guest pip+apt); Path B add pymupdf, weasyprint, pillow, numpy, scikit-image, diffpdf from `requirements-pdf-tools.txt` (`ensurePathBLibraries`). Re-probe until the path you need passes; never chain failed inspect/apply/qa on missing deps.
 
-Path A tools (in-place only): pdf_fields, pdf_plan (replace_text), user Approve, pdf_apply, pdf_verify.
-Path B: build work/pack.html (+ optional touch work/path_b when starting recreate), run work/generate.py, then work/qa_loop.py or pdf_qa until work/qa/report.json pass is true. Path B guest libraries install on first pdf_qa or Install button — not on every import.
+Path A tools (in-place only): pdf_fields, pdf_plan (replace_text), user Approve, pdf_apply, pdf_render, pdf_visual_confirm, pdf_verify.
+Path B: build work/pack.html (+ optional touch work/path_b when starting recreate), run work/generate.py, then work/qa_loop.py or pdf_qa until work/qa/report.json pass is true. **Before user-ready:** pdf_render → review PNGs → pdf_visual_confirm → pdf_verify (checks QA + visual_review.json).
+
+Deliverable review: pdfsys render-deliverable @ 150 DPI (PyMuPDF or pdftoppm) → work/renders/deliverable/page_NNN.png + manifest.json. pdf_verify fails without visual_review.json ok matching current output hash.
 
 Path B stack: WeasyPrint + PyMuPDF renders; QA uses page-count gate + SSIM (≥0.93 on non-mask regions when name changed). Never auto plain-text-only recreate on scan/mixed PDFs.
 

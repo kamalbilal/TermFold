@@ -67,6 +67,8 @@ object PdfToolsBridge {
                 timeoutSeconds = 300,
             )
             "pdf_tools_fields" -> fields(args, context, sessionId)
+            "pdf_tools_render" -> renderDeliverable(context, sessionId, args)
+            "pdf_tools_visual_confirm" -> visualConfirm(args, context, sessionId)
             else -> err("Unknown PDF Tools action")
         }
     }
@@ -159,6 +161,69 @@ object PdfToolsBridge {
             .put("path", "${PdfToolsPaths.sessionGuest(sessionId)}/fields.json")
             .put("keys", org.json.JSONArray(current.keys.toList()))
             .put("fields", obj)
+    }
+
+    private fun renderDeliverable(context: Context?, sessionId: String, args: JSONObject): JSONObject {
+        if (context == null) return JSONObject().put("ok", true).put("skipped", true)
+        val prep = PdfToolsGuest.ensureBasicLibraries(context)
+        if (prep.first != 0) {
+            return err("PDF render libraries not ready. Install PDF engine on PDF Tools, then retry pdf_render.")
+        }
+        val guest = PdfToolsPaths.sessionGuest(sessionId)
+        val which = args.optString("which").ifBlank { "output" }
+        val dpi = args.optInt("dpi", 150).takeIf { it in 72..600 } ?: 150
+        return runGuest(
+            context,
+            sessionId,
+            listOf(
+                "render-deliverable",
+                "--session",
+                guest,
+                "--which",
+                which,
+                "--dpi",
+                dpi.toString(),
+            ),
+            timeoutSeconds = 300,
+        )
+    }
+
+    private fun visualConfirm(args: JSONObject, context: Context?, sessionId: String): JSONObject {
+        if (context == null) return JSONObject().put("ok", true).put("skipped", true)
+        if (!args.optBoolean("ok")) {
+            return err("Set ok=true only after you reviewed every PNG in work/renders/deliverable/.")
+        }
+        val pagesReviewed = args.optInt("pages_reviewed")
+        if (pagesReviewed <= 0) {
+            return err("pages_reviewed is required (count of PNG pages you inspected).")
+        }
+        val dir = PdfToolsPaths.hostSessionDir(context, sessionId)
+        val manifest = PdfToolsPaths.renderManifestFile(dir)
+        if (!manifest.isFile) {
+            return err("Run pdf_render first (work/renders/manifest.json missing).")
+        }
+        val expected = runCatching {
+            org.json.JSONObject(manifest.readText()).optInt("page_count")
+        }.getOrDefault(0)
+        if (expected > 0 && pagesReviewed < expected) {
+            return err("pages_reviewed=$pagesReviewed but manifest expects $expected pages.")
+        }
+        val output = PdfToolsPaths.outputPdf(dir)
+        val outputSha = if (output.isFile) PdfToolsImport.sha256(output) else null
+        val review = PdfToolsPaths.visualReviewFile(dir)
+        review.parentFile?.mkdirs()
+        review.writeText(
+            org.json.JSONObject()
+                .put("ok", true)
+                .put("pages_reviewed", pagesReviewed)
+                .put("output_sha256", outputSha)
+                .put("confirmed_at_ms", System.currentTimeMillis())
+                .toString() + "\n",
+        )
+        return JSONObject()
+            .put("ok", true)
+            .put("path", "${PdfToolsPaths.sessionGuest(sessionId)}/work/visual_review.json")
+            .put("pages_reviewed", pagesReviewed)
     }
 
     private fun verifyArgs(sessionId: String, context: Context?): List<String> {
