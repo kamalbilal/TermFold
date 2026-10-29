@@ -110,6 +110,22 @@ object ShellSetup {
         writeExecutable(File(rootfs, AUTOMATION_MEMORY_TOOL.trimStart('/')), asset("termfold-automation-memory.js"))
         writeExecutable(File(rootfs, PM_MEMORY_TOOL.trimStart('/')), asset("termfold-pm-memory.js"))
         writeExecutable(File(rootfs, PR_REVIEW_TOOL.trimStart('/')), asset("termfold-pr-review.js"))
+        writeExecutable(File(rootfs, PDF_TOOL.trimStart('/')), asset("termfold-pdf.js"))
+        writeExecutable(File(rootfs, PDFSYS_TOOL.trimStart('/')), asset("pdfsys/pdfsys.py"))
+        writeIfChanged(
+            File(rootfs, "usr/local/share/pdfsys/letter.json"),
+            asset("pdfsys/letter.json"),
+        )
+        val fontsDir = File(rootfs, "usr/local/share/fonts/termfold")
+        fontsDir.mkdirs()
+        for (font in listOf(
+            "LiberationSans-Regular.ttf",
+            "LiberationSans-Bold.ttf",
+            "NotoNaskhArabic-Regular.ttf",
+            "NotoNastaliqUrdu-Regular.ttf",
+        )) {
+            copyAssetBytes(context, "pdf-fonts/$font", File(fontsDir, font))
+        }
         writeIfChanged(
             File(rootfs, "root/.claude/skills/termfold-automation/SKILL.md"),
             asset("termfold-automation-skill.md"),
@@ -194,11 +210,20 @@ object ShellSetup {
     const val AUTOMATION_MEMORY_TOOL = "/usr/local/bin/termfold-automation-memory"
     const val PM_MEMORY_TOOL = "/usr/local/bin/termfold-pm-memory"
     const val PR_REVIEW_TOOL = "/usr/local/bin/termfold-pr-review"
+    const val PDF_TOOL = "/usr/local/bin/termfold-pdf"
+    const val PDFSYS_TOOL = "/usr/local/bin/pdfsys"
 
     private fun writeIfChanged(file: File, content: String) {
         if (file.isFile && file.readText() == content) return
         file.parentFile?.mkdirs()
         file.writeText(content)
+    }
+
+    private fun copyAssetBytes(context: Context, assetName: String, dest: File) {
+        val bytes = context.assets.open(assetName).use { it.readBytes() }
+        if (dest.isFile && dest.length() == bytes.size.toLong()) return
+        dest.parentFile?.mkdirs()
+        dest.writeBytes(bytes)
     }
 
     /**

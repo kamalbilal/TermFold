@@ -65,6 +65,10 @@ object BrowserBridge {
     @Volatile
     var prReviewSessionId: String? = null
 
+    /** Active PDF Tools session id for pdf_tools_* tools. */
+    @Volatile
+    var pdfToolsSessionId: String? = null
+
     /** Active coding-agent session compose key (workspace chat); lazy headless browser profile. */
     @Volatile
     var codingSessionKey: String? = null
@@ -134,6 +138,10 @@ object BrowserBridge {
             .put(
                 "pr_review_session_id",
                 prReviewSessionId ?: com.termfold.app.prreview.PrReviewSessionContext.activeSessionId ?: "",
+            )
+            .put(
+                "pdf_tools_session_id",
+                pdfToolsSessionId ?: com.termfold.app.pdftools.PdfToolsSessionContext.activeSessionId ?: "",
             )
             .put("agent_session_key", codingSessionKey ?: "")
         file.writeText(body.toString())
@@ -225,6 +233,19 @@ object BrowserBridge {
                 return JSONObject().put("error", "Browser command is bound to another PM session")
             }
             return com.termfold.app.pm.memory.PmMemoryBridge.handle(context, action, args)
+        }
+        if (action.startsWith("pdf_tools_")) {
+            val requiredId = pdfToolsSessionId
+            if (requiredId != null && com.termfold.app.pdftools.PdfToolsSessionContext.activeSessionId != requiredId) {
+                return JSONObject().put("error", "Browser command is bound to another PDF Tools session")
+            }
+            if (requiredId != null) {
+                val given = args.optString("session_id")
+                if (given.isNotBlank() && given != requiredId) {
+                    return JSONObject().put("error", "Browser command is bound to another PDF Tools session")
+                }
+            }
+            return com.termfold.app.pdftools.PdfToolsBridge.handle(action, args, context)
         }
         if (action.startsWith("pr_review_")) {
             val requiredId = prReviewSessionId

@@ -1,0 +1,10 @@
+# TermFold PDF Tools — docs/PDF-TOOLS-AGENT-SPEC.md §7
+pymupdf>=1.24
+weasyprint>=62
+pillow>=10
+numpy>=1.26
+scikit-image>=0.22
+opencv-python-headless>=4.8
+diffpdf>=1.2
+pypdf>=4.0
+reportlab>=4.0

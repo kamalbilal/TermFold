@@ -58,6 +58,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.UUID
 
 /** Progress of a full backup or restore to a single `.termfold` file. */
@@ -78,6 +79,14 @@ data class PrReviewJob(
 )
 
 data class PmJob(
+    val title: String,
+    val step: String = "",
+    val percent: Int = 0,
+    val error: String? = null,
+    val doneSessionId: String? = null,
+)
+
+data class PdfToolsJob(
     val title: String,
     val step: String = "",
     val percent: Int = 0,
@@ -120,6 +129,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val automationStore = AutomationStore(application)
     private val prReviewStore = PrReviewStore(application)
     private val pmSessionStore = PmSessionStore(application)
+    private val pdfToolsStore = com.termfold.app.data.PdfToolsStore(application)
 
     val folders: StateFlow<AppData> = store.data
         .stateIn(viewModelScope, SharingStarted.Eagerly, AppData())
@@ -132,6 +142,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     val pmSessions: StateFlow<PmData> = pmSessionStore.data
         .stateIn(viewModelScope, SharingStarted.Eagerly, PmData())
+
+    val pdfTools: StateFlow<com.termfold.app.pdftools.PdfToolsData> = pdfToolsStore.data
+        .stateIn(viewModelScope, SharingStarted.Eagerly, com.termfold.app.pdftools.PdfToolsData())
 
     private val _shell = MutableStateFlow(ShellProgress())
     val shell: StateFlow<ShellProgress> = _shell.asStateFlow()
@@ -149,6 +162,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _pmJob = MutableStateFlow<PmJob?>(null)
     val pmJob: StateFlow<PmJob?> = _pmJob.asStateFlow()
     private var pmBindJob: Job? = null
+
+    private val _pdfToolsJob = MutableStateFlow<PdfToolsJob?>(null)
+    val pdfToolsJob: StateFlow<PdfToolsJob?> = _pdfToolsJob.asStateFlow()
+    private val _pdfToolsLibrariesReady = MutableStateFlow(
+        com.termfold.app.pdftools.PdfToolsGuest.librariesReady(application),
+    )
+    val pdfToolsLibrariesReady: StateFlow<Boolean> = _pdfToolsLibrariesReady.asStateFlow()
 
     fun dismissJob() {
         if (_job.value?.done == true || _job.value?.error != null) _job.value = null
@@ -1221,5 +1241,317 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun upsertPmSessionRemoval(sessionId: String) {
         pmSessionStore.update { it.without(sessionId) }
+    }
+
+    fun createPdfToolsSession(
+        jobType: com.termfold.app.pdftools.PdfToolsJobType,
+        name: String,
+        onReady: (String) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val id = UUID.randomUUID().toString()
+            val session = com.termfold.app.pdftools.PdfToolsSession(
+                id = id,
+                name = name.ifBlank {
+                    if (jobType == com.termfold.app.pdftools.PdfToolsJobType.GENERATE) "Letter" else "PDF"
+                },
+                jobType = jobType,
+                authzClass = if (jobType == com.termfold.app.pdftools.PdfToolsJobType.GENERATE) {
+                    com.termfold.app.pdftools.PdfToolsAuthzClass.OWN_TEMPLATE
+                } else {
+                    com.termfold.app.pdftools.PdfToolsAuthzClass.OWN_DATA_DOC
+                },
+                tint = pdfTools.value.sessions.size % 6,
+                createdAtMs = System.currentTimeMillis(),
+                updatedAtMs = System.currentTimeMillis(),
+            )
+            withContext(Dispatchers.IO) {
+                com.termfold.app.pdftools.PdfToolsPaths.ensureStub(app, id)
+            }
+            pdfToolsStore.update { it.upsert(session) }
+            onReady(id)
+        }
+    }
+
+    fun updatePdfToolsSession(session: com.termfold.app.pdftools.PdfToolsSession) {
+        viewModelScope.launch {
+            pdfToolsStore.update { it.upsert(session.copy(updatedAtMs = System.currentTimeMillis())) }
+        }
+    }
+
+    fun removePdfToolsSession(sessionId: String) {
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            com.termfold.app.acp.AcpSessions.close(
+                com.termfold.app.pdftools.PdfToolsKeys.acpSessionKey(sessionId),
+            )
+            withContext(Dispatchers.IO) {
+                com.termfold.app.pdftools.PdfToolsPaths.hostSessionDir(app, sessionId).deleteRecursively()
+            }
+            pdfToolsStore.update { it.without(sessionId) }
+        }
+    }
+
+    fun importPdfToSession(sessionId: String, source: File, password: String? = null) {
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", step = "Importing…")
+            val session = pdfTools.value.session(sessionId) ?: return@launch
+            withContext(Dispatchers.IO) {
+                val libs = com.termfold.app.pdftools.PdfToolsGuest.ensureBasicLibraries(app)
+                if (libs.first == 0) _pdfToolsLibrariesReady.value = true
+                val dir = com.termfold.app.pdftools.PdfToolsPaths.ensureStub(app, sessionId)
+                val copied = com.termfold.app.pdftools.PdfToolsImport.copy(
+                    source,
+                    com.termfold.app.pdftools.PdfToolsPaths.inputDir(dir),
+                )
+                if (copied.error != null) {
+                    _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", error = copied.error)
+                    return@withContext
+                }
+                com.termfold.app.pdftools.PdfToolsFields.ensure(
+                    com.termfold.app.pdftools.PdfToolsPaths.fieldsFile(dir),
+                )
+                val inspectOut = com.termfold.app.pdftools.PdfToolsPaths.inspectFile(dir)
+                if (inspectOut.exists()) inspectOut.delete()
+                val args = buildList {
+                    add("inspect")
+                    add(com.termfold.app.pdftools.PdfToolsPaths.sessionGuest(sessionId) + "/input/source.pdf")
+                    add("--out")
+                    add(com.termfold.app.pdftools.PdfToolsPaths.sessionGuest(sessionId) + "/inspect.json")
+                    if (!password.isNullOrBlank()) {
+                        add("--password")
+                        add(password)
+                    }
+                }
+                val inspectRun = com.termfold.app.pdftools.PdfToolsGuest.run(app, args)
+                var inspectRaw = inspectOut.takeIf { it.isFile }?.readText()
+                    .orEmpty()
+                    .ifBlank { inspectRun.second }
+                var summary = if (inspectRaw.isNotBlank()) {
+                    com.termfold.app.pdftools.PdfToolsInspect.parse(inspectRaw)
+                } else {
+                    com.termfold.app.pdftools.PdfToolsInspectSummary(ok = false, error = "inspect missing")
+                }
+                if (!summary.ok || summary.code == "MISSING_DEPS") {
+                    inspectRaw = com.termfold.app.pdftools.PdfToolsImport.fallbackInspectJson(copied.dest!!)
+                    summary = com.termfold.app.pdftools.PdfToolsInspect.parse(inspectRaw)
+                    inspectOut.writeText(inspectRaw)
+                }
+                pdfToolsStore.update {
+                    it.upsert(
+                        session.copy(
+                            inputSha256 = copied.sha256,
+                            inspectJson = inspectRaw.ifBlank { null },
+                            encrypted = summary.encrypted,
+                            updatedAtMs = System.currentTimeMillis(),
+                        ),
+                    )
+                }
+                _pdfToolsJob.value = if (summary.code == "ENCRYPTED") {
+                    PdfToolsJob(title = "PDF Tools", error = "encrypted")
+                } else {
+                    PdfToolsJob(title = "PDF Tools", doneSessionId = sessionId, percent = 100)
+                }
+            }
+        }
+    }
+
+    fun generatePdfSession(sessionId: String, fields: Map<String, String>) {
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val session = pdfTools.value.session(sessionId) ?: return@launch
+            val blocked = com.termfold.app.pdftools.PdfToolsAuthz.blockReason(session.authzClass)
+            if (blocked != null) {
+                _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", error = blocked)
+                return@launch
+            }
+            _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", step = "Generating…")
+            if (!ensurePdfsysLibraries()) return@launch
+            withContext(Dispatchers.IO) {
+                val dir = com.termfold.app.pdftools.PdfToolsPaths.ensureStub(app, sessionId)
+                com.termfold.app.pdftools.PdfToolsFields.write(
+                    com.termfold.app.pdftools.PdfToolsPaths.fieldsFile(dir),
+                    fields,
+                )
+                val guest = com.termfold.app.pdftools.PdfToolsPaths.sessionGuest(sessionId)
+                val generated = com.termfold.app.pdftools.PdfToolsGuest.run(
+                    app,
+                    listOf(
+                        "generate",
+                        "--fields", "$guest/fields.json",
+                        "--fonts", com.termfold.app.pdftools.PdfToolsPaths.FONTS_GUEST,
+                        "-o", "$guest/out/output.pdf",
+                    ),
+                )
+                if (generated.first != 0) {
+                    _pdfToolsJob.value = PdfToolsJob(
+                        title = "PDF Tools",
+                        error = generated.second.takeLast(400).ifBlank { "Generate failed" },
+                    )
+                    return@withContext
+                }
+                val verified = com.termfold.app.pdftools.PdfToolsGuest.run(
+                    app,
+                    listOf(
+                        "verify",
+                        "$guest/out/output.pdf",
+                        "--report", "$guest/report.md",
+                    ),
+                )
+                if (verified.first != 0) {
+                    _pdfToolsJob.value = PdfToolsJob(
+                        title = "PDF Tools",
+                        error = verified.second.takeLast(400).ifBlank { "Verify failed" },
+                    )
+                    return@withContext
+                }
+                val outFile = com.termfold.app.pdftools.PdfToolsPaths.outputPdf(dir)
+                val sha = if (outFile.isFile) com.termfold.app.pdftools.PdfToolsImport.sha256(outFile) else null
+                val report = com.termfold.app.pdftools.PdfToolsPaths.reportFile(dir).takeIf { it.isFile }?.readText()
+                if (outFile.isFile.not() || report.isNullOrBlank()) {
+                    _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", error = "Generate or verify failed")
+                    return@withContext
+                }
+                pdfToolsStore.update {
+                    it.upsert(
+                        session.copy(
+                            outputSha256 = sha,
+                            lastReport = report,
+                            updatedAtMs = System.currentTimeMillis(),
+                        ),
+                    )
+                }
+                _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", doneSessionId = sessionId, percent = 100)
+            }
+        }
+    }
+
+    fun runPdfToolkit(op: String, inputs: List<File>, extra: Map<String, String> = emptyMap(), authz: com.termfold.app.pdftools.PdfToolsAuthzClass) {
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val blocked = com.termfold.app.pdftools.PdfToolsAuthz.blockReason(authz)
+            if (blocked != null) {
+                _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", error = blocked)
+                return@launch
+            }
+            if (inputs.isEmpty()) {
+                _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", error = "Pick at least one file")
+                return@launch
+            }
+            _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", step = op)
+            if (!ensurePdfsysLibraries()) return@launch
+            withContext(Dispatchers.IO) {
+                val id = "toolkit-${System.currentTimeMillis()}"
+                val dir = com.termfold.app.pdftools.PdfToolsPaths.ensureStub(app, id)
+                val work = com.termfold.app.pdftools.PdfToolsPaths.workDir(dir).apply { mkdirs() }
+                val copied = inputs.mapIndexed { i, f ->
+                    val ext = f.extension.ifBlank { if (op == "images-to-pdf") "png" else "pdf" }
+                    val c = File(work, "in$i.$ext")
+                    f.copyTo(c, overwrite = true)
+                    c
+                }
+                val before = copied.map { com.termfold.app.pdftools.PdfToolsImport.sha256(it) }
+                val guest = com.termfold.app.pdftools.PdfToolsPaths.sessionGuest(id)
+                val guestIns = copied.map { "$guest/work/${it.name}" }
+                val outPdf = "$guest/out/out.pdf"
+                val outTxt = "$guest/out/out.txt"
+                val outImages = "$guest/out/images"
+                val guestArgs = when (op) {
+                    "merge" -> listOf("merge") + guestIns + listOf("-o", outPdf)
+                    "rotate" -> listOf("rotate", guestIns.first(), "--degrees", extra["degrees"] ?: "90", "-o", outPdf)
+                    "split" -> listOf(
+                        "split",
+                        guestIns.first(),
+                        "--start", extra["start"] ?: "1",
+                        "--end", extra["end"] ?: "1",
+                        "-o",
+                        outPdf,
+                    )
+                    "extract-text" -> listOf("extract-text", guestIns.first(), "-o", outTxt)
+                    "extract-images" -> listOf("extract-images", guestIns.first(), "-o", outImages)
+                    "images-to-pdf" -> listOf("images-to-pdf") + guestIns + listOf("-o", outPdf)
+                    else -> emptyList()
+                }
+                if (guestArgs.isEmpty()) {
+                    _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", error = "Unknown toolkit action")
+                    return@withContext
+                }
+                val result = com.termfold.app.pdftools.PdfToolsGuest.run(app, guestArgs)
+                val after = copied.map { com.termfold.app.pdftools.PdfToolsImport.sha256(it) }
+                if (before != after) {
+                    _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", error = "input mutated")
+                    return@withContext
+                }
+                if (result.first != 0) {
+                    _pdfToolsJob.value = PdfToolsJob(
+                        title = "PDF Tools",
+                        error = result.second.takeLast(400).ifBlank { "Toolkit failed" },
+                    )
+                    return@withContext
+                }
+                val outHost = when (op) {
+                    "extract-text" -> File(com.termfold.app.pdftools.PdfToolsPaths.outDir(dir), "out.txt")
+                    "extract-images" -> File(com.termfold.app.pdftools.PdfToolsPaths.outDir(dir), "images")
+                    else -> File(com.termfold.app.pdftools.PdfToolsPaths.outDir(dir), "out.pdf")
+                }
+                if (!outHost.exists()) {
+                    _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", error = "Toolkit produced no output")
+                    return@withContext
+                }
+                val shareFiles = if (outHost.isDirectory) {
+                    outHost.listFiles()?.toList().orEmpty()
+                } else {
+                    listOf(outHost)
+                }
+                if (shareFiles.isNotEmpty()) {
+                    com.termfold.app.files.FileActions.share(app, shareFiles)
+                }
+                _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", percent = 100, doneSessionId = id)
+            }
+        }
+    }
+
+    private suspend fun ensurePdfsysLibraries(): Boolean {
+        val app = getApplication<Application>()
+        _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", step = "Installing PDF libraries…")
+        val result = withContext(Dispatchers.IO) {
+            com.termfold.app.pdftools.PdfToolsGuest.ensureBasicLibraries(app)
+        }
+        if (result.first != 0) {
+            _pdfToolsLibrariesReady.value = false
+            _pdfToolsJob.value = PdfToolsJob(
+                title = "PDF Tools",
+                error = "Could not install pypdf in the Linux environment. Check the connection and try again.",
+            )
+            return false
+        }
+        _pdfToolsLibrariesReady.value = true
+        return true
+    }
+
+    fun installPdfToolsLibraries() {
+        viewModelScope.launch {
+            _pdfToolsJob.value = PdfToolsJob(title = "PDF Tools", step = "Installing recreate/QA libraries…")
+            val app = getApplication<Application>()
+            val result = withContext(Dispatchers.IO) {
+                com.termfold.app.pdftools.PdfToolsGuest.ensurePathBLibraries(app)
+            }
+            if (result.first != 0) {
+                _pdfToolsLibrariesReady.value = com.termfold.app.pdftools.PdfToolsGuest.librariesReady(app)
+                _pdfToolsJob.value = PdfToolsJob(
+                    title = "PDF Tools",
+                    error = "Could not install Path B libraries (WeasyPrint/PyMuPDF). Check connection and try again.",
+                )
+                return@launch
+            }
+            _pdfToolsLibrariesReady.value = true
+            _pdfToolsJob.value = PdfToolsJob(
+                title = "PDF Tools",
+                step = "Recreate/QA libraries installed",
+                percent = 100,
+            )
+        }
     }
 }

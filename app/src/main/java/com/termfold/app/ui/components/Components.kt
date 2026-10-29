@@ -216,6 +216,7 @@ fun PrimaryButton(
     Row(
         modifier = modifier
             .height(40.dp)
+            .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(Palette.Accent)
             .clickable(onClick = onClick)
@@ -224,7 +225,13 @@ fun PrimaryButton(
     ) {
         Icon(imageVector = icon, contentDescription = null, tint = Palette.OnAccent, modifier = Modifier.size(18.dp))
         Spacer(Modifier.width(8.dp))
-        Text(text = label, style = MaterialTheme.typography.labelLarge.copy(fontSize = 14.sp), color = Palette.OnAccent, maxLines = 1)
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge.copy(fontSize = 14.sp),
+            color = Palette.OnAccent,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

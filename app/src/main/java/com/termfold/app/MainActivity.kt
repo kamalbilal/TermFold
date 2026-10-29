@@ -200,6 +200,7 @@ private sealed interface Destination {
     data class AutomationSession(val projectId: String, val sessionId: String) : Destination
     data class PrReviewSession(val sessionId: String) : Destination
     data class PmSession(val sessionId: String) : Destination
+    data class PdfToolsSession(val sessionId: String) : Destination
 }
 
 /** How deep a destination sits, used to give the transitions a consistent direction. */
@@ -212,6 +213,7 @@ private fun Destination.depth(): Int = when (this) {
     is Destination.AutomationSession -> 3
     is Destination.PrReviewSession -> 2
     is Destination.PmSession -> 2
+    is Destination.PdfToolsSession -> 2
 }
 
 /**
@@ -249,6 +251,7 @@ private sealed interface AutomationOptionsTarget {
 private sealed interface WorkflowSessionOptionsTarget {
     data class PrReview(val sessionId: String) : WorkflowSessionOptionsTarget
     data class Pm(val sessionId: String) : WorkflowSessionOptionsTarget
+    data class PdfTools(val sessionId: String) : WorkflowSessionOptionsTarget
 }
 
 @Composable
@@ -259,6 +262,9 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
     val prReviewJob by viewModel.prReviewJob.collectAsStateWithLifecycle()
     val pmData by viewModel.pmSessions.collectAsStateWithLifecycle()
     val pmJob by viewModel.pmJob.collectAsStateWithLifecycle()
+    val pdfToolsData by viewModel.pdfTools.collectAsStateWithLifecycle()
+    val pdfToolsJob by viewModel.pdfToolsJob.collectAsStateWithLifecycle()
+    val pdfToolsLibrariesReady by viewModel.pdfToolsLibrariesReady.collectAsStateWithLifecycle()
     val shell by viewModel.shell.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
@@ -517,6 +523,26 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                         )
                     }
                 }
+                is Destination.PdfToolsSession -> {
+                    pdfToolsData.session(d.sessionId)?.let { session ->
+                        Folder(
+                            id = "pdf-tools-${session.id}",
+                            name = session.name,
+                            path = com.termfold.app.pdftools.PdfToolsPaths.hostSessionDir(context, session.id).absolutePath,
+                            tint = session.tint,
+                            sessions = listOf(
+                                Session(
+                                    id = session.id,
+                                    name = session.name,
+                                    command = "",
+                                    tint = session.tint,
+                                    acpAgentId = session.acpAgentId,
+                                    workspaceId = "pdf-stub",
+                                ),
+                            ),
+                        )
+                    }
+                }
                 else -> null
             }
             val filesRootHostPath = when (val d = destination) {
@@ -562,6 +588,10 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                         }
                     }
                 }
+                is Destination.PdfToolsSession ->
+                    pdfToolsData.session(d.sessionId)?.let {
+                        com.termfold.app.pdftools.PdfToolsPaths.hostSessionDir(context, it.id).absolutePath
+                    }
                 else -> null
             }
             val sessionWorkspaceFilesScope = when (val d = destination) {
@@ -755,6 +785,31 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                         onStartPmRelease = { folderId, branch, name, label ->
                             viewModel.startPmRelease(folderId, branch, name, label)
                         },
+                        pdfToolsSessions = pdfToolsData.sessions,
+                        pdfToolsError = pdfToolsJob?.let { job ->
+                            job.error ?: job.step.takeIf { it.isNotBlank() && job.doneSessionId == null }
+                        },
+                        pdfToolsLibrariesReady = pdfToolsLibrariesReady,
+                        onOpenPdfToolsSession = { destination = Destination.PdfToolsSession(it) },
+                        onOpenPdfToolsSessionOptions = { sessionId ->
+                            workflowSessionOptionsFor = WorkflowSessionOptionsTarget.PdfTools(sessionId)
+                        },
+                        onStartPdfInspect = {
+                            viewModel.createPdfToolsSession(
+                                com.termfold.app.pdftools.PdfToolsJobType.INSPECT,
+                                "Inspect",
+                            ) { id -> destination = Destination.PdfToolsSession(id) }
+                        },
+                        onStartPdfGenerate = {
+                            viewModel.createPdfToolsSession(
+                                com.termfold.app.pdftools.PdfToolsJobType.GENERATE,
+                                "Generate",
+                            ) { id -> destination = Destination.PdfToolsSession(id) }
+                        },
+                        onInstallPdfTools = { viewModel.installPdfToolsLibraries() },
+                        onPdfToolkit = { op, files, authz, extra ->
+                            viewModel.runPdfToolkit(op, files, extra = extra, authz = authz)
+                        },
                         useGrid = windowWidth.isWide,
                         modifier = Modifier.windowInsetsPadding(
                             WindowInsets.safeDrawing.only(
@@ -873,6 +928,59 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                             },
                             onSetViewBranch = { id, branch ->
                                 viewModel.setPmViewBranch(id, branch)
+                            },
+                            filesOpen = filesOpen,
+                            onToggleFiles = { filesOpen = !filesOpen },
+                            modifier = Modifier.windowInsetsPadding(
+                                WindowInsets.safeDrawing.only(
+                                    WindowInsetsSides.Top + WindowInsetsSides.End,
+                                ),
+                            ),
+                        )
+                    }
+                }
+
+                is Destination.PdfToolsSession -> {
+                    val session = pdfToolsData.session(current.sessionId)
+                    if (session == null) {
+                        LaunchedEffect(current.sessionId) {
+                            destination = Destination.WorkflowsSection(WorkflowsSection.PDF_TOOLS)
+                        }
+                    } else {
+                        BackHandler {
+                            tab = NavTab.WORKFLOWS
+                            destination = Destination.WorkflowsSection(WorkflowsSection.PDF_TOOLS)
+                        }
+                        com.termfold.app.ui.screens.PdfToolsAgentSessionScreen(
+                            session = session,
+                            onBack = {
+                                tab = NavTab.WORKFLOWS
+                                destination = Destination.WorkflowsSection(WorkflowsSection.PDF_TOOLS)
+                            },
+                            onUpdate = { viewModel.updatePdfToolsSession(it) },
+                            onImportFile = { file, password -> viewModel.importPdfToSession(session.id, file, password) },
+                            onGenerate = { fields -> viewModel.generatePdfSession(session.id, fields) },
+                            onShare = {
+                                val dir = com.termfold.app.pdftools.PdfToolsPaths.hostSessionDir(context, session.id)
+                                val pdf = com.termfold.app.pdftools.PdfToolsPaths.outputPdf(dir)
+                                val report = com.termfold.app.pdftools.PdfToolsPaths.reportFile(dir)
+                                val inspect = com.termfold.app.pdftools.PdfToolsPaths.inspectFile(dir)
+                                val files = listOf(pdf, report, inspect).filter { it.isFile }
+                                if (files.isNotEmpty()) {
+                                    com.termfold.app.files.FileActions.share(context, files)
+                                }
+                            },
+                            pendingPlanJson = com.termfold.app.pdftools.PdfToolsSessionContext.pendingPlanJson
+                                .collectAsStateWithLifecycle()
+                                .value,
+                            onApprovePlan = { _ ->
+                                if (com.termfold.app.pdftools.PdfToolsSessionContext.approvePending()) {
+                                    viewModel.updatePdfToolsSession(
+                                        session.copy(
+                                            approvedPlanId = com.termfold.app.pdftools.PdfToolsSessionContext.approvedPlanId,
+                                        ),
+                                    )
+                                }
                             },
                             filesOpen = filesOpen,
                             onToggleFiles = { filesOpen = !filesOpen },
@@ -1268,6 +1376,8 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                     prReviewData.session(target.sessionId)?.name.orEmpty()
                 is WorkflowSessionOptionsTarget.Pm ->
                     pmData.session(target.sessionId)?.name.orEmpty()
+                is WorkflowSessionOptionsTarget.PdfTools ->
+                    pdfToolsData.session(target.sessionId)?.name.orEmpty()
             }
         },
         onConfirmDelete = { target ->
@@ -1288,6 +1398,15 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                     ) {
                         tab = NavTab.WORKFLOWS
                         destination = Destination.WorkflowsSection(WorkflowsSection.PRODUCT_MANAGER)
+                    }
+                }
+                is WorkflowSessionOptionsTarget.PdfTools -> {
+                    viewModel.removePdfToolsSession(target.sessionId)
+                    if (destination is Destination.PdfToolsSession &&
+                        (destination as Destination.PdfToolsSession).sessionId == target.sessionId
+                    ) {
+                        tab = NavTab.WORKFLOWS
+                        destination = Destination.WorkflowsSection(WorkflowsSection.PDF_TOOLS)
                     }
                 }
             }

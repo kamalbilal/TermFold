@@ -143,6 +143,55 @@ class ShareReceiverActivity : ComponentActivity() {
                             }
                         } else {
                             LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                                if (com.termfold.app.pdftools.PdfToolsShare.isPdf(
+                                        intent.type,
+                                        uris.map { FileActions.displayName(this@ShareReceiverActivity, it).orEmpty() },
+                                    )
+                                ) {
+                                    item {
+                                        Destination(stringResource(R.string.pdf_tools_share_inspect), TermFoldIcons.FileText) {
+                                            saving = true
+                                            scope.launch {
+                                                val result = withContext(Dispatchers.IO) {
+                                                    runCatching {
+                                                        val id = java.util.UUID.randomUUID().toString()
+                                                        val dir = com.termfold.app.pdftools.PdfToolsPaths.ensureStub(
+                                                            this@ShareReceiverActivity,
+                                                            id,
+                                                        )
+                                                        val uri = uris.first()
+                                                        contentResolver.openInputStream(uri)?.use { input ->
+                                                            val copied = com.termfold.app.pdftools.PdfToolsImport.copyFromStream(
+                                                                input,
+                                                                com.termfold.app.pdftools.PdfToolsPaths.inputDir(dir),
+                                                            )
+                                                            if (copied.error != null) error(copied.error!!)
+                                                        } ?: error("Could not read PDF")
+                                                        val store = com.termfold.app.data.PdfToolsStore(this@ShareReceiverActivity)
+                                                        store.update {
+                                                            it.upsert(
+                                                                com.termfold.app.pdftools.PdfToolsSession(
+                                                                    id = id,
+                                                                    name = FileActions.displayName(this@ShareReceiverActivity, uri) ?: "Inspect",
+                                                                    jobType = com.termfold.app.pdftools.PdfToolsJobType.INSPECT,
+                                                                    createdAtMs = System.currentTimeMillis(),
+                                                                    updatedAtMs = System.currentTimeMillis(),
+                                                                ),
+                                                            )
+                                                        }
+                                                        id
+                                                    }
+                                                }
+                                                Toast.makeText(
+                                                    this@ShareReceiverActivity,
+                                                    result.fold({ getString(R.string.share_saved, "PDF Tools") }, { it.message ?: "Failed" }),
+                                                    Toast.LENGTH_LONG,
+                                                ).show()
+                                                finish()
+                                            }
+                                        }
+                                    }
+                                }
                                 items(projects, key = { it.absolutePath }) { dir ->
                                     Destination(dir.name, TermFoldIcons.Folder) { saveTo(dir) }
                                 }

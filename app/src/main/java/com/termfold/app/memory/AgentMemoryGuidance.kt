@@ -1,10 +1,13 @@
 package com.termfold.app.memory
 
+import com.termfold.app.pdftools.PdfToolsAgentSpec
+
 enum class AgentMemoryWorkflow {
     CODING,
     AUTOMATION,
     PR_REVIEW,
     PM,
+    PDF_TOOLS,
 }
 
 object AgentMemoryGuidance {
@@ -12,6 +15,7 @@ object AgentMemoryGuidance {
     fun promptBlock(workflow: AgentMemoryWorkflow): String = when (workflow) {
         AgentMemoryWorkflow.PM -> PM_BLOCK
         AgentMemoryWorkflow.PR_REVIEW -> PR_REVIEW_BLOCK
+        AgentMemoryWorkflow.PDF_TOOLS -> PDF_TOOLS_BLOCK
         AgentMemoryWorkflow.AUTOMATION,
         AgentMemoryWorkflow.CODING,
         -> TERMFOLD_MEMORY_BLOCK
@@ -31,6 +35,16 @@ object AgentMemoryGuidance {
 - Secrets: session_secret_put / session_secret_get only.
 - After you learn something useful for a later turn, write it; do not rely on chat history alone.
 """.trim()
+
+    private val PDF_TOOLS_BLOCK: String = buildString {
+        appendLine("## TermFold PDF Tools")
+        appendLine(PdfToolsAgentSpec.AGENT_BEHAVIOR)
+        appendLine()
+        appendLine("## TermFold memory (MCP termfold-automation-memory)")
+        appendLine("- At the start of a new task, after the user changes direction, or when you are unsure: call session_memory_search with a short query from the user's goal (not only the current URL).")
+        appendLine("- Session-private (session_memory_write, session_memory_get): goals, decisions, findings, and notes for this chat session only.")
+        appendLine("- Secrets: session_secret_put / session_secret_get only.")
+    }
 
     private val TERMFOLD_MEMORY_BLOCK: String = """
 ## TermFold memory (MCP termfold-automation-memory)

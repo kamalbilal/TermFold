@@ -180,8 +180,10 @@ fun AgentSessionScreen(
     branchChipOverride: String? = null,
     onBranchChipClick: (() -> Unit)? = null,
     onPmSessionMemory: (() -> Unit)? = null,
+    onPdfToolsDocument: (() -> Unit)? = null,
     pmMode: Boolean = false,
     prReviewMode: Boolean = false,
+    pdfToolsMode: Boolean = false,
     onReviewDone: (() -> Unit)? = null,
     onReviewAnother: (() -> Unit)? = null,
     /**
@@ -298,12 +300,13 @@ fun AgentSessionScreen(
             }
         }
     val agentMemoryPrefixState = androidx.compose.runtime.rememberUpdatedState(agentMemoryPrefixProvider)
-    val client = remember(key, guestDir, automationReadOnlyGuestRoot, pmMode, prReviewMode, wantsAgentMemoryTools) {
+    val client = remember(key, guestDir, automationReadOnlyGuestRoot, pmMode, prReviewMode, pdfToolsMode, wantsAgentMemoryTools) {
         val existing = AcpSessions.client(key)
         if (existing != null && existing.workspaceGuestDir == guestDir &&
             existing.hasProjectRulesHook() &&
             existing.usesAgentMemoryTools() == wantsAgentMemoryTools &&
-            existing.usesPrReviewMode() == prReviewMode
+            existing.usesPrReviewMode() == prReviewMode &&
+            existing.usesPdfToolsMode() == pdfToolsMode
         ) {
             existing
         } else {
@@ -323,16 +326,17 @@ fun AgentSessionScreen(
                     automationGuardrails = automationGuardrails,
                     pmMode = pmMode,
                     prReviewMode = prReviewMode,
+                    pdfToolsMode = pdfToolsMode,
                     agentMemoryTools = wantsAgentMemoryTools,
                 ),
             )
         }
     }
 
-    LaunchedEffect(key, guestDir, prReviewMode) {
+    LaunchedEffect(key, guestDir, prReviewMode, pdfToolsMode) {
         client.start()
         com.termfold.app.notify.SessionWatcher.onSessionStarted(context.applicationContext)
-        if (prReviewMode) {
+        if (prReviewMode || pdfToolsMode) {
             snapshotFlow {
                 val s = client.state.value
                 s.phase == AcpPhase.READY && !s.agentBusy && s.pendingPermission == null && s.pendingAskQuestion == null
@@ -506,6 +510,7 @@ fun AgentSessionScreen(
                 null
             },
             onPmSessionMemory = onPmSessionMemory,
+            onPdfToolsDocument = onPdfToolsDocument,
             auxTerminalTabs = if (isCursor) auxTerminalTabs.toList() else emptyList(),
             onOpenTerminal = if (isCursor) {
                 { tabId ->
@@ -893,6 +898,7 @@ private fun SessionHeader(
     onAutomationSessionMemory: (() -> Unit)? = null,
     onAutomationNavMemory: (() -> Unit)? = null,
     onPmSessionMemory: (() -> Unit)? = null,
+    onPdfToolsDocument: (() -> Unit)? = null,
     onProjectRules: (() -> Unit)? = null,
     onOpenTerminal: ((tabId: String?) -> Unit)? = null,
     auxTerminalTabs: List<AuxTerminalTab> = emptyList(),
@@ -982,6 +988,7 @@ private fun SessionHeader(
                 onAutomationSessionMemory = onAutomationSessionMemory,
                 onAutomationNavMemory = onAutomationNavMemory,
                 onPmSessionMemory = onPmSessionMemory,
+                onPdfToolsDocument = onPdfToolsDocument,
                 onProjectRules = onProjectRules,
                 stickyUserMessagesEnabled = stickyUserMessagesEnabled,
                 onStickyUserMessagesEnabledChange = onStickyUserMessagesEnabledChange,
@@ -1009,6 +1016,7 @@ private fun SessionHeaderOverflowMenu(
     onAutomationSessionMemory: (() -> Unit)?,
     onAutomationNavMemory: (() -> Unit)?,
     onPmSessionMemory: (() -> Unit)? = null,
+    onPdfToolsDocument: (() -> Unit)? = null,
     onProjectRules: (() -> Unit)? = null,
     stickyUserMessagesEnabled: Boolean = true,
     onStickyUserMessagesEnabledChange: (Boolean) -> Unit = {},
@@ -1173,6 +1181,23 @@ private fun SessionHeaderOverflowMenu(
                     onClick = {
                         expanded = false
                         onAutomationSessionMemory()
+                    },
+                )
+            }
+            if (onPdfToolsDocument != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.pdf_tools_document_menu), color = Palette.Text) },
+                    leadingIcon = {
+                        Icon(
+                            TermFoldIcons.FileText,
+                            contentDescription = null,
+                            tint = Palette.TextDim,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onPdfToolsDocument()
                     },
                 )
             }
@@ -3020,28 +3045,43 @@ private fun Composer(
                     size = 38,
                 )
                 Row(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .widthIn(min = 0.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.End,
                 ) {
-                    if (branchName != null && onBranchClick != null) {
-                        BranchChip(
-                            label = branchName.ifBlank { stringResource(R.string.workspace_branch_unknown) },
-                            onClick = onBranchClick,
-                            truncate = true,
-                            uncommittedChanges = branchUncommitted,
-                            modifier = Modifier.widthIn(max = 168.dp),
-                        )
-                        Spacer(Modifier.width(6.dp))
-                    }
-                    if (settings.isNotEmpty()) {
-                        SettingsButton(
-                            agentId,
-                            settings,
-                            onChangeSetting,
-                            summaryMaxWidth = 112.dp,
-                        )
-                        Spacer(Modifier.width(4.dp))
+                    // Branch + model summary shrink and ellipsize; Stop/Send stay pinned on the right.
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .widthIn(min = 0.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        if (branchName != null && onBranchClick != null) {
+                            BranchChip(
+                                label = branchName.ifBlank { stringResource(R.string.workspace_branch_unknown) },
+                                onClick = onBranchClick,
+                                truncate = true,
+                                uncommittedChanges = branchUncommitted,
+                                modifier = Modifier
+                                    .weight(1f, fill = false)
+                                    .widthIn(min = 0.dp, max = 168.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        if (settings.isNotEmpty()) {
+                            SettingsButton(
+                                agentId,
+                                settings,
+                                onChangeSetting,
+                                summaryMaxWidth = 112.dp,
+                                modifier = Modifier
+                                    .weight(1f, fill = false)
+                                    .widthIn(min = 0.dp),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                        }
                     }
                     // While the agent works: Stop, and beside it Send, which queues the message.
                     if (agentBusy) {
@@ -3233,6 +3273,7 @@ private fun SettingsButton(
     settings: List<AcpSetting>,
     onChange: (AcpSetting, String) -> Unit,
     summaryMaxWidth: androidx.compose.ui.unit.Dp = 200.dp,
+    modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     var open by remember { mutableStateOf(false) }
@@ -3257,15 +3298,17 @@ private fun SettingsButton(
         query = ""
     }
 
-    Box {
+    Box(modifier) {
         Row(
             modifier = Modifier
+                .fillMaxWidth()
                 .padding(vertical = 2.dp)
                 .height(36.dp)
                 .clip(RoundedCornerShape(12.dp))
                 .clickable { open = true }
                 .padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.End,
         ) {
             Icon(
                 TermFoldIcons.Sliders,
@@ -3281,7 +3324,9 @@ private fun SettingsButton(
                     color = Palette.TextDim,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = summaryMaxWidth),
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .widthIn(min = 0.dp, max = summaryMaxWidth),
                 )
             }
         }

@@ -39,6 +39,7 @@ object McpCatalog {
         automationMode: Boolean = false,
         pmMode: Boolean = false,
         prReviewMode: Boolean = false,
+        pdfToolsMode: Boolean = false,
         agentMemoryTools: Boolean = false,
     ): List<McpServerEntry> {
 
@@ -68,6 +69,9 @@ object McpCatalog {
         if (prReviewMode) {
             builtinPrReview(context)?.let { merged[it.name] = it }
         }
+        if (pdfToolsMode) {
+            builtinPdfTools(context)?.let { merged[it.name] = it }
+        }
 
         return merged.values.toList().sortedWith(compareBy({ it.source.ordinal }, { it.name.lowercase() }))
 
@@ -82,6 +86,7 @@ object McpCatalog {
         automationMode: Boolean = false,
         pmMode: Boolean = false,
         prReviewMode: Boolean = false,
+        pdfToolsMode: Boolean = false,
         agentMemoryTools: Boolean = false,
     ): JSONArray {
 
@@ -91,7 +96,7 @@ object McpCatalog {
 
         val array = JSONArray()
 
-        list(context, workspaceGuestDir, cursorAgent, automationMode, pmMode, prReviewMode, agentMemoryTools).forEach { entry ->
+        list(context, workspaceGuestDir, cursorAgent, automationMode, pmMode, prReviewMode, pdfToolsMode, agentMemoryTools).forEach { entry ->
 
             val configDefault = !entry.configDisabled
 
@@ -181,6 +186,27 @@ object McpCatalog {
         return McpServerEntry(
             key = McpJson.keyFor(McpSource.BUILTIN, "termfold-pr-review"),
             name = "termfold-pr-review",
+            source = McpSource.BUILTIN,
+            transport = McpTransport.Stdio(
+                command = node,
+                args = listOf(tool, "mcp"),
+                env = emptyMap(),
+            ),
+            configPath = null,
+            authHints = emptyList(),
+            configDisabled = false,
+        )
+    }
+
+    private fun builtinPdfTools(context: Context): McpServerEntry? {
+        val rootfs = ShellPaths.rootfsDir(context)
+        val node = "/opt/node/bin/node"
+        val tool = ShellSetup.PDF_TOOL
+        if (!File(rootfs, node.trimStart('/')).exists() || !File(rootfs, tool.trimStart('/')).isFile) return null
+        BrowserBridge.start(context)
+        return McpServerEntry(
+            key = McpJson.keyFor(McpSource.BUILTIN, "termfold-pdf"),
+            name = "termfold-pdf",
             source = McpSource.BUILTIN,
             transport = McpTransport.Stdio(
                 command = node,

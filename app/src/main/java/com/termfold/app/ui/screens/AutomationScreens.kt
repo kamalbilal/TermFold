@@ -51,6 +51,7 @@ enum class WorkflowsSection(@param:StringRes val labelRes: Int) {
     AUTOMATION(R.string.workflows_tab_automation),
     PR_REVIEWER(R.string.workflows_tab_pr_reviewer),
     PRODUCT_MANAGER(R.string.workflows_tab_product_manager),
+    PDF_TOOLS(R.string.workflows_tab_pdf_tools),
     MORE(R.string.workflows_tab_more),
 }
 
@@ -83,13 +84,15 @@ fun WorkflowsScreen(
                                     WorkflowsSection.AUTOMATION -> 0
                                     WorkflowsSection.PR_REVIEWER -> 1
                                     WorkflowsSection.PRODUCT_MANAGER -> 2
-                                    WorkflowsSection.MORE -> 3
+                                    WorkflowsSection.PDF_TOOLS -> 3
+                                    WorkflowsSection.MORE -> 4
                                 },
                             ),
                             icon = when (section) {
                                 WorkflowsSection.AUTOMATION -> TermFoldIcons.Sparkle
                                 WorkflowsSection.PR_REVIEWER -> TermFoldIcons.GitBranch
                                 WorkflowsSection.PRODUCT_MANAGER -> TermFoldIcons.Sparkle
+                                WorkflowsSection.PDF_TOOLS -> TermFoldIcons.FileText
                                 WorkflowsSection.MORE -> TermFoldIcons.More
                             },
                         )
@@ -131,6 +134,15 @@ fun WorkflowsSectionScreen(
     onOpenPmSessionOptions: (String) -> Unit = {},
     onStartPmDiscovery: (String, String) -> Unit = { _, _ -> },
     onStartPmRelease: (String, String, String, String) -> Unit = { _, _, _, _ -> },
+    pdfToolsSessions: List<com.termfold.app.pdftools.PdfToolsSession> = emptyList(),
+    pdfToolsError: String? = null,
+    pdfToolsLibrariesReady: Boolean = false,
+    onOpenPdfToolsSession: (String) -> Unit = {},
+    onOpenPdfToolsSessionOptions: (String) -> Unit = {},
+    onStartPdfInspect: () -> Unit = {},
+    onStartPdfGenerate: () -> Unit = {},
+    onInstallPdfTools: () -> Unit = {},
+    onPdfToolkit: (String, List<java.io.File>, com.termfold.app.pdftools.PdfToolsAuthzClass, Map<String, String>) -> Unit = { _, _, _, _ -> },
     useGrid: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -164,6 +176,20 @@ fun WorkflowsSectionScreen(
             onOpenSessionOptions = onOpenPmSessionOptions,
             onStartDiscovery = onStartPmDiscovery,
             onStartRelease = onStartPmRelease,
+            useGrid = useGrid,
+            modifier = modifier,
+        )
+        WorkflowsSection.PDF_TOOLS -> PdfToolsSectionScreen(
+            sessions = pdfToolsSessions,
+            error = pdfToolsError,
+            librariesReady = pdfToolsLibrariesReady,
+            onBack = onBack,
+            onOpenSession = onOpenPdfToolsSession,
+            onOpenSessionOptions = onOpenPdfToolsSessionOptions,
+            onStartInspect = onStartPdfInspect,
+            onStartGenerate = onStartPdfGenerate,
+            onInstallTools = onInstallPdfTools,
+            onToolkit = onPdfToolkit,
             useGrid = useGrid,
             modifier = modifier,
         )

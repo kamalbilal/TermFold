@@ -225,6 +225,7 @@ class AcpClient(
     private val automationGuardrails: (() -> AutomationGuardrailContext?)? = null,
     private val pmMode: Boolean = false,
     private val prReviewMode: Boolean = false,
+    private val pdfToolsMode: Boolean = false,
 ) {
 
     private val automationMode: Boolean = automationPromptPrefix != null
@@ -235,6 +236,8 @@ class AcpClient(
     internal fun usesAgentMemoryTools(): Boolean = agentMemoryTools
 
     internal fun usesPrReviewMode(): Boolean = prReviewMode
+
+    internal fun usesPdfToolsMode(): Boolean = pdfToolsMode
 
     private val _state = MutableStateFlow(AcpUiState())
     val state: StateFlow<AcpUiState> = _state.asStateFlow()
@@ -943,6 +946,7 @@ class AcpClient(
             automationMode = automationMode,
             pmMode = pmMode,
             prReviewMode = prReviewMode,
+            pdfToolsMode = pdfToolsMode,
             agentMemoryTools = agentMemoryTools,
         )
 

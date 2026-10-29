@@ -74,6 +74,13 @@ apt-get "${APT_OPTS[@]}" install --no-install-recommends \
   jq ripgrep fd-find tree tzdata \
   || fail "Installing developer tools failed."
 
+step "Installing PDF Tools Python libraries"
+if ! python3 -c "import pypdf, reportlab" >/dev/null 2>&1; then
+  apt-get "${APT_OPTS[@]}" install --no-install-recommends python3-pypdf python3-reportlab \
+    || python3 -m pip install --break-system-packages pypdf reportlab \
+    || printf '%sPDF libraries missing; pdfsys probe will report it.%s\n' "$dim" "$reset"
+fi
+
 step "Installing Node.js $NODE_VERSION"
 node_ok() {
   [ -f /opt/node/bin/npm ] && \
