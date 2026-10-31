@@ -1,12 +1,9 @@
-
-!.termfold/
-!.termfold/README-signing.txt
 # Ad-hoc APK copies at repo root (use app/build/outputs/apk/ for builds).
 # Optional Ubuntu rootfs from older releases; fetch with tools/fetch-shell-runtime.py if needed.
-# Release signing key; regenerate with tools/make-keystore.ps1.
-# Signing secrets live under .termfold/ (gitignored) — see .termfold/README-signing.txt
+# Release signing: tracked under .termfold/ on this private repo (see README-signing.txt).
 *.iml
 *.jks
+!.termfold/termfold-release.jks
 *.keystore
 .DS_Store
 .cxx/
@@ -15,7 +12,10 @@
 .idea/
 .kotlin/
 .shots/
-.termfold/
+.termfold/*
+!.termfold/README-signing.txt
+!.termfold/termfold-release.jks
+!.termfold/signing.properties
 .work/
 TermFold-*.apk
 __pycache__/

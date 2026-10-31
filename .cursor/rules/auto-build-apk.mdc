@@ -1,14 +1,26 @@
 ---
-description: Run assembleDebug after Android app code changes without waiting to be asked
+description: Run debug + production release APK builds after Android app code changes
 alwaysApply: true
 ---
 
-# Auto-build debug APK
+# Auto-build APKs (debug + production release)
 
 After changing Android app code under `app/` (Kotlin, resources, manifest) that the user will test on device:
 
-1. Run `./gradlew :app:assembleDebug -Pandroid.aapt2FromMavenOverride=/root/projects/Termfold/.tools/aapt2` before finishing the turn.
-2. If the build fails, fix compile errors and rebuild.
-3. Mention both debug APK paths: `app/build/outputs/apk/new/debug/TermFold-new-debug.apk` (`com.termfold.new`) and `app/build/outputs/apk/app/debug/TermFold-app-debug.apk` (`com.termfold.app`, release-signed when `termfold-release.jks` is present).
+1. Run debug:
+   `./gradlew :app:assembleDebug -Pandroid.aapt2FromMavenOverride=/root/projects/Termfold/.tools/aapt2`
+2. Run **store-matching production release** (same signature as Play/GitHub — in-place update, no uninstall):
+   `bash tools/build-production-apk.sh`
+   - Keystore + passwords are **committed** under `.termfold/` on this private repo (same cert after every clone). See `production-apk-signing.mdc` and `.termfold/README-signing.txt`.
+   - Optional override: `local.properties` or env (gitignored).
+3. If either build fails, fix compile/signing errors and rebuild.
+4. Before finishing the turn, mention all artifact paths:
+   - Debug: `app/build/outputs/apk/new/debug/TermFold-new-debug.apk` (`com.termfold.new`)
+   - Debug: `app/build/outputs/apk/app/debug/TermFold-app-debug.apk` (`com.termfold.app`; may be release-signed when the keystore is present)
+   - **Production release:** `app/build/outputs/apk/app/release/TermFold-app-release.apk` (`com.termfold.app`, R8 release — install with `adb install -r` to keep data)
 
-Skip the build for question-only replies, docs-only edits, or when the user explicitly says not to build.
+If `build-production-apk.sh` exits because keystore or passwords are missing on this machine, say so explicitly and point to `.termfold/README-signing.txt`; still report debug APK paths if debug succeeded.
+
+Skip all builds for question-only replies, docs-only edits, or when the user explicitly says not to build.
+
+Do **not** use `./gradlew :app:assembleAppRelease` alone for auto-build when the goal is updating an existing store/GitHub install — that fallback signs with the debug key when secrets are absent and will **not** replace the installed app in place.

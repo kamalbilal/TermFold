@@ -1,19 +1,21 @@
 ---
-description: How to build production com.termfold.app release APK and signing (no secrets in repo)
+description: How to build production com.termfold.app release APK and signing (private repo)
 alwaysApply: true
 ---
 
 # Production APK signing (com.termfold.app)
 
-## Where secrets live (never commit)
+## Where signing lives (this private repo)
 
-| Item | Path |
-|------|------|
-| Release keystore | `.termfold/termfold-release.jks` (preferred) or `termfold-release.jks` at repo root |
-| Passwords | `.termfold/signing.properties` via `bash tools/save-signing-config.sh`, or `local.properties`, or env |
-| Template | `local.properties.example`, `.termfold/README-signing.txt` |
+| Item | Path | In git? |
+|------|------|--------|
+| Release keystore | `.termfold/termfold-release.jks` (or `termfold-release.jks` at repo root) | **Yes** — tracked for clone |
+| Passwords | `.termfold/signing.properties` | **Yes** — tracked for clone |
+| Override | `local.properties` or env | No (gitignored) |
 
-Use the **same** `termfold-release.jks` that signs GitHub/Play releases. A new `tools/make-keystore.ps1` key will **not** update an existing store install without uninstall.
+Use the **same** `termfold-release.jks` that already signs your installed app / GitHub releases. Replacing it with a newly generated key requires uninstall before sideload.
+
+Details: `.termfold/README-signing.txt`, `tools/make-keystore.sh` / `tools/make-keystore.ps1` (new keys only).
 
 ## Build commands
 
@@ -32,4 +34,4 @@ Install keeping data (same signature): `adb install -r app/build/outputs/apk/app
 
 ## Do not store signing material in
 
-- Git, OpenSpec, session_memory_write, or chat logs. TermFold MCP `session_secret_*` is for automation browser credentials, not Android release keys.
+Public forks, OpenSpec, session_memory_write, or chat logs. TermFold MCP `session_secret_*` is for automation browser credentials, not Android release keys. **This private repo** intentionally commits `.termfold/termfold-release.jks` and `.termfold/signing.properties`.

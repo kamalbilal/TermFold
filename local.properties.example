@@ -1,12 +1,13 @@
-# Copy to local.properties (gitignored). Never commit real passwords or *.jks.
+# Copy to local.properties (gitignored). Optional override for signing.
 
 sdk.dir=/path/to/android-sdk
 # Optional on this fork:
 # android.aapt2FromMavenOverride=/path/to/Termfold/.tools/aapt2
 
-# Production signing for com.termfold.app (same cert as GitHub/Play — in-place update, data kept):
-# 1. Put termfold-release.jks in repo root (see tools/make-keystore.ps1 only for NEW keys).
-# 2. Uncomment and fill:
+# Default signing for com.termfold.app is in .termfold/ (committed on this private repo):
+#   .termfold/termfold-release.jks
+#   .termfold/signing.properties
+# Uncomment here only to override:
 # termfold.storePassword=
 # termfold.keyPassword=
 # Or env: TERMFOLD_STORE_PASSWORD, TERMFOLD_KEY_PASSWORD
