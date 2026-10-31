@@ -55,6 +55,7 @@ import com.termfold.app.projectrules.ProjectRule
 import com.termfold.app.projectrules.ProjectRuleProfile
 import com.termfold.app.projectrules.ProjectRuleSheetRow
 import com.termfold.app.projectrules.ProjectRulesContextResolver
+import com.termfold.app.projectrules.ProjectRuleProfileKind
 import com.termfold.app.projectrules.ProjectRulesStore
 import com.termfold.app.projectrules.RemoteOriginKey
 import com.termfold.app.ui.components.BareIconButton
@@ -113,7 +114,7 @@ fun ProjectRulesSheet(
             rows.forEach { row ->
                 if (row.profile.displayName != last) {
                     last = row.profile.displayName
-                    add(SessionListLine.Header(last))
+                    add(SessionListLine.Header(last!!, row.profile.isGlobal))
                 }
                 add(SessionListLine.Rule(row))
             }
@@ -150,7 +151,7 @@ fun ProjectRulesSheet(
                         listLines.size,
                         key = { i ->
                             when (val line = listLines[i]) {
-                                is SessionListLine.Header -> "h-${line.title}"
+                                is SessionListLine.Header -> "h-${line.title}-${line.isGlobal}"
                                 is SessionListLine.Rule -> line.row.rule.id
                             }
                         },
@@ -158,7 +159,11 @@ fun ProjectRulesSheet(
                         when (val line = listLines[i]) {
                             is SessionListLine.Header -> {
                                 Text(
-                                    line.title,
+                                    if (line.isGlobal) {
+                                        stringResource(R.string.project_rules_global_profile_header, line.title)
+                                    } else {
+                                        line.title
+                                    },
                                     style = MaterialTheme.typography.labelMedium,
                                     color = Palette.TextFaint,
                                     modifier = Modifier.padding(top = 8.dp, bottom = 4.dp, start = 4.dp),
@@ -176,16 +181,26 @@ fun ProjectRulesSheet(
                                             icon = TermFoldIcons.FileText,
                                         )
                                     },
-                                    subtitle = if (!row.eligible) {
-                                        {
-                                            Text(
-                                                stringResource(R.string.project_rules_not_eligible_hint),
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = Palette.TextFaint,
-                                            )
+                                    subtitle = when {
+                                        !row.eligible -> {
+                                            {
+                                                Text(
+                                                    stringResource(R.string.project_rules_not_eligible_hint),
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = Palette.TextFaint,
+                                                )
+                                            }
                                         }
-                                    } else {
-                                        null
+                                        row.profile.isGlobal && !row.enabled -> {
+                                            {
+                                                Text(
+                                                    stringResource(R.string.project_rules_global_off_hint),
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = Palette.TextFaint,
+                                                )
+                                            }
+                                        }
+                                        else -> null
                                     },
                                     trailing = {
                                         Switch(
@@ -279,23 +294,42 @@ private fun ProjectRulesManagerDialog(viewModel: AppViewModel, onDismiss: () -> 
                     title = stringResource(R.string.project_rules_settings_title),
                     subtitle = stringResource(R.string.project_rules_manager_subtitle),
                     onClose = onDismiss,
-                    action = {
-                        PrimaryButton(
-                            icon = TermFoldIcons.Plus,
-                            label = stringResource(R.string.project_rules_add_profile),
-                            compact = true,
-                            onClick = {
-                                scope.launch(Dispatchers.IO) {
-                                    val p = store.createProfile(
-                                        context.getString(R.string.project_rules_new_profile_default_name),
-                                    )
-                                    data = store.read()
-                                    editingId = p.id
-                                }
-                            },
-                        )
-                    },
                 )
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    PrimaryButton(
+                        icon = TermFoldIcons.Globe,
+                        label = stringResource(R.string.project_rules_add_global_profile),
+                        onClick = {
+                            scope.launch(Dispatchers.IO) {
+                                val p = store.createGlobalProfile(
+                                    context.getString(R.string.project_rules_new_global_profile_default_name),
+                                )
+                                data = store.read()
+                                editingId = p.id
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    PrimaryButton(
+                        icon = TermFoldIcons.Plus,
+                        label = stringResource(R.string.project_rules_add_profile),
+                        onClick = {
+                            scope.launch(Dispatchers.IO) {
+                                val p = store.createProfile(
+                                    context.getString(R.string.project_rules_new_profile_default_name),
+                                )
+                                data = store.read()
+                                editingId = p.id
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 if (data.profiles.isEmpty()) {
                     Column(
                         Modifier
@@ -310,41 +344,38 @@ private fun ProjectRulesManagerDialog(viewModel: AppViewModel, onDismiss: () -> 
                         )
                     }
                 } else {
+                    val globalProfiles = data.profiles.filter { it.isGlobal }
+                    val projectProfiles = data.profiles.filter { !it.isGlobal }
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        items(data.profiles, key = { it.id }) { profile ->
-                            ListRow(
-                                title = profile.displayName,
-                                leading = {
-                                    LeadingTile(
-                                        tint = Palette.Accent.copy(alpha = 0.35f),
-                                        icon = TermFoldIcons.Sliders,
-                                    )
-                                },
-                                subtitle = {
-                                    val sub = buildString {
-                                        append(
-                                            context.resources.getQuantityString(
-                                                R.plurals.project_rules_rule_count,
-                                                profile.rules.size,
-                                                profile.rules.size,
-                                            ),
-                                        )
-                                        profile.originKey?.let { key ->
-                                            append(" · ")
-                                            append(key)
-                                        }
-                                    }
-                                    Text(sub, style = MaterialTheme.typography.bodySmall, color = Palette.TextDim)
-                                },
-                                trailing = {
-                                    Icon(TermFoldIcons.ChevronRight, contentDescription = null, tint = Palette.TextFaint)
-                                },
-                                onClick = { editingId = profile.id },
-                            )
+                        if (globalProfiles.isNotEmpty()) {
+                            item {
+                                Text(
+                                    stringResource(R.string.project_rules_section_global),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Palette.TextFaint,
+                                    modifier = Modifier.padding(start = 4.dp, top = 4.dp, bottom = 2.dp),
+                                )
+                            }
+                            items(globalProfiles, key = { it.id }) { profile ->
+                                ProfileListRow(context, profile, folders.folders, onClick = { editingId = profile.id })
+                            }
+                        }
+                        if (projectProfiles.isNotEmpty()) {
+                            item {
+                                Text(
+                                    stringResource(R.string.project_rules_section_project),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Palette.TextFaint,
+                                    modifier = Modifier.padding(start = 4.dp, top = 12.dp, bottom = 2.dp),
+                                )
+                            }
+                            items(projectProfiles, key = { it.id }) { profile ->
+                                ProfileListRow(context, profile, folders.folders, onClick = { editingId = profile.id })
+                            }
                         }
                     }
                 }
@@ -413,11 +444,12 @@ private fun ProfileEditorScreen(
     var name by remember(profile.id) { mutableStateOf(profile.displayName) }
     var origin by remember(profile.id) { mutableStateOf(profile.originKey ?: "") }
     var rules by remember(profile.id) { mutableStateOf(profile.rules) }
-    var selectedFolderId by remember(profile.id) { mutableStateOf<String?>(null) }
+    var selectedFolderIds by remember(profile.id) { mutableStateOf(profile.folderIds.toSet()) }
     LaunchedEffect(profile) {
         name = profile.displayName
         origin = profile.originKey ?: ""
         rules = profile.rules
+        selectedFolderIds = profile.folderIds.toSet()
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -439,7 +471,11 @@ private fun ProfileEditorScreen(
                     color = Palette.Text,
                 )
                 Text(
-                    stringResource(R.string.project_rules_edit_subtitle),
+                    if (profile.isGlobal) {
+                        stringResource(R.string.project_rules_edit_global_subtitle)
+                    } else {
+                        stringResource(R.string.project_rules_edit_subtitle)
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = Palette.TextFaint,
                 )
@@ -456,7 +492,8 @@ private fun ProfileEditorScreen(
                     onSave(
                         profile.copy(
                             displayName = name.trim().ifBlank { profile.displayName },
-                            originKey = normalized,
+                            originKey = if (profile.isGlobal) null else normalized,
+                            folderIds = if (profile.isGlobal) emptyList() else selectedFolderIds.toList(),
                             rules = cleanedRules,
                         ),
                     )
@@ -481,18 +518,26 @@ private fun ProfileEditorScreen(
                     singleLine = true,
                     colors = outlinedFieldColors(),
                 )
-                OutlinedTextField(
-                    value = origin,
-                    onValueChange = { origin = it },
-                    label = { Text(stringResource(R.string.project_rules_origin_hint)) },
-                    placeholder = { Text(stringResource(R.string.project_rules_origin_placeholder)) },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    colors = outlinedFieldColors(),
-                )
+                if (profile.isGlobal) {
+                    Text(
+                        stringResource(R.string.project_rules_global_editor_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Palette.TextDim,
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = origin,
+                        onValueChange = { origin = it },
+                        label = { Text(stringResource(R.string.project_rules_origin_hint)) },
+                        placeholder = { Text(stringResource(R.string.project_rules_origin_placeholder)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        colors = outlinedFieldColors(),
+                    )
+                }
             }
 
-            if (folders.isNotEmpty()) {
+            if (!profile.isGlobal && folders.isNotEmpty()) {
                 EditorSection(title = stringResource(R.string.project_rules_copy_origin)) {
                     Text(
                         stringResource(R.string.project_rules_copy_origin_hint),
@@ -508,12 +553,20 @@ private fun ProfileEditorScreen(
                     ) {
                         folders.forEach { folder ->
                             FilterChip(
-                                selected = selectedFolderId == folder.id,
+                                selected = folder.id in selectedFolderIds,
                                 onClick = {
-                                    selectedFolderId = folder.id
-                                    scope.launch {
-                                        val key = ProjectRulesContextResolver.folderNetworkOrigin(context, folder)
-                                        if (key != null) origin = key
+                                    val next = if (folder.id in selectedFolderIds) {
+                                        selectedFolderIds - folder.id
+                                    } else {
+                                        selectedFolderIds + folder.id
+                                    }
+                                    selectedFolderIds = next
+                                    if (next.size == 1) {
+                                        val only = folders.first { it.id == next.single() }
+                                        scope.launch {
+                                            val key = ProjectRulesContextResolver.folderNetworkOrigin(context, only)
+                                            if (key != null) origin = key
+                                        }
                                     }
                                 },
                                 label = { Text(folder.name) },
@@ -661,6 +714,57 @@ private fun outlinedFieldColors() = OutlinedTextFieldDefaults.colors(
 )
 
 private sealed interface SessionListLine {
-    data class Header(val title: String) : SessionListLine
+    data class Header(val title: String, val isGlobal: Boolean = false) : SessionListLine
     data class Rule(val row: ProjectRuleSheetRow) : SessionListLine
+}
+
+@Composable
+private fun ProfileListRow(
+    context: android.content.Context,
+    profile: ProjectRuleProfile,
+    folders: List<Folder>,
+    onClick: () -> Unit,
+) {
+    ListRow(
+        title = profile.displayName,
+        leading = {
+            LeadingTile(
+                tint = if (profile.isGlobal) Palette.Blue.copy(alpha = 0.35f) else Palette.Accent.copy(alpha = 0.35f),
+                icon = if (profile.isGlobal) TermFoldIcons.Globe else TermFoldIcons.Sliders,
+            )
+        },
+        subtitle = {
+            val sub = buildString {
+                append(
+                    context.resources.getQuantityString(
+                        R.plurals.project_rules_rule_count,
+                        profile.rules.size,
+                        profile.rules.size,
+                    ),
+                )
+                if (profile.isGlobal) {
+                    append(" · ")
+                    append(context.getString(R.string.project_rules_global_list_hint))
+                } else if (profile.folderIds.isNotEmpty()) {
+                    val names = profile.folderIds.mapNotNull { id ->
+                        folders.find { it.id == id }?.name
+                    }
+                    if (names.isNotEmpty()) {
+                        append(" · ")
+                        append(names.joinToString(", "))
+                    }
+                } else {
+                    profile.originKey?.let { key ->
+                        append(" · ")
+                        append(key)
+                    }
+                }
+            }
+            Text(sub, style = MaterialTheme.typography.bodySmall, color = Palette.TextDim)
+        },
+        trailing = {
+            Icon(TermFoldIcons.ChevronRight, contentDescription = null, tint = Palette.TextFaint)
+        },
+        onClick = onClick,
+    )
 }

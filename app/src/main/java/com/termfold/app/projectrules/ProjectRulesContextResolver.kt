@@ -12,6 +12,10 @@ object ProjectRulesContextResolver {
         data.profiles.filter { profile -> isEligible(profile, folder, folderOriginKey) }
 
     fun isEligible(profile: ProjectRuleProfile, folder: Folder, folderOriginKey: String?): Boolean {
+        if (profile.isGlobal) return true
+        if (profile.folderIds.isNotEmpty()) {
+            return folder.id in profile.folderIds
+        }
         val origin = profile.originKey
         if (origin != null) {
             return folderOriginKey != null && origin == folderOriginKey

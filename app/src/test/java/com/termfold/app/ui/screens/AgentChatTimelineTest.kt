@@ -2,6 +2,8 @@ package com.termfold.app.ui.screens
 
 import com.termfold.app.acp.AcpItem
 import com.termfold.app.acp.AcpToolFileDiff
+import com.termfold.app.acp.AskQuestionPhase
+import com.termfold.app.acp.AskQuestionTurnSnapshot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -38,11 +40,11 @@ class AgentChatTimelineTest {
     }
 
     @Test
-    fun liveDiffsExpandOnlyLatestTurnWhenIdle() {
+    fun completedToolsDefaultCollapsedEvenOnLatestTurn() {
         val items = itemsWithUserThenTools(
             tool(id = 1L, status = "completed", fileDiffs = oneFileDiff),
         )
-        assertFalse(
+        assertTrue(
             defaultToolCallCollapsed(
                 tool(id = 1L, status = "completed", fileDiffs = oneFileDiff),
                 items,
@@ -57,14 +59,6 @@ class AgentChatTimelineTest {
             tool(id = 3L, status = "completed", fileDiffs = oneFileDiff),
         )
         assertTrue(
-            defaultToolCallCollapsed(
-                tool(id = 2L, status = "completed", fileDiffs = oneFileDiff),
-                olderTurn,
-                showLiveToolDiffs = true,
-                agentBusy = false,
-            ),
-        )
-        assertFalse(
             defaultToolCallCollapsed(
                 tool(id = 3L, status = "completed", fileDiffs = oneFileDiff),
                 olderTurn,
@@ -132,6 +126,37 @@ class AgentChatTimelineTest {
             tool(id = 1L, status = "completed", fileDiffs = oneFileDiff),
         )
         syncCompletedToolCollapse(withDiff, map, showLiveToolDiffs = true, agentBusy = false)
+        assertEquals(true, map[1L])
+    }
+
+    @Test
+    fun buildMapKeepsCompletedToolsCollapsedWhenFileDiffsArrive() {
+        val empty = listOf(
+            AcpItem.UserMessage(10L, "x", emptyList()),
+            tool(id = 1L, status = "completed", fileDiffs = emptyList()),
+        )
+        assertEquals(true, buildToolCallCollapsedMap(empty, emptyMap(), showLiveToolDiffs = true, agentBusy = false, emptySet())[1L])
+        val withDiff = listOf(
+            AcpItem.UserMessage(10L, "x", emptyList()),
+            tool(id = 1L, status = "completed", fileDiffs = oneFileDiff),
+        )
+        assertEquals(true, buildToolCallCollapsedMap(withDiff, emptyMap(), showLiveToolDiffs = true, agentBusy = false, emptySet())[1L])
+    }
+
+    @Test
+    fun syncKeepsToolExpandedAfterCompletion() {
+        val inProgress = listOf(
+            AcpItem.UserMessage(10L, "x", emptyList()),
+            tool(id = 1L, status = "in_progress", fileDiffs = emptyList()).copy(detail = "line1"),
+        )
+        val map = mutableMapOf(1L to false)
+        syncCompletedToolCollapse(inProgress, map, showLiveToolDiffs = true, agentBusy = true)
+        assertEquals(false, map[1L])
+        val completed = listOf(
+            AcpItem.UserMessage(10L, "x", emptyList()),
+            tool(id = 1L, status = "completed", fileDiffs = emptyList()).copy(detail = "line1\ndone"),
+        )
+        syncCompletedToolCollapse(completed, map, showLiveToolDiffs = true, agentBusy = false)
         assertEquals(false, map[1L])
     }
 
@@ -141,20 +166,6 @@ class AgentChatTimelineTest {
         val map = mutableMapOf(1L to true)
         syncCompletedToolCollapse(items, map, showLiveToolDiffs = true, agentBusy = false, userToggledToolIds = setOf(1L))
         assertEquals(true, map[1L])
-    }
-
-    @Test
-    fun buildMapExpandsLatestTurnWhenFileDiffsArriveLate() {
-        val empty = listOf(
-            AcpItem.UserMessage(10L, "x", emptyList()),
-            tool(id = 1L, status = "completed", fileDiffs = emptyList()),
-        )
-        assertEquals(true, buildToolCallCollapsedMap(empty, showLiveToolDiffs = true, agentBusy = false, emptySet())[1L])
-        val withDiff = listOf(
-            AcpItem.UserMessage(10L, "x", emptyList()),
-            tool(id = 1L, status = "completed", fileDiffs = oneFileDiff),
-        )
-        assertEquals(false, buildToolCallCollapsedMap(withDiff, showLiveToolDiffs = true, agentBusy = false, emptySet())[1L])
     }
 
     @Test
@@ -235,11 +246,53 @@ class AgentChatTimelineTest {
         val items = itemsWithUserThenTools(tool(id = 1L, status = "completed", fileDiffs = oneFileDiff))
         val map = buildToolCallCollapsedMap(
             items,
+            mapOf(1L to true),
             showLiveToolDiffs = true,
             agentBusy = false,
             userToggledToolIds = setOf(1L),
             userCollapsedOverrides = mapOf(1L to true),
         )
         assertEquals(true, map[1L])
+    }
+
+    @Test
+    fun askQuestionInlineAfterToolNotInTurnFooter() {
+        val snapshots = listOf(
+            AskQuestionTurnSnapshot("ask_ts", "Prefs", emptyList(), AskQuestionPhase.Answered),
+        )
+        val askRow = AcpItem.ToolCall(
+            id = 2L,
+            toolCallId = "wire-ask",
+            title = "termfold-ask-user: ask_user",
+            kind = "mcp",
+            status = "completed",
+            detail = "",
+        )
+        val items = listOf(
+            AcpItem.UserMessage(10L, "ask me", emptyList()),
+            askRow,
+            AcpItem.AgentText(3L, "Here is what you picked"),
+        )
+        val entries = buildAgentChatTimelineEntries(
+            items = items,
+            collapsedTools = emptyMap(),
+            expandedToolFiles = emptyMap(),
+            contextFolds = emptyMap(),
+            workspaceDir = "/root/ws",
+            showLiveToolDiffs = false,
+            presentationCache = emptyMap(),
+            turnFooters = true,
+            askQuestionsByUserMessageId = mapOf(10L to snapshots),
+        )
+        val askIndex = entries.indexOfFirst {
+            it is AgentChatLazyEntry.AskQuestion && it.snapshotToolCallId == "ask_ts"
+        }
+        val summaryIndex = entries.indexOfFirst {
+            it is AgentChatLazyEntry.Standard && it.item.id == 3L
+        }
+        assertTrue(askIndex >= 0)
+        assertTrue(summaryIndex > askIndex)
+        val inlineIds = com.termfold.app.acp.inlineAskSnapshotIdsForTurn(items, snapshots)
+        assertTrue(inlineIds.contains("ask_ts"))
     }
 }

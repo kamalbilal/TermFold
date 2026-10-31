@@ -52,6 +52,7 @@ enum class WorkflowsSection(@param:StringRes val labelRes: Int) {
     PR_REVIEWER(R.string.workflows_tab_pr_reviewer),
     PRODUCT_MANAGER(R.string.workflows_tab_product_manager),
     PDF_TOOLS(R.string.workflows_tab_pdf_tools),
+    FILES(R.string.workflows_tab_files),
     MORE(R.string.workflows_tab_more),
 }
 
@@ -85,7 +86,8 @@ fun WorkflowsScreen(
                                     WorkflowsSection.PR_REVIEWER -> 1
                                     WorkflowsSection.PRODUCT_MANAGER -> 2
                                     WorkflowsSection.PDF_TOOLS -> 3
-                                    WorkflowsSection.MORE -> 4
+                                    WorkflowsSection.FILES -> 4
+                                    WorkflowsSection.MORE -> 5
                                 },
                             ),
                             icon = when (section) {
@@ -93,6 +95,7 @@ fun WorkflowsScreen(
                                 WorkflowsSection.PR_REVIEWER -> TermFoldIcons.GitBranch
                                 WorkflowsSection.PRODUCT_MANAGER -> TermFoldIcons.Sparkle
                                 WorkflowsSection.PDF_TOOLS -> TermFoldIcons.FileText
+                                WorkflowsSection.FILES -> TermFoldIcons.Files
                                 WorkflowsSection.MORE -> TermFoldIcons.More
                             },
                         )
@@ -193,10 +196,33 @@ fun WorkflowsSectionScreen(
             useGrid = useGrid,
             modifier = modifier,
         )
+        WorkflowsSection.FILES -> WorkflowsFilesScreen(
+            onBack = onBack,
+            useGrid = useGrid,
+            modifier = modifier,
+        )
         WorkflowsSection.MORE -> WorkflowsMoreScreen(
             onBack = onBack,
             useGrid = useGrid,
             modifier = modifier,
+        )
+    }
+}
+
+@Composable
+private fun WorkflowsFilesScreen(
+    onBack: () -> Unit,
+    useGrid: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier.fillMaxSize()) {
+        WorkflowsSubscreenHeader(
+            onBack = onBack,
+            title = stringResource(R.string.workflows_tab_files),
+        )
+        FileManagerScreen(
+            wide = useGrid,
+            modifier = Modifier.fillMaxSize(),
         )
     }
 }

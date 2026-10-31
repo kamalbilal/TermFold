@@ -83,6 +83,12 @@ fun SettingsScreen(
     val edge = if (wide) 30.dp else 22.dp
     var showAutomationNavMemory by remember { mutableStateOf(false) }
 
+    var showStorageAnalyzer by remember { mutableStateOf(false) }
+
+    if (showStorageAnalyzer) {
+        GuestStorageAnalyzerDialog(onDismiss = { showStorageAnalyzer = false })
+    }
+
     if (showAutomationNavMemory) {
         AutomationMemoryManagerDialog(
             mode = AutomationMemoryManagerMode.GlobalNav,
@@ -125,6 +131,10 @@ fun SettingsScreen(
             item { Spacer(Modifier.height(20.dp)) }
             item { GroupLabel(stringResource(R.string.update_title)) }
             item { UpdatesCard() }
+
+            item { Spacer(Modifier.height(20.dp)) }
+            item { GroupLabel(stringResource(R.string.storage_analyzer_settings_group)) }
+            item { StorageAnalyzerSettingsEntry(onOpen = { showStorageAnalyzer = true }) }
 
             item { Spacer(Modifier.height(20.dp)) }
             item { GroupLabel(stringResource(R.string.settings_automation)) }

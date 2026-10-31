@@ -71,6 +71,7 @@ fun FoldersScreen(
     onAddFolder: () -> Unit,
     onSearchToggle: () -> Unit,
     searchOpen: Boolean,
+    onStartupCommands: () -> Unit,
     onMore: () -> Unit,
     modifier: Modifier = Modifier,
     useGrid: Boolean = false,
@@ -93,6 +94,7 @@ fun FoldersScreen(
             HeaderBar(
                 onSearchToggle = onSearchToggle,
                 searchOpen = searchOpen,
+                onStartupCommands = onStartupCommands,
                 onMore = onMore,
             )
         }
@@ -130,6 +132,12 @@ fun FoldersScreen(
                     contentDescription = androidx.compose.ui.res.stringResource(R.string.cd_search),
                     onClick = onSearchToggle,
                     tint = if (searchOpen) Palette.Accent else Palette.Text,
+                )
+                Spacer(Modifier.size(8.dp))
+                BareIconButton(
+                    icon = TermFoldIcons.Terminal,
+                    contentDescription = androidx.compose.ui.res.stringResource(R.string.cd_startup_commands),
+                    onClick = onStartupCommands,
                 )
                 Spacer(Modifier.size(8.dp))
             }
@@ -240,6 +248,7 @@ private fun FolderCard(folder: Folder, onClick: () -> Unit) {
 private fun HeaderBar(
     onSearchToggle: () -> Unit,
     searchOpen: Boolean,
+    onStartupCommands: () -> Unit,
     onMore: () -> Unit,
 ) {
     Row(
@@ -257,6 +266,11 @@ private fun HeaderBar(
             contentDescription = androidx.compose.ui.res.stringResource(R.string.cd_search),
             onClick = onSearchToggle,
             tint = if (searchOpen) Palette.Accent else Palette.Text,
+        )
+        BareIconButton(
+            icon = TermFoldIcons.Terminal,
+            contentDescription = androidx.compose.ui.res.stringResource(R.string.cd_startup_commands),
+            onClick = onStartupCommands,
         )
         BareIconButton(
             icon = TermFoldIcons.More,

@@ -29,6 +29,7 @@ data class AskQuestionAnswer(
     val selectedOptionIds: List<String>,
     /** User text when [CURSOR_ASK_FREEFORM_OPTION_ID] is selected. */
     val freeformText: String? = null,
+    val skipped: Boolean = false,
 )
 
 data class AskQuestionTurnSnapshot(
@@ -40,7 +41,8 @@ data class AskQuestionTurnSnapshot(
 )
 
 data class AcpPendingAskQuestion(
-    val requestId: Any,
+    /** Set for ACP `cursor/ask_question`; null for MCP `ask_user`. */
+    val requestId: Any?,
     val toolCallId: String,
     val title: String?,
     val questions: List<AskQuestionSpec>,
@@ -49,9 +51,15 @@ data class AcpPendingAskQuestion(
 
 object AcpAskQuestionParser {
 
-    fun parseRequest(params: JSONObject?): ParsedAskRequest? {
+    fun parseRequest(params: JSONObject?, allowGeneratedToolCallId: Boolean = false): ParsedAskRequest? {
         if (params == null) return null
-        val toolCallId = params.optString("toolCallId").ifBlank { null } ?: return null
+        val toolCallId = params.optString("toolCallId").ifBlank { null }
+            ?: if (allowGeneratedToolCallId) {
+                "ask_${System.currentTimeMillis()}"
+            } else {
+                null
+            }
+            ?: return null
         val title = params.optString("title").ifBlank { null }
         val questionsArr = params.optJSONArray("questions") ?: return null
         val questions = buildList {
@@ -92,6 +100,7 @@ object AcpAskQuestionParser {
                 .put("questionId", answer.questionId)
                 .put("selectedOptionIds", JSONArray(answer.selectedOptionIds))
             answer.freeformText?.takeIf { it.isNotBlank() }?.let { entry.put("freeformText", it) }
+            if (answer.skipped) entry.put("skipped", true)
             answersArr.put(entry)
         }
         return JSONObject()
@@ -111,25 +120,68 @@ object AcpAskQuestionParser {
     )
 }
 
+/** All ask cards anchored to a user message id (oldest first). */
+typealias AskQuestionsByUserMessageId = Map<Long, List<AskQuestionTurnSnapshot>>
+
+fun appendAskSnapshotForTurn(
+    map: AskQuestionsByUserMessageId,
+    userMessageId: Long,
+    snapshot: AskQuestionTurnSnapshot,
+): AskQuestionsByUserMessageId {
+    val next = map[userMessageId].orEmpty() + snapshot
+    return map + (userMessageId to next)
+}
+
+fun replaceAskSnapshotForTurn(
+    map: AskQuestionsByUserMessageId,
+    userMessageId: Long,
+    toolCallId: String,
+    snapshot: AskQuestionTurnSnapshot,
+): AskQuestionsByUserMessageId {
+    val list = map[userMessageId].orEmpty().map { existing ->
+        if (existing.toolCallId == toolCallId) snapshot else existing
+    }
+    return map + (userMessageId to list)
+}
+
 object AskQuestionSnapshotCodec {
 
-    fun encodeMap(map: Map<Long, AskQuestionTurnSnapshot>): JSONObject {
+    fun encodeMap(map: AskQuestionsByUserMessageId): JSONObject {
         val root = JSONObject()
-        map.forEach { (userMessageId, snapshot) ->
-            root.put(userMessageId.toString(), encodeSnapshot(snapshot))
+        map.forEach { (userMessageId, snapshots) ->
+            val terminal = snapshots.filter { it.phase != AskQuestionPhase.Pending }
+            if (terminal.isEmpty()) return@forEach
+            val arr = JSONArray()
+            terminal.forEach { arr.put(encodeSnapshot(it)) }
+            root.put(userMessageId.toString(), arr)
         }
         return root
     }
 
-    fun decodeMap(obj: JSONObject?): Map<Long, AskQuestionTurnSnapshot> {
+    fun decodeMap(obj: JSONObject?): AskQuestionsByUserMessageId {
         if (obj == null) return emptyMap()
         return buildMap {
             obj.keys().forEach { key ->
                 val userId = key.toLongOrNull() ?: return@forEach
-                decodeSnapshot(obj.optJSONObject(key))?.let { put(userId, it) }
+                val arr = obj.optJSONArray(key)
+                val snapshots = when {
+                    arr != null -> decodeSnapshotList(arr)
+                    else -> decodeSnapshot(obj.optJSONObject(key))?.let { listOf(it) }.orEmpty()
+                }
+                if (snapshots.isNotEmpty()) put(userId, snapshots)
             }
         }
     }
+
+    private fun decodeSnapshotList(arr: JSONArray): List<AskQuestionTurnSnapshot> = buildList {
+        for (i in 0 until arr.length()) {
+            decodeSnapshot(arr.optJSONObject(i))?.let { add(it) }
+        }
+    }
+
+    /** Legacy single-snapshot encoding (tests). */
+    fun encodeSingleTurnMap(map: Map<Long, AskQuestionTurnSnapshot>): JSONObject =
+        encodeMap(map.mapValues { (_, s) -> listOf(s) })
 
     private fun encodeSnapshot(snapshot: AskQuestionTurnSnapshot): JSONObject {
         val questions = JSONArray()
@@ -158,6 +210,7 @@ object AskQuestionSnapshotCodec {
                     .put("questionId", a.questionId)
                     .put("selectedOptionIds", JSONArray(a.selectedOptionIds))
                 a.freeformText?.takeIf { it.isNotBlank() }?.let { entry.put("freeformText", it) }
+                if (a.skipped) entry.put("skipped", true)
                 arr.put(entry)
             }
             obj.put("answers", arr)
@@ -207,17 +260,24 @@ object AskQuestionSnapshotCodec {
                 for (i in 0 until answersArr.length()) {
                     val a = answersArr.optJSONObject(i) ?: continue
                     val qid = a.optString("questionId").ifBlank { continue }
-                    val idsArr = a.optJSONArray("selectedOptionIds") ?: continue
-                    val ids = buildList {
-                        for (j in 0 until idsArr.length()) {
-                            idsArr.optString(j).takeIf { it.isNotBlank() }?.let { add(it) }
+                    val skipped = a.optBoolean("skipped", false)
+                    val idsArr = a.optJSONArray("selectedOptionIds")
+                    val ids = if (idsArr == null) {
+                        emptyList()
+                    } else {
+                        buildList {
+                            for (j in 0 until idsArr.length()) {
+                                idsArr.optString(j).takeIf { it.isNotBlank() }?.let { add(it) }
+                            }
                         }
                     }
+                    if (!skipped && ids.isEmpty()) continue
                     add(
                         AskQuestionAnswer(
                             questionId = qid,
                             selectedOptionIds = ids,
                             freeformText = a.optString("freeformText").ifBlank { null },
+                            skipped = a.optBoolean("skipped", false),
                         ),
                     )
                 }
@@ -237,27 +297,31 @@ object AskQuestionSnapshotCodec {
 
 fun askQuestionsPrunedToTimeline(
     items: List<AcpItem>,
-    map: Map<Long, AskQuestionTurnSnapshot>,
-): Map<Long, AskQuestionTurnSnapshot> {
+    map: AskQuestionsByUserMessageId,
+): AskQuestionsByUserMessageId {
     val live = items.filterIsInstance<AcpItem.UserMessage>().mapTo(HashSet()) { it.id }
     return map.filterKeys { it in live }
 }
 
 /** Pending snapshots without a live RPC are stale (restart, crash); show as cancelled in UI. */
 fun askQuestionsScrubStalePending(
-    map: Map<Long, AskQuestionTurnSnapshot>,
+    map: AskQuestionsByUserMessageId,
     pending: AcpPendingAskQuestion?,
-): Map<Long, AskQuestionTurnSnapshot> {
+): AskQuestionsByUserMessageId {
     if (map.isEmpty()) return map
     var changed = false
-    val out = map.mapValues { (userMessageId, snapshot) ->
-        if (snapshot.phase == AskQuestionPhase.Pending &&
-            (pending == null || pending.userMessageId != userMessageId)
-        ) {
-            changed = true
-            snapshot.copy(phase = AskQuestionPhase.Cancelled, answers = null)
-        } else {
-            snapshot
+    val out = map.mapValues { (userMessageId, snapshots) ->
+        snapshots.map { snapshot ->
+            if (snapshot.phase == AskQuestionPhase.Pending &&
+                (pending == null ||
+                    pending.userMessageId != userMessageId ||
+                    pending.toolCallId != snapshot.toolCallId)
+            ) {
+                changed = true
+                snapshot.copy(phase = AskQuestionPhase.Cancelled, answers = null)
+            } else {
+                snapshot
+            }
         }
     }
     return if (changed) out else map
@@ -271,6 +335,7 @@ fun askQuestionAnswersValid(
     val byId = answers.associateBy { it.questionId }
     return questions.all { q ->
         val answer = byId[q.id] ?: return false
+        if (answer.skipped) return@all answer.selectedOptionIds.isEmpty()
         val ids = answer.selectedOptionIds
         when {
             q.allowMultiple -> ids.isNotEmpty() &&

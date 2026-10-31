@@ -311,6 +311,8 @@ fun AgentSessionScreen(
             existing
         } else {
             if (existing != null) AcpSessions.close(key)
+            // All user prompts go through AcpClient.buildPromptContent → composeWirePromptText
+            // (mandatory interactive-ask rules for Cursor are applied there automatically).
             AcpSessions.put(
                 key,
                 AcpClient(
@@ -551,29 +553,8 @@ fun AgentSessionScreen(
                         client = client,
                         onEditMessage = { editingMessage = it },
                         stickyUserMessagesEnabled = stickyUserMessagesEnabled,
-                        turnFooter = if (isCursor || turnFooter != null) {
-                            { userMessageId, turnItems, turnFinished ->
-                                Column(
-                                    Modifier.fillMaxWidth(),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    if (isCursor) {
-                                        val lastUserId = state.items.filterIsInstance<AcpItem.UserMessage>().lastOrNull()?.id
-                                        AskQuestionTurnFooter(
-                                            userMessageId = userMessageId,
-                                            lastUserMessageId = lastUserId,
-                                            pending = state.pendingAskQuestion,
-                                            snapshot = state.askQuestionsByUserMessageId[userMessageId],
-                                            onAnswer = { client.answerPendingAskQuestion(it) },
-                                            onSkip = { client.skipPendingAskQuestion() },
-                                        )
-                                    }
-                                    turnFooter?.invoke(userMessageId, turnItems, turnFinished)
-                                }
-                            }
-                        } else {
-                            null
-                        },
+                        turnFooter = turnFooter,
+                        turnFooterSlots = isCursor,
                         rewriteAgentText = rewriteAgentText,
                         modifier = Modifier.weight(1f),
                     )
@@ -1469,7 +1450,8 @@ private fun stickyUserMessageForViewport(
 ): AcpItem.UserMessage? {
     val userSlots = lazyEntries.mapIndexedNotNull { index, entry ->
         if (entry is AgentChatLazyEntry.Standard && entry.item is AcpItem.UserMessage) {
-            index to entry.item
+            val msg = entry.item
+            if (msg.wireOnly) null else index to msg
         } else {
             null
         }
@@ -1504,6 +1486,7 @@ private fun Timeline(
     onEditMessage: (AcpItem.UserMessage) -> Unit,
     stickyUserMessagesEnabled: Boolean = true,
     turnFooter: (@Composable (userMessageId: Long, turnItems: List<AcpItem>, turnFinished: Boolean) -> Unit)? = null,
+    turnFooterSlots: Boolean = false,
     rewriteAgentText: (String) -> String = { it },
     modifier: Modifier = Modifier,
 ) {
@@ -1557,9 +1540,25 @@ private fun Timeline(
     }
     var expandedToolFiles by remember { mutableStateOf(mapOf<String, Boolean>()) }
     val toolContextFolds = remember { mutableStateMapOf<String, Set<String>>() }
-    // Recompute every frame so late-arriving fileDiffs pick up live-diff expansion without waiting on LaunchedEffect.
+    val collapsedTools = remember { androidx.compose.runtime.mutableStateMapOf<Long, Boolean>() }
+    LaunchedEffect(items, showLiveToolDiffs, state.agentBusy, userToggledToolIds.size) {
+        syncCompletedToolCollapse(
+            items = items,
+            collapsedTools = collapsedTools,
+            showLiveToolDiffs = showLiveToolDiffs,
+            agentBusy = state.agentBusy,
+            userToggledToolIds = userToggledToolIds,
+        )
+    }
+    LaunchedEffect(listedSessionId) {
+        collapsedTools.clear()
+    }
+    LaunchedEffect(items.isEmpty()) {
+        if (items.isEmpty()) collapsedTools.clear()
+    }
     val collapsedSnapshot = buildToolCallCollapsedMap(
         items = items,
+        collapsedTools = collapsedTools,
         showLiveToolDiffs = showLiveToolDiffs,
         agentBusy = state.agentBusy,
         userToggledToolIds = userToggledToolIds,
@@ -1576,7 +1575,8 @@ private fun Timeline(
         workspaceDir = workspaceDir,
         showLiveToolDiffs = showLiveToolDiffs,
         presentationCache = presentationSnapshot,
-        turnFooters = turnFooter != null,
+        turnFooters = turnFooter != null || turnFooterSlots,
+        askQuestionsByUserMessageId = state.askQuestionsByUserMessageId,
     )
 
     // Follow the conversation while the user is at the bottom; debounce scroll-to-bottom so
@@ -1706,13 +1706,14 @@ private fun Timeline(
                     val item = entry.item
                     val collapsed = collapsedSnapshot[item.id] == true
                     Box(dimModifier(item.id)) {
-                        ToolCallHeaderRow(
+                        ToolCallCompactHeader(
                             item = item,
                             workspaceDir = workspaceDir,
                             collapsed = collapsed,
                             onToggle = {
                                 userToggledToolIds.add(item.id)
                                 userCollapsedOverrides = userCollapsedOverrides + (item.id to !collapsed)
+                                collapsedTools[item.id] = !collapsed
                             },
                         )
                     }
@@ -1782,10 +1783,28 @@ private fun Timeline(
                     }
                 }
                 is AgentChatLazyEntry.ToolDetail -> item(key = entry.key) {
-                    Box(
-                        dimModifier(entry.item.id).offset(y = (-4).dp),
-                    ) {
-                        ToolCallDetailBlock(entry.item)
+                    Box(dimModifier(entry.item.id)) {
+                        ToolCallOutputPane(entry.item)
+                    }
+                }
+                is AgentChatLazyEntry.AskQuestion -> item(key = entry.key) {
+                    val snapshots = state.askQuestionsByUserMessageId[entry.userMessageId].orEmpty()
+                    val snapshot = snapshots.firstOrNull { it.toolCallId == entry.snapshotToolCallId }
+                    if (snapshot != null) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(top = 6.dp, bottom = 4.dp),
+                        ) {
+                            AskQuestionSnapshotCard(
+                                userMessageId = entry.userMessageId,
+                                lastUserMessageId = lastUserId,
+                                pending = state.pendingAskQuestion,
+                                snapshot = snapshot,
+                                onAnswer = { client.answerPendingAskQuestion(it) },
+                                onSkip = { client.skipPendingAskQuestion() },
+                            )
+                        }
                     }
                 }
                 is AgentChatLazyEntry.TurnFooter -> item(key = entry.key) {
@@ -2172,19 +2191,6 @@ private fun FileChip(file: AcpBlock.TextFile, onClick: (() -> Unit)? = null, onR
     }
 }
 
-/**
- * What a tool-call row says: the agent's title, plus the file it works on when the title does
- * not already name it ("Read" becomes "Read  src/main.kt"). Paths inside the project are shown
- * relative to it.
- */
-private fun toolLabel(item: AcpItem.ToolCall, workspaceDir: String): String {
-    val path = item.paths.firstOrNull() ?: return item.title
-    val shown = path.removePrefix(workspaceDir.trimEnd('/') + "/").ifBlank { path }
-    val name = shown.substringAfterLast('/')
-    if (item.title.contains(shown) || item.title.contains(name)) return item.title
-    val more = if (item.paths.size > 1) " +${item.paths.size - 1}" else ""
-    return "${item.title}  $shown$more"
-}
 
 /**
  * One Markdown line as ticker text: block markers (headings, bullets, quotes, fences) are dropped,
@@ -2320,84 +2326,6 @@ private fun AgentChatToolFileDiffBody(
         is AgentChatLazyEntry.ToolFileDiffBody.Lines -> {
             AgentChatToolFileDiffLines(body, textStyle, toolContextFolds)
         }
-    }
-}
-
-@Composable
-private fun ToolCallHeaderRow(
-    item: AcpItem.ToolCall,
-    workspaceDir: String,
-    collapsed: Boolean,
-    onToggle: () -> Unit,
-) {
-    val label = toolLabel(item, workspaceDir)
-    val preview = label.lines().firstOrNull { it.isNotBlank() }?.trim() ?: label.trim()
-    val headerText = if (collapsed) preview else label.lineSequence().joinToString(" ").trim()
-    val failed = item.status == "failed"
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .clickable(onClick = onToggle)
-            .padding(vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = toolIcon(item.kind),
-            contentDescription = null,
-            tint = if (failed) Palette.Pink else Palette.TextFaint,
-            modifier = Modifier.size(15.dp),
-        )
-        Spacer(Modifier.width(10.dp))
-        Text(
-            text = headerText,
-            style = MaterialTheme.typography.bodySmall.copy(
-                fontFamily = Mono,
-                fontSize = 12.5.sp,
-                lineHeight = 17.sp,
-            ),
-            color = when {
-                failed -> Palette.Pink
-                collapsed -> Palette.TextFaint
-                else -> Palette.TextDim
-            },
-            maxLines = if (collapsed) 1 else 12,
-            overflow = if (collapsed) TextOverflow.Ellipsis else TextOverflow.Clip,
-            modifier = Modifier.weight(1f),
-        )
-        if (item.status != "completed" && item.status != "failed") {
-            Spacer(Modifier.width(8.dp))
-            CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = Palette.Accent)
-        }
-        Spacer(Modifier.width(6.dp))
-        Icon(
-            imageVector = if (collapsed) TermFoldIcons.ChevronRight else TermFoldIcons.ChevronDown,
-            contentDescription = null,
-            tint = Palette.TextFaint,
-            modifier = Modifier.size(14.dp),
-        )
-    }
-}
-
-@Composable
-private fun ToolCallDetailBlock(item: AcpItem.ToolCall) {
-    val hasFileDiffs = item.fileDiffs.isNotEmpty()
-    Spacer(Modifier.height(if (hasFileDiffs) 6.dp else 0.dp))
-    SelectionContainer {
-        Text(
-            text = item.detail.trim(),
-            style = MaterialTheme.typography.bodySmall.copy(fontFamily = Mono, fontSize = 12.sp, lineHeight = 17.sp),
-            color = Palette.TermOut,
-            softWrap = false,
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .background(Palette.Card)
-                .heightIn(max = 200.dp)
-                .verticalScroll(rememberScrollState())
-                .horizontalScroll(rememberScrollState())
-                .padding(10.dp),
-        )
     }
 }
 

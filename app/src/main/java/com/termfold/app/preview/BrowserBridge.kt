@@ -206,7 +206,6 @@ object BrowserBridge {
 
     private fun handle(context: Context, socket: Socket) {
         socket.use { s ->
-            s.soTimeout = 180_000
             val input = BufferedInputStream(s.getInputStream())
             val headers = readHeaders(input) ?: return
             val length = headers["content-length"]?.toIntOrNull() ?: 0
@@ -220,6 +219,11 @@ object BrowserBridge {
             }
             val request = runCatching { JSONObject(String(body, Charsets.UTF_8)) }.getOrNull()
                 ?: return respond(s, 400, JSONObject().put("error", "Bad request"))
+            s.soTimeout = if (request.optString("action") == "ask_user") {
+                com.termfold.app.acp.AskUserTimeouts.SOCKET_READ_TIMEOUT_MS
+            } else {
+                180_000
+            }
             if (!sameKey(request.optString("token"))) return respond(s, 403, JSONObject().put("error", "Wrong key"))
             val result = runBlocking { execute(context, request.optString("action"), request.optJSONObject("args") ?: JSONObject()) }
             respond(s, 200, result)
@@ -227,6 +231,9 @@ object BrowserBridge {
     }
 
     private suspend fun execute(context: Context, action: String, args: JSONObject): JSONObject {
+        if (action == "ask_user") {
+            return com.termfold.app.acp.AskUserBridge.handle(args)
+        }
         if (action.startsWith("pm_memory_")) {
             val requiredId = pmSessionId
             if (requiredId != null && com.termfold.app.pm.PmSessionContext.activeSessionId != requiredId) {

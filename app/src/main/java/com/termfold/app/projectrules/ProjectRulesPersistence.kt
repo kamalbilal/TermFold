@@ -44,10 +44,18 @@ object ProjectRulesPersistence {
     private fun JSONObject.toProfile(): ProjectRuleProfile {
         val rules = optJSONArray("rules") ?: JSONArray()
         val origin = optString("originKey", "").ifBlank { null }
+        val folderIdsArr = optJSONArray("folderIds") ?: JSONArray()
+        val folderIds = List(folderIdsArr.length()) { i -> folderIdsArr.getString(i) }
+        val kind = when (optString("kind", "").lowercase()) {
+            "global" -> ProjectRuleProfileKind.GLOBAL
+            else -> ProjectRuleProfileKind.PROJECT
+        }
         return ProjectRuleProfile(
             id = getString("id"),
             displayName = getString("displayName"),
+            kind = kind,
             originKey = origin,
+            folderIds = folderIds,
             rules = List(rules.length()) { i -> rules.getJSONObject(i).toRule() },
         )
     }
@@ -74,7 +82,9 @@ object ProjectRulesPersistence {
         return JSONObject()
             .put("id", id)
             .put("displayName", displayName)
+            .put("kind", if (kind == ProjectRuleProfileKind.GLOBAL) "global" else "project")
             .put("originKey", originKey ?: "")
+            .put("folderIds", JSONArray().also { arr -> folderIds.forEach { arr.put(it) } })
             .put("rules", ruleArr)
     }
 }

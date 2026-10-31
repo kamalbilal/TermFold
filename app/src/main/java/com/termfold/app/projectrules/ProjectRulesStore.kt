@@ -35,14 +35,23 @@ class ProjectRulesStore private constructor(context: Context) {
     ) {
         update { data ->
             var profiles = data.profiles
-            if (enabled && folder != null && folderOriginKey != null) {
+            if (enabled && folder != null) {
                 val located = ProjectRulesContextResolver.locateRule(data, ruleId)
-                if (located != null && located.first.originKey == null) {
+                if (located != null && !located.first.isGlobal) {
                     profiles = profiles.map { profile ->
-                        if (profile.id == located.first.id) {
-                            profile.copy(originKey = folderOriginKey)
-                        } else {
-                            profile
+                        if (profile.id != located.first.id) return@map profile
+                        when {
+                            profile.folderIds.isNotEmpty() -> {
+                                if (folder.id in profile.folderIds) profile
+                                else profile.copy(folderIds = profile.folderIds + folder.id)
+                            }
+                            profile.originKey == null && folderOriginKey != null -> {
+                                profile.copy(originKey = folderOriginKey)
+                            }
+                            profile.originKey == null -> {
+                                profile.copy(folderIds = listOf(folder.id))
+                            }
+                            else -> profile
                         }
                     }
                 }
@@ -63,14 +72,18 @@ class ProjectRulesStore private constructor(context: Context) {
         }
     }
 
-    fun createProfile(displayName: String): ProjectRuleProfile {
+    fun createProfile(displayName: String, kind: ProjectRuleProfileKind = ProjectRuleProfileKind.PROJECT): ProjectRuleProfile {
         val profile = ProjectRuleProfile(
             id = UUID.randomUUID().toString(),
             displayName = displayName.trim(),
+            kind = kind,
         )
         update { it.copy(profiles = it.profiles + profile) }
         return profile
     }
+
+    fun createGlobalProfile(displayName: String): ProjectRuleProfile =
+        createProfile(displayName, ProjectRuleProfileKind.GLOBAL)
 
     fun saveProfile(profile: ProjectRuleProfile) {
         update { data ->

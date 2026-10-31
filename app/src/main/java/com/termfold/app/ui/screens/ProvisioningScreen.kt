@@ -334,6 +334,11 @@ fun shellSizeText(context: Context): String {
 
 private var sizeCache: Pair<Long, String> = Pair(0L, String())
 
+/** Call after deleting Linux storage so Settings shows an updated total. */
+fun invalidateShellSizeCache() {
+    synchronized(sizeCache) { sizeCache = Pair(0L, String()) }
+}
+
 internal fun formatBytes(bytes: Long): String = when {
     bytes >= 1L shl 30 -> String.format("%.1f GB", bytes / (1L shl 30).toDouble())
     bytes >= 1L shl 20 -> String.format("%.0f MB", bytes / (1L shl 20).toDouble())

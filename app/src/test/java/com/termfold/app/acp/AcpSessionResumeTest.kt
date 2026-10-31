@@ -162,10 +162,10 @@ class AcpTimelineCodecTest {
         )
         val timeline = AcpPersistedTimeline(
             items = listOf(AcpItem.UserMessage(1_000_001, "hi", emptyList())),
-            askQuestionsByUserMessageId = mapOf(1_000_001L to snapshot),
+            askQuestionsByUserMessageId = mapOf(1_000_001L to listOf(snapshot)),
         )
         val restored = AcpTimelineCodec.decode(AcpTimelineCodec.encode(timeline))
-        assertEquals(snapshot, restored.askQuestionsByUserMessageId[1_000_001L])
+        assertEquals(snapshot, restored.askQuestionsByUserMessageId[1_000_001L]?.single())
     }
 
     @Test

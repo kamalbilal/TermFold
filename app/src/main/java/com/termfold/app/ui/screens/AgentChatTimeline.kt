@@ -3,6 +3,8 @@ package com.termfold.app.ui.screens
 import com.termfold.app.acp.AcpItem
 import com.termfold.app.acp.AcpToolFileDiff
 import com.termfold.app.acp.ToolCallFilePresentation
+import com.termfold.app.acp.AskQuestionTurnSnapshot
+import com.termfold.app.acp.pairAskSnapshotsWithAskTools
 import com.termfold.app.acp.toolCallDiffCacheKey
 import com.termfold.app.gitworkspace.DiffDisplayRow
 import com.termfold.app.gitworkspace.applyContextFolding
@@ -39,6 +41,12 @@ sealed class AgentChatLazyEntry(val key: String) {
 
     /** Workflow UI (PM controls, decision memo, PR report) anchored to one user turn. */
     data class TurnFooter(val userMessageId: Long) : AgentChatLazyEntry("turn-footer-$userMessageId")
+
+    /** Interactive ask card anchored right after the matching `ask_user` tool row. */
+    data class AskQuestion(
+        val userMessageId: Long,
+        val snapshotToolCallId: String,
+    ) : AgentChatLazyEntry("ask-$userMessageId-$snapshotToolCallId")
 }
 
 fun buildAgentChatTimelineEntries(
@@ -50,6 +58,7 @@ fun buildAgentChatTimelineEntries(
     showLiveToolDiffs: Boolean,
     presentationCache: Map<String, ToolCallFilePresentation>,
     turnFooters: Boolean = false,
+    askQuestionsByUserMessageId: Map<Long, List<AskQuestionTurnSnapshot>> = emptyMap(),
 ): List<AgentChatLazyEntry> {
     val out = mutableListOf<AgentChatLazyEntry>()
     if (!turnFooters) {
@@ -81,9 +90,18 @@ fun buildAgentChatTimelineEntries(
                 presentationCache = presentationCache,
             )
             index++
-            while (index < items.size && items[index] !is AcpItem.UserMessage) {
+            var end = index
+            while (end < items.size && items[end] !is AcpItem.UserMessage) end++
+            val turnAgentItems = items.subList(index, end)
+            val askByWireToolId = pairAskSnapshotsWithAskTools(
+                turnAgentItems,
+                askQuestionsByUserMessageId[userMessageId].orEmpty(),
+            )
+            val placedAskSnapshotIds = mutableSetOf<String>()
+            while (index < end) {
+                val agentItem = items[index]
                 out.appendTimelineEntriesForItem(
-                    item = items[index],
+                    item = agentItem,
                     collapsedTools = collapsedTools,
                     expandedToolFiles = expandedToolFiles,
                     contextFolds = contextFolds,
@@ -91,7 +109,19 @@ fun buildAgentChatTimelineEntries(
                     showLiveToolDiffs = showLiveToolDiffs,
                     presentationCache = presentationCache,
                 )
+                if (agentItem is AcpItem.ToolCall) {
+                    val snap = askByWireToolId[agentItem.toolCallId]
+                    if (snap != null && placedAskSnapshotIds.add(snap.toolCallId)) {
+                        out += AgentChatLazyEntry.AskQuestion(userMessageId, snap.toolCallId)
+                    }
+                }
                 index++
+            }
+            val allSnaps = askQuestionsByUserMessageId[userMessageId].orEmpty()
+            for (snap in allSnaps) {
+                if (placedAskSnapshotIds.add(snap.toolCallId)) {
+                    out += AgentChatLazyEntry.AskQuestion(userMessageId, snap.toolCallId)
+                }
             }
             out += AgentChatLazyEntry.TurnFooter(userMessageId)
         } else {
@@ -179,26 +209,18 @@ private fun MutableList<AgentChatLazyEntry>.appendTimelineEntriesForItem(
                     ),
                 )
             }
-            if (item.detail.isNotBlank()) {
+            if (toolCallShowsOutputPane(item)) {
                 add(AgentChatLazyEntry.ToolDetail(item))
             }
         }
-        else -> add(AgentChatLazyEntry.Standard(item))
+        else -> {
+            if (item is AcpItem.UserMessage && item.wireOnly) return
+            add(AgentChatLazyEntry.Standard(item))
+        }
     }
 }
 
-private fun lastUserMessageIndex(items: List<AcpItem>): Int =
-    items.indexOfLast { it is AcpItem.UserMessage }
-
-private fun toolInLatestTurn(tool: AcpItem.ToolCall, items: List<AcpItem>): Boolean {
-    val userIdx = lastUserMessageIndex(items)
-    if (userIdx < 0) return false
-    val toolIdx = items.indexOfFirst { it is AcpItem.ToolCall && it.id == tool.id }
-    if (toolIdx < 0) return false
-    return toolIdx > userIdx
-}
-
-/** Default collapsed state for a tool row; in-progress tools stay expanded. */
+/** Default collapsed state for a newly seen tool row. */
 fun defaultToolCallCollapsed(
     tool: AcpItem.ToolCall,
     items: List<AcpItem>,
@@ -206,10 +228,7 @@ fun defaultToolCallCollapsed(
     agentBusy: Boolean,
 ): Boolean {
     if (tool.status == "in_progress") return false
-    if (!showLiveToolDiffs) return true
-    if (agentBusy) return true
-    if (tool.fileDiffs.isEmpty()) return true
-    return !toolInLatestTurn(tool, items)
+    return true
 }
 
 fun syncCompletedToolCollapse(
@@ -222,18 +241,19 @@ fun syncCompletedToolCollapse(
     for (item in items) {
         if (item !is AcpItem.ToolCall) continue
         if (item.id in userToggledToolIds) continue
-        val defaultCollapsed = defaultToolCallCollapsed(item, items, showLiveToolDiffs, agentBusy)
         if (!collapsedTools.containsKey(item.id)) {
-            collapsedTools[item.id] = defaultCollapsed
-        } else if (collapsedTools[item.id] != defaultCollapsed) {
-            collapsedTools[item.id] = defaultCollapsed
+            collapsedTools[item.id] = defaultToolCallCollapsed(item, items, showLiveToolDiffs, agentBusy)
+        } else if (item.status == "in_progress") {
+            // Stay open while streaming; do not auto-collapse when status flips to completed.
+            collapsedTools[item.id] = false
         }
     }
 }
 
-/** Collapse map for the chat timeline; recomputed when items or live-diff policy change. */
+/** Collapse map for the chat timeline (reads persisted [collapsedTools] state). */
 fun buildToolCallCollapsedMap(
     items: List<AcpItem>,
+    collapsedTools: Map<Long, Boolean>,
     showLiveToolDiffs: Boolean,
     agentBusy: Boolean,
     userToggledToolIds: Set<Long>,
@@ -241,10 +261,13 @@ fun buildToolCallCollapsedMap(
 ): Map<Long, Boolean> = buildMap {
     for (item in items) {
         if (item !is AcpItem.ToolCall) continue
-        val collapsed = if (item.id in userToggledToolIds) {
-            userCollapsedOverrides[item.id] ?: defaultToolCallCollapsed(item, items, showLiveToolDiffs, agentBusy)
-        } else {
-            defaultToolCallCollapsed(item, items, showLiveToolDiffs, agentBusy)
+        val collapsed = when {
+            item.id in userToggledToolIds ->
+                userCollapsedOverrides[item.id]
+                    ?: collapsedTools[item.id]
+                    ?: defaultToolCallCollapsed(item, items, showLiveToolDiffs, agentBusy)
+            item.id in collapsedTools -> collapsedTools[item.id]!!
+            else -> defaultToolCallCollapsed(item, items, showLiveToolDiffs, agentBusy)
         }
         put(item.id, collapsed)
     }

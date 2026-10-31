@@ -98,6 +98,8 @@ object ShellSetup {
     private const val NOTE_END = "<!-- termfold-browser:end -->"
     private const val PROJECT_RULES_NOTE_START = "<!-- termfold-project-rules:start -->"
     private const val PROJECT_RULES_NOTE_END = "<!-- termfold-project-rules:end -->"
+    private const val ASK_USER_NOTE_START = "<!-- termfold-ask-user:start -->"
+    private const val ASK_USER_NOTE_END = "<!-- termfold-ask-user:end -->"
 
     /**
      * The agent side of the preview browser: the `termfold-browser` command (also an MCP server),
@@ -108,6 +110,7 @@ object ShellSetup {
         fun asset(name: String) = context.assets.open(name).use { it.readBytes().decodeToString() }.replace("\r\n", "\n")
         writeExecutable(File(rootfs, BROWSER_TOOL.trimStart('/')), asset("termfold-browser.js"))
         writeExecutable(File(rootfs, AUTOMATION_MEMORY_TOOL.trimStart('/')), asset("termfold-automation-memory.js"))
+        writeExecutable(File(rootfs, ASK_USER_TOOL.trimStart('/')), asset("termfold-ask-user.js"))
         writeExecutable(File(rootfs, PM_MEMORY_TOOL.trimStart('/')), asset("termfold-pm-memory.js"))
         writeExecutable(File(rootfs, PR_REVIEW_TOOL.trimStart('/')), asset("termfold-pr-review.js"))
         writeExecutable(File(rootfs, PDF_TOOL.trimStart('/')), asset("termfold-pdf.js"))
@@ -147,12 +150,17 @@ object ShellSetup {
             File(rootfs, "root/.claude/skills/termfold-agent-memory/SKILL.md"),
             asset("termfold-agent-memory-skill.md"),
         )
+        val askUserSkill = asset("termfold-ask-user-skill.md")
+        writeIfChanged(File(rootfs, "root/.claude/skills/termfold-ask-user/SKILL.md"), askUserSkill)
+        writeIfChanged(File(rootfs, "root/.cursor/skills/termfold-ask-user/SKILL.md"), askUserSkill)
         val skill = asset("termfold-browser-skill.md")
         writeIfChanged(File(rootfs, "root/.claude/skills/termfold-browser/SKILL.md"), skill)
         // The other agents get the same guide, without the skill header.
         val note = NOTE_START + "\n" + skill.substringAfter("\n---\n").trim() + "\n" + NOTE_END + "\n"
         val projectRulesNote = PROJECT_RULES_NOTE_START + "\n" +
             asset("termfold-project-rules-skill.md").trim() + "\n" + PROJECT_RULES_NOTE_END + "\n"
+        val askUserNote = ASK_USER_NOTE_START + "\n" +
+            askUserSkill.substringAfter("\n---\n").trim() + "\n" + ASK_USER_NOTE_END + "\n"
         AGENT_NOTES.forEach { path ->
             val file = File(rootfs, path)
             val current = if (file.isFile) file.readText() else ""
@@ -185,6 +193,21 @@ object ShellSetup {
             }
             writeIfChanged(file, updated)
         }
+        AGENT_NOTES.forEach { path ->
+            val file = File(rootfs, path)
+            val current = if (file.isFile) file.readText() else ""
+            val updated = if (current.contains(ASK_USER_NOTE_START) && current.contains(ASK_USER_NOTE_END)) {
+                current.substringBefore(ASK_USER_NOTE_START) + askUserNote + current.substringAfter(ASK_USER_NOTE_END).trimStart('\n')
+            } else {
+                val gap = when {
+                    current.isEmpty() || current.endsWith("\n\n") -> ""
+                    current.endsWith("\n") -> "\n"
+                    else -> "\n\n"
+                }
+                current + gap + askUserNote
+            }
+            writeIfChanged(file, updated)
+        }
     }
 
     private val ANDROID_STORAGE_HINT = """
@@ -208,6 +231,7 @@ object ShellSetup {
     /** Guest path of the browser command; chat sessions start it as an MCP server. */
     const val BROWSER_TOOL = "/usr/local/bin/termfold-browser"
     const val AUTOMATION_MEMORY_TOOL = "/usr/local/bin/termfold-automation-memory"
+    const val ASK_USER_TOOL = "/usr/local/bin/termfold-ask-user"
     const val PM_MEMORY_TOOL = "/usr/local/bin/termfold-pm-memory"
     const val PR_REVIEW_TOOL = "/usr/local/bin/termfold-pr-review"
     const val PDF_TOOL = "/usr/local/bin/termfold-pdf"

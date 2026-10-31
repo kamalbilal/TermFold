@@ -60,6 +60,10 @@ object McpCatalog {
         }
 
         builtinBrowser(context)?.let { merged[it.name] = it }
+        // Cursor: termfold-ask-user MCP pairs with InteractiveAskPromptRules on every user prompt.
+        if (cursorAgent) {
+            builtinAskUser(context)?.let { merged[it.name] = it }
+        }
         if (automationMode || agentMemoryTools) {
             builtinAutomationMemory(context)?.let { merged[it.name] = it }
         }
@@ -154,6 +158,27 @@ object McpCatalog {
 
         )
 
+    }
+
+    private fun builtinAskUser(context: Context): McpServerEntry? {
+        val rootfs = ShellPaths.rootfsDir(context)
+        val node = "/opt/node/bin/node"
+        val tool = ShellSetup.ASK_USER_TOOL
+        if (!File(rootfs, node.trimStart('/')).exists() || !File(rootfs, tool.trimStart('/')).isFile) return null
+        BrowserBridge.start(context)
+        return McpServerEntry(
+            key = McpJson.keyFor(McpSource.BUILTIN, "termfold-ask-user"),
+            name = "termfold-ask-user",
+            source = McpSource.BUILTIN,
+            transport = McpTransport.Stdio(
+                command = node,
+                args = listOf(tool, "mcp"),
+                env = emptyMap(),
+            ),
+            configPath = null,
+            authHints = emptyList(),
+            configDisabled = false,
+        )
     }
 
     private fun builtinPmMemory(context: Context): McpServerEntry? {

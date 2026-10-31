@@ -13,6 +13,7 @@ class ProjectRulesStoreTest {
                     id = "p1",
                     displayName = "App",
                     originKey = "github.com/acme/app",
+                    folderIds = listOf("f1", "f2"),
                     rules = listOf(ProjectRule("r1", "Build", "run gradle", 0)),
                 ),
             ),
@@ -20,6 +21,22 @@ class ProjectRulesStoreTest {
         )
         val decoded = ProjectRulesPersistence.decode(ProjectRulesPersistence.encode(data))
         assertEquals(data, decoded)
+    }
+
+    @Test
+    fun globalKindRoundTrip() {
+        val data = ProjectRulesData(
+            profiles = listOf(
+                ProjectRuleProfile(
+                    id = "g1",
+                    displayName = "Global",
+                    kind = ProjectRuleProfileKind.GLOBAL,
+                    rules = listOf(ProjectRule("r1", "Always", "do X")),
+                ),
+            ),
+        )
+        val decoded = ProjectRulesPersistence.decode(ProjectRulesPersistence.encode(data))
+        assertEquals(ProjectRuleProfileKind.GLOBAL, decoded.profiles.single().kind)
     }
 
     @Test

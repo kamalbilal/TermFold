@@ -225,8 +225,10 @@ class WorkflowsPdfToolsOrderTest {
     @Test
     fun pdfToolsBeforeMore() {
         val names = com.termfold.app.ui.screens.WorkflowsSection.entries.map { it.name }
-        assertTrue(names.indexOf("PDF_TOOLS") < names.indexOf("MORE"))
+        assertTrue(names.indexOf("PDF_TOOLS") < names.indexOf("FILES"))
+        assertTrue(names.indexOf("FILES") < names.indexOf("MORE"))
         assertTrue(names.contains("PDF_TOOLS"))
+        assertTrue(names.contains("FILES"))
     }
 }
 

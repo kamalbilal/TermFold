@@ -14,22 +14,18 @@ class AskQuestionFooterVisibilityTest {
     @Test
     fun showsForPendingOnLatestTurn() {
         val pending = AcpPendingAskQuestion(1, "tc", null, emptyList(), userMessageId = 10L)
-        assertTrue(askFooterVisibleForTurn(10L, 10L, pending, emptyMap()))
+        assertTrue(askFooterVisibleForTurn(10L, 10L, pending, emptyList()))
     }
 
     @Test
     fun pendingSnapshotVisibleOnMatchingTurn() {
-        val map = mapOf(
-            10L to AskQuestionTurnSnapshot("tc", null, emptyList(), AskQuestionPhase.Pending),
-        )
-        assertTrue(askFooterVisibleForTurn(10L, 10L, null, map))
+        val list = listOf(AskQuestionTurnSnapshot("tc", null, emptyList(), AskQuestionPhase.Pending))
+        assertTrue(askFooterVisibleForTurn(10L, 10L, null, list))
     }
 
     @Test
     fun showsHistoricalAnsweredSnapshot() {
-        val map = mapOf(
-            10L to AskQuestionTurnSnapshot("tc", null, emptyList(), AskQuestionPhase.Answered),
-        )
-        assertTrue(askFooterVisibleForTurn(10L, 20L, null, map))
+        val list = listOf(AskQuestionTurnSnapshot("tc", null, emptyList(), AskQuestionPhase.Answered))
+        assertTrue(askFooterVisibleForTurn(10L, 20L, null, list))
     }
 }

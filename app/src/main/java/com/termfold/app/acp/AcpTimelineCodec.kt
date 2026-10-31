@@ -11,7 +11,7 @@ data class AcpPersistedTimeline(
     val checkpoints: AcpCheckpointUiState = AcpCheckpointUiState(),
     /** Injected on the next prompt after compress / wire resync. */
     val pendingWireContext: String? = null,
-    val askQuestionsByUserMessageId: Map<Long, AskQuestionTurnSnapshot> = emptyMap(),
+    val askQuestionsByUserMessageId: AskQuestionsByUserMessageId = emptyMap(),
 )
 
 /** JSON for the TermFold-owned chat timeline, independent of ACP wire session ids. */
@@ -175,6 +175,7 @@ object AcpTimelineCodec {
             .put("text", item.text)
             .put("images", encodeImages(item.images))
             .put("files", encodeFiles(item.files))
+            .also { if (item.wireOnly) it.put("wireOnly", true) }
         is AcpItem.AgentText -> JSONObject()
             .put("type", "agent")
             .put("id", item.id)
@@ -214,7 +215,13 @@ object AcpTimelineCodec {
         val id = obj.optLong("id")
         if (id == 0L) return null
         return when (obj.optString("type")) {
-            "user" -> AcpItem.UserMessage(id, obj.optString("text"), decodeImages(obj.optJSONArray("images")), decodeFiles(obj.optJSONArray("files")))
+            "user" -> AcpItem.UserMessage(
+                id,
+                obj.optString("text"),
+                decodeImages(obj.optJSONArray("images")),
+                decodeFiles(obj.optJSONArray("files")),
+                wireOnly = obj.optBoolean("wireOnly", false),
+            )
             "agent" -> AcpItem.AgentText(id, obj.optString("text"))
             "notice" -> AcpItem.Notice(id, obj.optString("text"))
             "thought" -> AcpItem.Thought(id, obj.optString("text"))

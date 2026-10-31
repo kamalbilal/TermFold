@@ -14,6 +14,8 @@ import com.termfold.app.data.AutomationStore
 import com.termfold.app.data.FolderStore
 import com.termfold.app.data.PmSessionStore
 import com.termfold.app.data.PrReviewStore
+import com.termfold.app.data.StartupCommandsStore
+import com.termfold.app.data.TasksStore
 import com.termfold.app.pm.PmBriefFiles
 import com.termfold.app.pm.PmBind
 import com.termfold.app.pm.PmData
@@ -44,6 +46,15 @@ import com.termfold.app.prreview.PrReviewPaths
 import com.termfold.app.prreview.PrReviewSession
 import com.termfold.app.prreview.PrReviewTurnSync
 import com.termfold.app.acp.AcpItem
+import com.termfold.app.startup.StartupCommand
+import com.termfold.app.startup.StartupCommandGroup
+import com.termfold.app.startup.StartupCommandRunner
+import com.termfold.app.startup.StartupCommandsData
+import com.termfold.app.tasks.TaskAttachments
+import com.termfold.app.tasks.TaskDay
+import com.termfold.app.tasks.TaskItem
+import com.termfold.app.tasks.TaskStatus
+import com.termfold.app.tasks.TasksData
 import com.termfold.app.shell.DistroMigration
 import com.termfold.app.shell.Projects
 import com.termfold.app.shell.ShellRuntime
@@ -130,6 +141,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val prReviewStore = PrReviewStore(application)
     private val pmSessionStore = PmSessionStore(application)
     private val pdfToolsStore = com.termfold.app.data.PdfToolsStore(application)
+    private val startupCommandsStore = StartupCommandsStore(application)
+    private val tasksStore = TasksStore(application)
 
     val folders: StateFlow<AppData> = store.data
         .stateIn(viewModelScope, SharingStarted.Eagerly, AppData())
@@ -145,6 +158,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     val pdfTools: StateFlow<com.termfold.app.pdftools.PdfToolsData> = pdfToolsStore.data
         .stateIn(viewModelScope, SharingStarted.Eagerly, com.termfold.app.pdftools.PdfToolsData())
+
+    val startupCommands: StateFlow<StartupCommandsData> = startupCommandsStore.data
+        .stateIn(viewModelScope, SharingStarted.Eagerly, StartupCommandsData())
+
+    val startupCommandsRunning = StartupCommandRunner.runningIds
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+
+    val startupCommandLogs = StartupCommandRunner.logs
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    val tasks: StateFlow<TasksData> = tasksStore.data
+        .stateIn(viewModelScope, SharingStarted.Eagerly, TasksData())
 
     private val _shell = MutableStateFlow(ShellProgress())
     val shell: StateFlow<ShellProgress> = _shell.asStateFlow()
@@ -1553,5 +1578,251 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 percent = 100,
             )
         }
+    }
+
+    fun addStartupCommand(name: String, folderId: String, command: String) {
+        val trimmedName = name.trim()
+        val trimmedCommand = command.trim()
+        if (trimmedName.isEmpty() || trimmedCommand.isEmpty() || folderId.isBlank()) return
+        viewModelScope.launch {
+            startupCommandsStore.update { data ->
+                data.copy(
+                    commands = data.commands + StartupCommand(
+                        id = Ids.new(),
+                        name = trimmedName,
+                        folderId = folderId,
+                        command = trimmedCommand,
+                    ),
+                )
+            }
+        }
+    }
+
+    fun updateStartupCommand(id: String, name: String, folderId: String, command: String) {
+        val trimmedName = name.trim()
+        val trimmedCommand = command.trim()
+        if (trimmedName.isEmpty() || trimmedCommand.isEmpty() || folderId.isBlank()) return
+        StartupCommandRunner.stop(id)
+        viewModelScope.launch {
+            startupCommandsStore.update { data ->
+                data.copy(
+                    commands = data.commands.map { entry ->
+                        if (entry.id == id) {
+                            entry.copy(
+                                name = trimmedName,
+                                folderId = folderId,
+                                command = trimmedCommand,
+                            )
+                        } else {
+                            entry
+                        }
+                    },
+                )
+            }
+        }
+    }
+
+    fun removeStartupCommand(id: String) {
+        StartupCommandRunner.forget(id)
+        viewModelScope.launch {
+            startupCommandsStore.update { data ->
+                data.copy(
+                    commands = data.commands.filterNot { it.id == id },
+                    groups = data.groups.map { group ->
+                        group.copy(commandIds = group.commandIds.filterNot { it == id })
+                    },
+                )
+            }
+        }
+    }
+
+    fun addStartupCommandGroup(name: String, commandIds: List<String>) {
+        val trimmedName = name.trim()
+        val ids = commandIds.distinct().filter { it.isNotBlank() }
+        if (trimmedName.isEmpty() || ids.isEmpty()) return
+        viewModelScope.launch {
+            startupCommandsStore.update { data ->
+                val valid = ids.filter { id -> data.commands.any { it.id == id } }
+                if (valid.isEmpty()) return@update data
+                val claimed = valid.toSet()
+                data.copy(
+                    groups = data.groups.map { group ->
+                        group.copy(commandIds = group.commandIds.filterNot { it in claimed })
+                    } + StartupCommandGroup(
+                        id = Ids.new(),
+                        name = trimmedName,
+                        commandIds = valid,
+                    ),
+                )
+            }
+        }
+    }
+
+    fun updateStartupCommandGroup(id: String, name: String, commandIds: List<String>) {
+        val trimmedName = name.trim()
+        val ids = commandIds.distinct().filter { it.isNotBlank() }
+        if (trimmedName.isEmpty() || ids.isEmpty()) return
+        viewModelScope.launch {
+            startupCommandsStore.update { data ->
+                val valid = ids.filter { cmdId -> data.commands.any { it.id == cmdId } }
+                if (valid.isEmpty()) return@update data
+                data.copy(
+                    groups = data.groups.map { group ->
+                        when {
+                            group.id == id -> group.copy(name = trimmedName, commandIds = valid)
+                            else -> group.copy(commandIds = group.commandIds.filterNot { it in valid.toSet() })
+                        }
+                    },
+                )
+            }
+        }
+    }
+
+    fun removeStartupCommandGroup(id: String) {
+        stopStartupCommandGroup(id)
+        viewModelScope.launch {
+            startupCommandsStore.update { data ->
+                data.copy(groups = data.groups.filterNot { it.id == id })
+            }
+        }
+    }
+
+    fun startStartupCommand(id: String, onError: (String) -> Unit = {}) {
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            val entry = startupCommands.value.commands.firstOrNull { it.id == id } ?: return@launch
+            val folder = folders.value.folder(entry.folderId)
+            if (folder == null) {
+                withContext(Dispatchers.Main) { onError("Project not found.") }
+                return@launch
+            }
+            val error = StartupCommandRunner.start(app, entry, folder)
+            if (error != null) withContext(Dispatchers.Main) { onError(error) }
+        }
+    }
+
+    fun stopStartupCommand(id: String) {
+        StartupCommandRunner.stop(id)
+    }
+
+    fun startStartupCommandGroup(groupId: String, onError: (String) -> Unit = {}) {
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            val snapshot = startupCommands.value
+            val group = snapshot.groups.firstOrNull { it.id == groupId } ?: return@launch
+            for (cmdId in group.commandIds) {
+                if (StartupCommandRunner.isRunning(cmdId)) continue
+                val entry = snapshot.commands.firstOrNull { it.id == cmdId } ?: continue
+                val folder = folders.value.folder(entry.folderId)
+                if (folder == null) {
+                    withContext(Dispatchers.Main) {
+                        onError("${entry.name}: Project not found.")
+                    }
+                    continue
+                }
+                val error = StartupCommandRunner.start(app, entry, folder)
+                if (error != null) {
+                    withContext(Dispatchers.Main) {
+                        onError("${entry.name}: $error")
+                    }
+                }
+            }
+        }
+    }
+
+    fun stopStartupCommandGroup(groupId: String) {
+        val group = startupCommands.value.groups.firstOrNull { it.id == groupId } ?: return
+        group.commandIds.forEach { StartupCommandRunner.stop(it) }
+    }
+
+    fun createTask(
+        dayKey: String,
+        folderId: String,
+        title: String,
+        description: String,
+        status: TaskStatus,
+        attachmentUris: List<Uri> = emptyList(),
+    ) {
+        val trimmedTitle = title.trim()
+        if (!taskInputsValid(dayKey, folderId, trimmedTitle)) return
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            val id = Ids.new()
+            val attachments = TaskAttachments.copyFromUris(app, id, attachmentUris)
+            val item = TaskItem(
+                id = id,
+                folderId = folderId,
+                dayKey = dayKey,
+                title = trimmedTitle,
+                description = description.trim(),
+                status = status,
+                attachments = attachments,
+            )
+            tasksStore.update { data -> data.copy(tasks = data.tasks + item) }
+        }
+    }
+
+    fun updateTask(
+        id: String,
+        dayKey: String,
+        folderId: String,
+        title: String,
+        description: String,
+        status: TaskStatus,
+        attachmentUris: List<Uri> = emptyList(),
+    ) {
+        val trimmedTitle = title.trim()
+        if (!taskInputsValid(dayKey, folderId, trimmedTitle)) return
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            tasksStore.update { data ->
+                val existing = data.tasks.firstOrNull { it.id == id } ?: return@update data
+                val added = TaskAttachments.copyFromUris(app, id, attachmentUris)
+                val merged = existing.copy(
+                    folderId = folderId,
+                    dayKey = dayKey,
+                    title = trimmedTitle,
+                    description = description.trim(),
+                    status = status,
+                    attachments = existing.attachments + added,
+                    updatedAtEpochMs = System.currentTimeMillis(),
+                )
+                data.copy(tasks = data.tasks.map { if (it.id == id) merged else it })
+            }
+        }
+    }
+
+    fun deleteTask(id: String) {
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            TaskAttachments.deleteTaskFiles(app, id)
+            tasksStore.update { data ->
+                data.copy(tasks = data.tasks.filterNot { it.id == id })
+            }
+        }
+    }
+
+    fun setTaskStatus(id: String, status: TaskStatus) {
+        viewModelScope.launch(Dispatchers.IO) {
+            tasksStore.update { data ->
+                val task = data.tasks.firstOrNull { it.id == id } ?: return@update data
+                if (task.status == status) return@update data
+                data.copy(
+                    tasks = data.tasks.map { item ->
+                        if (item.id == id) {
+                            item.copy(status = status, updatedAtEpochMs = System.currentTimeMillis())
+                        } else {
+                            item
+                        }
+                    },
+                )
+            }
+        }
+    }
+
+    private fun taskInputsValid(dayKey: String, folderId: String, title: String): Boolean {
+        if (title.isBlank() || folderId.isBlank() || dayKey.isBlank()) return false
+        if (TaskDay.parse(dayKey) == null) return false
+        return folders.value.folder(folderId) != null
     }
 }

@@ -39,7 +39,7 @@ import com.termfold.app.ui.theme.Motion
 enum class NavTab(val icon: ImageVector, val inactiveIcon: ImageVector, val labelRes: Int) {
     FOLDERS(TermFoldIcons.Home, TermFoldIcons.Home, R.string.cd_home),
     WORKFLOWS(TermFoldIcons.Sparkle, TermFoldIcons.Sparkle, R.string.cd_workflows),
-    FILES(TermFoldIcons.Files, TermFoldIcons.Files, R.string.cd_files),
+    TASKS(TermFoldIcons.Check, TermFoldIcons.Check, R.string.cd_tasks),
     SETTINGS(TermFoldIcons.Gear, TermFoldIcons.Gear, R.string.cd_settings),
 }
 

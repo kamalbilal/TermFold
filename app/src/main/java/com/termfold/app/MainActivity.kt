@@ -3,6 +3,7 @@ package com.termfold.app
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -100,6 +101,7 @@ import com.termfold.app.core.Session
 import com.termfold.app.gitworkspace.WorkspaceIds
 import com.termfold.app.ui.screens.AutomationAgentSessionScreen
 import com.termfold.app.ui.screens.AutomationProjectDetailScreen
+import com.termfold.app.ui.screens.TasksScreen
 import com.termfold.app.ui.screens.WorkflowsScreen
 import com.termfold.app.ui.screens.WorkflowsSection
 import com.termfold.app.ui.screens.WorkflowsSectionScreen
@@ -109,6 +111,7 @@ import com.termfold.app.ui.screens.PresetChips
 import com.termfold.app.ui.screens.ProvisioningScreen
 import com.termfold.app.ui.screens.SearchField
 import com.termfold.app.ui.screens.SettingsScreen
+import com.termfold.app.ui.screens.StartupCommandsDialog
 import com.termfold.app.ui.screens.TerminalScreen
 import com.termfold.app.ui.screens.TextPromptDialog
 import com.termfold.app.ui.theme.Palette
@@ -265,6 +268,10 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
     val pdfToolsData by viewModel.pdfTools.collectAsStateWithLifecycle()
     val pdfToolsJob by viewModel.pdfToolsJob.collectAsStateWithLifecycle()
     val pdfToolsLibrariesReady by viewModel.pdfToolsLibrariesReady.collectAsStateWithLifecycle()
+    val tasksData by viewModel.tasks.collectAsStateWithLifecycle()
+    val startupCommandsData by viewModel.startupCommands.collectAsStateWithLifecycle()
+    val startupCommandsRunning by viewModel.startupCommandsRunning.collectAsStateWithLifecycle()
+    val startupCommandLogs by viewModel.startupCommandLogs.collectAsStateWithLifecycle()
     val shell by viewModel.shell.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
@@ -318,6 +325,7 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
     val job by viewModel.job.collectAsStateWithLifecycle()
     var searchOpen by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
+    var startupCommandsOpen by remember { mutableStateOf(false) }
 
     var optionsFor by remember { mutableStateOf<OptionsTarget?>(null) }
     var renameFolderId by remember { mutableStateOf<String?>(null) }
@@ -668,6 +676,7 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                                         if (!searchOpen) query = ""
                                     },
                                     searchOpen = searchOpen,
+                                    onStartupCommands = { startupCommandsOpen = true },
                                     onMore = { tab = NavTab.SETTINGS },
                                     useGrid = windowWidth.isWide,
                                     modifier = Modifier.fillMaxSize(),
@@ -681,7 +690,20 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                                     modifier = Modifier.fillMaxSize(),
                                 )
 
-                                NavTab.FILES -> FileManagerScreen(wide = windowWidth.isWide)
+                                NavTab.TASKS -> TasksScreen(
+                                    folders = data.folders,
+                                    tasks = tasksData.tasks,
+                                    wide = windowWidth.isWide,
+                                    onCreateTask = { dayKey, folderId, title, description, status, uris ->
+                                        viewModel.createTask(dayKey, folderId, title, description, status, uris)
+                                    },
+                                    onUpdateTask = { id, dayKey, folderId, title, description, status, uris ->
+                                        viewModel.updateTask(id, dayKey, folderId, title, description, status, uris)
+                                    },
+                                    onDeleteTask = viewModel::deleteTask,
+                                    onSetStatus = viewModel::setTaskStatus,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
 
                                 NavTab.SETTINGS -> SettingsScreen(
                                     shellState = shell.state,
@@ -1247,6 +1269,41 @@ internal fun TermFoldRoot(viewModel: AppViewModel) {
                 pickFolder.launch(null)
             },
             onDismiss = { newProject = false },
+        )
+    }
+    if (startupCommandsOpen) {
+        StartupCommandsDialog(
+            folders = data.folders,
+            data = startupCommandsData,
+            runningIds = startupCommandsRunning,
+            logs = startupCommandLogs,
+            onDismiss = { startupCommandsOpen = false },
+            onAdd = { name, folderId, command ->
+                viewModel.addStartupCommand(name, folderId, command)
+            },
+            onAddGroup = { name, commandIds ->
+                viewModel.addStartupCommandGroup(name, commandIds)
+            },
+            onUpdate = { id, name, folderId, command ->
+                viewModel.updateStartupCommand(id, name, folderId, command)
+            },
+            onUpdateGroup = { id, name, commandIds ->
+                viewModel.updateStartupCommandGroup(id, name, commandIds)
+            },
+            onStart = { id ->
+                viewModel.startStartupCommand(id) { msg ->
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                }
+            },
+            onStop = { viewModel.stopStartupCommand(it) },
+            onStartGroup = { id ->
+                viewModel.startStartupCommandGroup(id) { msg ->
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                }
+            },
+            onStopGroup = { viewModel.stopStartupCommandGroup(it) },
+            onDelete = { viewModel.removeStartupCommand(it) },
+            onDeleteGroup = { viewModel.removeStartupCommandGroup(it) },
         )
     }
     LaunchedEffect(pmJob?.doneSessionId) {

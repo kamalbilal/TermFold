@@ -15,6 +15,7 @@ import com.termfold.app.automation.AutomationGuardrailContext
 import com.termfold.app.automation.AutomationSpecCommand
 import com.termfold.app.acp.checkpoints.ShadowCheckpointStore
 import com.termfold.app.shell.ProotCommand
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -53,7 +54,7 @@ internal fun acpInitializeParams(): JSONObject = JSONObject()
         "clientCapabilities",
         JSONObject()
             .put("fs", JSONObject().put("readTextFile", false).put("writeTextFile", false))
-            .put("terminal", false)
+            .put("terminal", true)
             .put("_meta", JSONObject().put("parameterizedModelPicker", true)),
     )
 
@@ -78,6 +79,8 @@ sealed interface AcpItem {
         val text: String,
         val images: List<AcpBlock.Image>,
         val files: List<AcpBlock.TextFile> = emptyList(),
+        /** Full [text] goes to the agent on the wire but is hidden in the chat timeline. */
+        val wireOnly: Boolean = false,
     ) : AcpItem
 
     /** Something that went wrong with a turn, shown inline where it happened. */
@@ -175,7 +178,7 @@ data class AcpUiState(
     val agentBusy: Boolean = false,
     val pendingPermission: AcpPendingPermission? = null,
     val pendingAskQuestion: AcpPendingAskQuestion? = null,
-    val askQuestionsByUserMessageId: Map<Long, AskQuestionTurnSnapshot> = emptyMap(),
+    val askQuestionsByUserMessageId: AskQuestionsByUserMessageId = emptyMap(),
     val authMethods: List<String> = emptyList(),
     val errorDetail: String = "",
     /** What the agent said it accepts in prompts; unsupported content is sent as file links. */
@@ -253,6 +256,8 @@ class AcpClient(
     private var pendingWireContext: String? = null
 
     private val nextId = AtomicLong(1)
+    /** Maps ACP display [terminalId] to tool rows that reference it in `content`. */
+    private val toolCallIdsByTerminalId = ConcurrentHashMap<String, MutableSet<String>>()
     private val pending = ConcurrentHashMap<Long, CompletableDeferred<JSONObject>>()
     private val writeLock = Any()
 
@@ -273,6 +278,16 @@ class AcpClient(
 
     @Volatile
     private var closedByUser = false
+
+    /** Completes [awaitInteractiveAsk] when the user answers via MCP `ask_user`. */
+    @Volatile
+    private var interactiveAskWaiter: CompletableDeferred<JSONObject>? = null
+
+    init {
+        if (agent.id == "cursor") {
+            AskUserBridge.register(sessionKey, this)
+        }
+    }
 
     /** Agent process was torn down for background idle policy; timeline and client entry remain. */
     @Volatile
@@ -305,6 +320,9 @@ class AcpClient(
         process = null
         agentSessionId = null
         failPending("Agent restarted")
+        interactiveAskFullRulesSent = false
+        interactiveAskWaiter?.complete(AcpAskQuestionParser.buildCancelledResult())
+        interactiveAskWaiter = null
         _state.update { state ->
             state.copy(
                 phase = AcpPhase.CONNECTING,
@@ -423,6 +441,12 @@ class AcpClient(
     private fun failPending(reason: String) {
         pending.keys.toList().forEach { id ->
             pending.remove(id)?.completeExceptionally(IllegalStateException(reason))
+        }
+    }
+
+    private fun failPendingForAskPause() {
+        pending.keys.toList().forEach { id ->
+            pending.remove(id)?.completeExceptionally(AskTurnPausedException())
         }
     }
 
@@ -790,6 +814,7 @@ class AcpClient(
             persistTimeline()
             suppressReplayForWireId = null
             pendingWireContext = null
+            interactiveAskFullRulesSent = false
             agentSessionId = null
             _state.update {
                 it.copy(
@@ -801,6 +826,8 @@ class AcpClient(
                 )
             }
             clearCurrentWirePointers()
+            AcpTerminalOutput.clearSession()
+            toolCallIdsByTerminalId.clear()
             AcpTimelineStore.clear(context, sessionKey)
             openSession()
         }
@@ -819,7 +846,7 @@ class AcpClient(
         if (sessionId.isNullOrBlank()) return false
         val ui = _state.value
         if (ui.phase != AcpPhase.READY) return false
-        if (turnInFlight || ui.agentBusy || ui.pendingPermission != null) {
+        if (turnInFlight || ui.agentBusy || ui.pendingPermission != null || ui.pendingAskQuestion != null) {
             appendSystemError(context.getString(R.string.mcp_reload_busy))
             return false
         }
@@ -1019,14 +1046,16 @@ class AcpClient(
         text: String,
         images: List<AcpBlock.Image>,
         files: List<AcpBlock.TextFile>,
+        wireOnly: Boolean = false,
     ) {
-        scope.launch { sendNowSuspend(text, images, files) }
+        scope.launch { sendNowSuspend(text, images, files, wireOnly) }
     }
 
     private suspend fun sendNowSuspend(
         text: String,
         images: List<AcpBlock.Image>,
         files: List<AcpBlock.TextFile>,
+        wireOnly: Boolean = false,
     ) {
         if (_state.value.pendingAskQuestion != null) return
         if (!ensureWireSessionForSend()) return
@@ -1038,7 +1067,7 @@ class AcpClient(
             appendSystemError(context.getString(R.string.automation_spec_need_request))
             return
         }
-        val messageId = beginUserTurn(text, images, files) ?: return
+        val messageId = beginUserTurn(text, images, files, wireOnly = wireOnly) ?: return
         completeUserTurn(messageId, text, images, files)
     }
 
@@ -1050,6 +1079,7 @@ class AcpClient(
         text: String,
         images: List<AcpBlock.Image>,
         files: List<AcpBlock.TextFile>,
+        wireOnly: Boolean = false,
     ): Long? {
         suppressReplayForWireId = null
         if (_state.value.checkpoints.ghostFromItemId != null) {
@@ -1085,7 +1115,7 @@ class AcpClient(
                 }
             }
         }
-        val newItems = _state.value.items + AcpItem.UserMessage(messageId, text, images, files)
+        val newItems = _state.value.items + AcpItem.UserMessage(messageId, text, images, files, wireOnly)
         _state.update { state ->
             state.copy(
                 agentBusy = true,
@@ -1126,8 +1156,10 @@ class AcpClient(
             val hadError = response.optJSONObject("error") != null
             response.optJSONObject("error")?.let { error ->
                 appendSystemError(
-                    error.optJSONObject("data")?.optString("message")?.ifBlank { null }
-                        ?: error.optString("message").ifBlank { "The agent could not answer." },
+                    humanizePromptFailureMessage(
+                        error.optJSONObject("data")?.optString("message")?.ifBlank { null }
+                            ?: error.optString("message").ifBlank { "The agent could not answer." },
+                    ),
                 )
             }
             val stopReason = response.optJSONObject("result")?.optString("stopReason")
@@ -1142,8 +1174,12 @@ class AcpClient(
                 agent.id == "cursor" &&
                 AcpContextCompress.isSummarizePrompt(text)
         } catch (failure: Throwable) {
-            Log.w(TAG, "prompt failed", failure)
-            appendSystemError(failure.message ?: "prompt failed")
+            if (failure is AskTurnPausedException) {
+                Log.d(TAG, "Agent turn paused for interactive ask")
+            } else {
+                Log.w(TAG, "prompt failed", failure)
+                appendSystemError(humanizePromptFailureMessage(failure.message ?: "prompt failed"))
+            }
         } finally {
             _state.update { state ->
                 state.copy(
@@ -1172,6 +1208,7 @@ class AcpClient(
         images: List<AcpBlock.Image>,
         files: List<AcpBlock.TextFile>,
     ): JSONArray? {
+        // All mandatory session rules (interactive ask, etc.) are applied in composeWirePromptText.
         val caps = _state.value
         val wireCtx = pendingWireContext
         pendingWireContext = null
@@ -1182,6 +1219,14 @@ class AcpClient(
         }
         val wireText = composeWirePromptText(
             pendingWireContext = wireCtx,
+            interactiveAskInjection = when {
+                agent.id != "cursor" -> InteractiveAskWireInjection.None
+                !interactiveAskFullRulesSent -> {
+                    interactiveAskFullRulesSent = true
+                    InteractiveAskWireInjection.Full
+                }
+                else -> InteractiveAskWireInjection.Compact
+            },
             automationPrefix = automationPromptPrefix?.invoke(body),
             agentMemoryPrefix = agentMemoryPrefix?.invoke(body),
             extraPrefix = extraPromptPrefix?.invoke(text),
@@ -1288,6 +1333,9 @@ class AcpClient(
 
     /** A prompt from session/prompt is still waiting for its answer (the turn has not ended). */
     @Volatile private var turnInFlight = false
+
+    /** Full [InteractiveAskPromptRules.promptBlock] is sent once per agent process / new chat. */
+    @Volatile private var interactiveAskFullRulesSent = false
 
     private val pendingPreTurnCommits = ConcurrentHashMap<Long, Deferred<String?>>()
 
@@ -1864,15 +1912,31 @@ class AcpClient(
         val pending = _state.value.pendingAskQuestion ?: return
         if (!askQuestionAnswersValid(pending.questions, answers)) return
         val result = AcpAskQuestionParser.buildAnsweredResult(answers)
-        respondAskQuestionRpc(pending.requestId, result)
-        commitAskSnapshot(pending, AskQuestionPhase.Answered, answers)
+        val userText = AskQuestionWireMessage.formatAnsweredUserMessage(
+            pending.title,
+            pending.questions,
+            answers,
+        )
+        finishInteractiveAsk(
+            pending,
+            AskQuestionPhase.Answered,
+            answers,
+            result,
+            userReplyText = userText,
+        )
     }
 
     fun skipPendingAskQuestion() {
         val pending = _state.value.pendingAskQuestion ?: return
         val result = AcpAskQuestionParser.buildSkippedResult()
-        respondAskQuestionRpc(pending.requestId, result)
-        commitAskSnapshot(pending, AskQuestionPhase.Skipped, null)
+        val userText = AskQuestionWireMessage.formatSkippedUserMessage(pending.title)
+        finishInteractiveAsk(
+            pending,
+            AskQuestionPhase.Skipped,
+            null,
+            result,
+            userReplyText = userText,
+        )
     }
 
     private fun respondAskQuestionRpc(requestId: Any, result: JSONObject) {
@@ -1886,11 +1950,38 @@ class AcpClient(
         _state.update { it.copy(pendingAskQuestion = null) }
     }
 
+    private fun finishInteractiveAsk(
+        pending: AcpPendingAskQuestion,
+        phase: AskQuestionPhase,
+        answers: List<AskQuestionAnswer>?,
+        rpcResult: JSONObject,
+        userReplyText: String?,
+    ) {
+        if (pending.requestId != null) {
+            respondAskQuestionRpc(pending.requestId, rpcResult)
+        } else {
+            interactiveAskWaiter?.complete(rpcResult)
+            interactiveAskWaiter = null
+        }
+        commitAskSnapshot(pending, phase, answers)
+        userReplyText?.takeIf { it.isNotBlank() }?.let { text ->
+            stoppedByUser = false
+            sendNow(text, emptyList(), emptyList(), wireOnly = true)
+        }
+    }
+
     private fun abandonPendingAskQuestion(sendCancelledRpc: Boolean) {
         val pending = _state.value.pendingAskQuestion ?: return
-        if (sendCancelledRpc && writer != null) {
-            respondAskQuestionRpc(pending.requestId, AcpAskQuestionParser.buildCancelledResult())
+        val cancelled = AcpAskQuestionParser.buildCancelledResult()
+        if (pending.requestId != null) {
+            if (sendCancelledRpc && writer != null) {
+                respondAskQuestionRpc(pending.requestId, cancelled)
+            } else {
+                _state.update { it.copy(pendingAskQuestion = null) }
+            }
         } else {
+            interactiveAskWaiter?.complete(cancelled)
+            interactiveAskWaiter = null
             _state.update { it.copy(pendingAskQuestion = null) }
         }
         commitAskSnapshot(pending, AskQuestionPhase.Cancelled, null)
@@ -1911,7 +2002,12 @@ class AcpClient(
         _state.update {
             it.copy(
                 pendingAskQuestion = null,
-                askQuestionsByUserMessageId = it.askQuestionsByUserMessageId + (pending.userMessageId to snapshot),
+                askQuestionsByUserMessageId = replaceAskSnapshotForTurn(
+                    it.askQuestionsByUserMessageId,
+                    pending.userMessageId,
+                    pending.toolCallId,
+                    snapshot,
+                ),
             )
         }
         persistTimeline()
@@ -1919,6 +2015,87 @@ class AcpClient(
 
     private fun latestUserMessageId(): Long? =
         _state.value.items.filterIsInstance<AcpItem.UserMessage>().lastOrNull()?.id
+
+    /**
+     * Shows the ask card, stops the in-flight agent turn, and returns immediately (MCP `ask_user`).
+     * The user's Continue/Skip becomes the next [send] prompt.
+     */
+    suspend fun awaitInteractiveAsk(params: JSONObject): JSONObject {
+        val parsed = AcpAskQuestionParser.parseRequest(params, allowGeneratedToolCallId = true)
+            ?: return JSONObject().put("error", "Invalid ask payload (need questions[] with options)")
+        val error = withContext(Dispatchers.Main) {
+            presentInteractiveAsk(requestId = null, parsed)
+        }
+        if (error != null) {
+            return JSONObject().put("error", error)
+        }
+        withContext(Dispatchers.Main) {
+            stopAgentTurnForInteractiveAsk()
+        }
+        return AskQuestionWireMessage.deferredMcpToolResult()
+    }
+
+    /** Stops Cursor mid-turn but keeps [pendingAskQuestion] so the user can answer. */
+    private fun stopAgentTurnForInteractiveAsk() {
+        val sessionId = agentSessionId
+        stoppedByUser = true
+        steerId = null
+        if (!sessionId.isNullOrBlank()) {
+            scope.launch { notify("session/cancel", JSONObject().put("sessionId", sessionId)) }
+        }
+        failPendingForAskPause()
+        abortInFlightUserTurn()
+        _state.update { it.copy(agentBusy = false) }
+    }
+
+    /** @return error message, or null on success */
+    private fun presentInteractiveAsk(requestId: Any?, parsed: AcpAskQuestionParser.ParsedAskRequest): String? {
+        if (agent.id != "cursor") return "Interactive ask requires Cursor agent"
+        if (_state.value.pendingAskQuestion != null) return "Another question is pending"
+        val userMessageId = latestUserMessageId()
+        if (userMessageId == null) {
+            if (requestId != null && writer != null) {
+                writeLine(
+                    JSONObject()
+                        .put("jsonrpc", "2.0")
+                        .put("id", requestId)
+                        .put("result", AcpAskQuestionParser.buildCancelledResult())
+                        .toString(),
+                )
+            }
+            return "No user message to attach this question to"
+        }
+        if (requestId != null) {
+            interactiveAskWaiter = CompletableDeferred()
+        }
+        val pending = AcpPendingAskQuestion(
+            requestId = requestId,
+            toolCallId = parsed.toolCallId,
+            title = parsed.title,
+            questions = parsed.questions,
+            userMessageId = userMessageId,
+        )
+        val snapshot = AskQuestionTurnSnapshot(
+            toolCallId = parsed.toolCallId,
+            title = parsed.title,
+            questions = parsed.questions,
+            phase = AskQuestionPhase.Pending,
+        )
+        _state.update {
+            it.copy(
+                pendingAskQuestion = pending,
+                askQuestionsByUserMessageId = appendAskSnapshotForTurn(
+                    it.askQuestionsByUserMessageId,
+                    userMessageId,
+                    snapshot,
+                ),
+            )
+        }
+        if (requestId != null) {
+            scope.launch { stopAgentTurnForInteractiveAsk() }
+        }
+        return null
+    }
 
     private fun handleAskQuestion(id: Any, params: JSONObject?) {
         if (agent.id != "cursor") {
@@ -1934,41 +2111,18 @@ class AcpClient(
             respondError(id, "Invalid ask_question payload")
             return
         }
-        val userMessageId = latestUserMessageId()
-        if (userMessageId == null) {
-            writeLine(
-                JSONObject()
-                    .put("jsonrpc", "2.0")
-                    .put("id", id)
-                    .put("result", AcpAskQuestionParser.buildCancelledResult())
-                    .toString(),
-            )
-            return
-        }
-        val pending = AcpPendingAskQuestion(
-            requestId = id,
-            toolCallId = parsed.toolCallId,
-            title = parsed.title,
-            questions = parsed.questions,
-            userMessageId = userMessageId,
-        )
-        val snapshot = AskQuestionTurnSnapshot(
-            toolCallId = parsed.toolCallId,
-            title = parsed.title,
-            questions = parsed.questions,
-            phase = AskQuestionPhase.Pending,
-        )
-        _state.update {
-            it.copy(
-                pendingAskQuestion = pending,
-                askQuestionsByUserMessageId = it.askQuestionsByUserMessageId + (userMessageId to snapshot),
-            )
+        val error = presentInteractiveAsk(requestId = id, parsed)
+        if (error != null) {
+            respondError(id, error)
         }
     }
 
     /** Ends the agent process. The stored agent install survives; only the process tree dies. */
     fun close() {
         abandonPendingAskQuestion(sendCancelledRpc = true)
+        if (agent.id == "cursor") {
+            AskUserBridge.unregister(sessionKey)
+        }
         persistTimeline()
         closedByUser = true
         idleDisconnected = false
@@ -2215,6 +2369,9 @@ class AcpClient(
                 "agent_thought_chunk",
                 "tool_call",
                 "tool_call_update",
+                "tool_call_content_chunk",
+                "terminal_update",
+                "terminal_output_chunk",
                 -> return
             }
         }
@@ -2241,72 +2398,13 @@ class AcpClient(
                 if (block is AcpBlock.Text) appendText(block.text, asThought = true)
             }
 
-            "tool_call" -> {
-                val content = update.optJSONArray("content")
-                val parsed = AcpToolContentParser.parseContent(content)
-                val item = AcpItem.ToolCall(
-                    id = nextItemId(),
-                    toolCallId = update.optString("toolCallId"),
-                    title = update.optString("title").ifBlank { "Tool call" },
-                    kind = update.optString("kind").ifBlank { "other" },
-                    status = update.optString("status").ifBlank { "in_progress" },
-                    detail = parsed.detail,
-                    paths = toolPaths(update),
-                    fileDiffs = parsed.fileDiffs,
-                )
-                _state.update { state ->
-                    val dupIdx = state.items.indexOfLast {
-                        it is AcpItem.ToolCall && it.toolCallId == item.toolCallId
-                    }
-                    if (dupIdx < 0) {
-                        state.copy(items = state.items + item)
-                    } else {
-                        val prev = state.items[dupIdx] as AcpItem.ToolCall
-                        val merged = item.copy(
-                            id = prev.id,
-                            detail = item.detail.ifBlank { prev.detail },
-                            paths = item.paths.ifEmpty { prev.paths },
-                            fileDiffs = mergeToolFileDiffUpdates(prev.fileDiffs, item.fileDiffs),
-                        )
-                        state.copy(
-                            items = state.items.toMutableList().also { it[dupIdx] = merged },
-                        )
-                    }
-                }
-            }
+            "tool_call", "tool_call_update" -> applyToolCallWire(update, appendDetail = false)
 
-            "tool_call_update" -> {
-                val toolCallId = update.optString("toolCallId")
-                _state.update { state ->
-                    state.copy(
-                        items = state.items.map { item ->
-                            if (item !is AcpItem.ToolCall || item.toolCallId != toolCallId) {
-                                item
-                            } else {
-                                val content = update.optJSONArray("content")
-                                val parsed = if (content != null && content.length() > 0) {
-                                    AcpToolContentParser.parseContent(content)
-                                } else {
-                                    null
-                                }
-                                item.copy(
-                                    title = update.optString("title").ifBlank { item.title },
-                                    status = update.optString("status").ifBlank { item.status },
-                                    // Updates carry the tool's content so far, so it replaces
-                                    // rather than appends; an update without content keeps it.
-                                    detail = parsed?.detail?.ifBlank { item.detail } ?: item.detail,
-                                    paths = toolPaths(update).ifEmpty { item.paths },
-                                    fileDiffs = if (parsed?.fileDiffs?.isNotEmpty() == true) {
-                                        mergeToolFileDiffUpdates(item.fileDiffs, parsed.fileDiffs)
-                                    } else {
-                                        item.fileDiffs
-                                    },
-                                )
-                            }
-                        },
-                    )
-                }
-            }
+            "tool_call_content_chunk" -> applyToolCallWire(update, appendDetail = true)
+
+            "terminal_update" -> applyTerminalUpdate(update)
+
+            "terminal_output_chunk" -> applyTerminalOutputChunk(update)
 
             "config_option_update" -> {
                 val options = parseConfigOptions(update.optJSONArray("configOptions"))
@@ -2460,7 +2558,7 @@ class AcpClient(
                 for (i in 0 until list.length()) list.optString(i).takeIf { it.isNotBlank() }?.let(paths::add)
             }
         }
-        update.optJSONArray("content")?.let { content ->
+        AcpToolContentParser.contentArray(update)?.let { content ->
             AcpToolContentParser.pathsFromContent(content).forEach(paths::add)
         }
         // A replayed session (session/load) often has no input at all: agents such as pi-acp
@@ -2471,8 +2569,7 @@ class AcpClient(
             update.opt("rawOutput")?.let { collectPathFields(it, paths, depth = 0) }
         }
         if (paths.isEmpty()) {
-            val text = AcpToolContentParser.parseContent(update.optJSONArray("content")).detail +
-                "\n" + rawOutputText(update.opt("rawOutput"))
+            val text = AcpToolContentParser.detailFromUpdate(update)
             RESULT_PATH.find(text)?.groupValues?.get(1)?.trimEnd('.', ',', ':', ')', '\'', '"')
                 ?.takeIf { it.isNotBlank() && it.length < 300 }
                 ?.let(paths::add)
@@ -2491,13 +2588,137 @@ class AcpClient(
         }
     }
 
-    /** The text parts of a raw tool result (pi-style `{content:[{type:"text",text}]}`). */
-    private fun rawOutputText(value: Any?): String = when (value) {
-        is JSONObject -> value.optJSONArray("content")?.let { arr ->
-            List(arr.length()) { arr.optJSONObject(it)?.optString("text").orEmpty() }.joinToString("\n")
-        }.orEmpty()
-        is String -> value
-        else -> ""
+    /**
+     * Upsert a tool row from `tool_call` / `tool_call_update`, or append streamed
+     * `tool_call_content_chunk` text onto [AcpItem.ToolCall.detail].
+     */
+    private fun applyToolCallWire(update: JSONObject, appendDetail: Boolean) {
+        val toolCallId = update.optString("toolCallId")
+        if (toolCallId.isBlank()) return
+        val content = if (appendDetail) {
+            when (val raw = update.opt("content")) {
+                is JSONArray -> raw
+                is JSONObject -> JSONArray().put(raw)
+                else -> null
+            }
+        } else {
+            AcpToolContentParser.contentArray(update)
+        }
+        val parsed = AcpToolContentParser.parseContent(content)
+        val chunkText = if (appendDetail) {
+            AcpToolContentParser.chunkDetailFromUpdate(update).ifBlank { parsed.detail }
+        } else {
+            ""
+        }
+        _state.update { state ->
+            val dupIdx = state.items.indexOfLast {
+                it is AcpItem.ToolCall && it.toolCallId == toolCallId
+            }
+            if (dupIdx < 0) {
+                val detail = if (appendDetail) {
+                    chunkText
+                } else {
+                    AcpToolContentParser.detailFromUpdate(update)
+                }
+                val item = AcpItem.ToolCall(
+                    id = nextItemId(),
+                    toolCallId = toolCallId,
+                    title = update.optString("title").ifBlank { "Tool call" },
+                    kind = update.optString("kind").ifBlank { "other" },
+                    status = update.optString("status").ifBlank { "in_progress" },
+                    detail = detail,
+                    paths = toolPaths(update),
+                    fileDiffs = parsed.fileDiffs,
+                )
+                registerTerminalRefs(toolCallId, parsed.terminalIds)
+                state.copy(items = state.items + item)
+            } else {
+                val prev = state.items[dupIdx] as AcpItem.ToolCall
+                val nextDetail = if (appendDetail) {
+                    AcpToolContentParser.appendStreamedDetail(prev.detail, chunkText)
+                } else {
+                    AcpToolContentParser.detailFromUpdate(update, prev.detail)
+                }
+                val merged = prev.copy(
+                    title = update.optString("title").ifBlank { prev.title },
+                    kind = update.optString("kind").ifBlank { prev.kind },
+                    status = update.optString("status").ifBlank { prev.status },
+                    detail = nextDetail,
+                    paths = toolPaths(update).ifEmpty { prev.paths },
+                    fileDiffs = if (parsed.fileDiffs.isNotEmpty()) {
+                        mergeToolFileDiffUpdates(prev.fileDiffs, parsed.fileDiffs)
+                    } else {
+                        prev.fileDiffs
+                    },
+                )
+                registerTerminalRefs(toolCallId, parsed.terminalIds)
+                state.copy(items = state.items.toMutableList().also { it[dupIdx] = merged })
+            }
+        }
+        syncLinkedTerminalDetails(parsed.terminalIds)
+    }
+
+    private fun registerTerminalRefs(toolCallId: String, terminalIds: List<String>) {
+        for (terminalId in terminalIds) {
+            toolCallIdsByTerminalId.getOrPut(terminalId) { ConcurrentHashMap.newKeySet() }.add(toolCallId)
+        }
+    }
+
+    private fun toolCallIdsForTerminal(terminalId: String): Set<String> {
+        val linked = toolCallIdsByTerminalId[terminalId]
+        if (linked != null && linked.isNotEmpty()) return linked.toSet()
+        val fallback = _state.value.items.filterIsInstance<AcpItem.ToolCall>()
+            .filter { it.toolCallId == terminalId && it.status == "in_progress" }
+            .map { it.toolCallId }
+            .toSet()
+        if (fallback.isNotEmpty()) {
+            toolCallIdsByTerminalId.getOrPut(terminalId) { ConcurrentHashMap.newKeySet() }.addAll(fallback)
+        }
+        return fallback
+    }
+
+    private fun applyTerminalUpdate(update: JSONObject) {
+        val terminalId = update.optString("terminalId")
+        if (terminalId.isBlank()) return
+        val output = update.optJSONObject("output")
+        if (output != null && !output.isNull("data")) {
+            AcpTerminalOutput.replaceSnapshot(terminalId, output.optString("data"))
+            pushTerminalTextToToolCalls(terminalId)
+        }
+    }
+
+    private fun applyTerminalOutputChunk(update: JSONObject) {
+        val terminalId = update.optString("terminalId")
+        if (terminalId.isBlank()) return
+        val data = update.optString("data")
+        if (data.isBlank()) return
+        AcpTerminalOutput.appendChunk(terminalId, data)
+        pushTerminalTextToToolCalls(terminalId)
+    }
+
+    private fun syncLinkedTerminalDetails(terminalIds: List<String>) {
+        for (terminalId in terminalIds) {
+            pushTerminalTextToToolCalls(terminalId)
+        }
+    }
+
+    private fun pushTerminalTextToToolCalls(terminalId: String) {
+        val text = AcpTerminalOutput.displayText(terminalId)
+        val capped = AcpToolContentParser.appendStreamedDetail("", text)
+        if (capped.isBlank()) return
+        val toolCallIds = toolCallIdsForTerminal(terminalId)
+        if (toolCallIds.isEmpty()) return
+        _state.update { state ->
+            state.copy(
+                items = state.items.map { item ->
+                    if (item is AcpItem.ToolCall && item.toolCallId in toolCallIds) {
+                        item.copy(detail = capped)
+                    } else {
+                        item
+                    }
+                },
+            )
+        }
     }
 
     private fun appendSystemError(message: String) {
@@ -2506,6 +2727,13 @@ class AcpClient(
                 items = state.items + AcpItem.Notice(nextItemId(), message.take(500)),
             )
         }
+    }
+
+    private fun humanizePromptFailureMessage(raw: String): String {
+        if (raw.contains("resource_exhausted", ignoreCase = true)) {
+            return context.getString(R.string.acp_error_resource_exhausted)
+        }
+        return raw
     }
 
     private fun nextItemId(): Long = nextId.getAndIncrement() + 1_000_000
@@ -2534,7 +2762,9 @@ class AcpClient(
             _state.update { it.copy(askQuestionsByUserMessageId = prunedAsks) }
             state = _state.value
         }
-        val durableAsks = prunedAsks.filterValues { it.phase != AskQuestionPhase.Pending }
+        val durableAsks = prunedAsks.mapValues { (_, snapshots) ->
+            snapshots.filter { it.phase != AskQuestionPhase.Pending }
+        }.filterValues { it.isNotEmpty() }
         val snapshot = AcpPersistedTimeline(
             items = state.items,
             checkpoints = AcpTimelineCodec.durableCheckpoints(state.checkpoints),

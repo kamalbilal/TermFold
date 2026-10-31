@@ -56,6 +56,11 @@ object DeviceStorageMirrorStore {
         File(DeviceStorageMounts.mirrorRoot(context), id).deleteRecursively()
     }
 
+    suspend fun clearAll(context: Context) {
+        update(context) { emptyList() }
+        DeviceStorageMounts.mirrorRoot(context).deleteRecursively()
+    }
+
     suspend fun markSynced(context: Context, id: String, atMs: Long = System.currentTimeMillis()) {
         update(context) { list ->
             list.map { if (it.id == id) it.copy(lastSyncedAtMs = atMs) else it }
